@@ -2,6 +2,7 @@
 **Latent Dynamics & Temporal Sequence Control for Geometry Dash**
 
 **Course:** Representation Learning
+
 **Architecture:** World Models (VAE + MDN-RNN + Controller)
 
 ## 1. Project Overview
