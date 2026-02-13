@@ -15,8 +15,8 @@ The system is composed of three distinct neural networks trained sequentially:
 
 ### A. Vision Model (V) - *The Representation Learner*
 * **Type:** Variational Autoencoder (VAE).
-* **Input:** Semantic mask frames ($64 \times 64 \times 3$) from the custom engine.
-* **Function:** Compresses sparse visual data into a low-dimensional latent vector ($z \in \mathbb{R}^{32}$).
+* **Input:** Raw RGB frames ($64 \times 64 \times 3$) from the custom engine, rendered with a semantic color palette.
+* **Function:** Compresses visual data into a low-dimensional latent vector ($z \in \mathbb{R}^{32}$).
 * **Relevance:** Demonstrates unsupervised feature extraction of game entities (spikes, blocks, player) from simplified semantic inputs.
 
 ### B. Memory Model (M) - *The Dynamics Learner*
@@ -32,7 +32,7 @@ The system is composed of three distinct neural networks trained sequentially:
 ## 3. The Custom Engine
 The environment is a custom-written *Geometry Dash* clone designed for accelerated training.
 * **Headless Mode:** Decoupled rendering for high-speed simulation.
-* **Semantic Rendering:** Engine outputs simplified "semantic masks" (Player=Green, Danger=Red, Environment=Blue/Black).
+* **Semantic Color Palette:** Engine renders entities with distinct, meaningful colors (Player=Green, Danger=Red, Environment=Blue/Black), simplifying the visual input for the VAE.
 * **Deterministic Physics:** Fixed framerate and gravity ensure reproducibility, eliminating the need for stochastic modeling.
 
 ## 4. Design Rationale & Engineering Decisions
