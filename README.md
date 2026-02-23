@@ -6,6 +6,9 @@
 **Architecture:** World Models (VAE + GRU + Controller)
 
 ## 1. Project Overview
+
+![V → M → C Architecture Pipeline](docs/architecture_pipeline.png)
+
 DeepDash is a Deep Reinforcement Learning agent designed to master procedural *Geometry Dash* levels within a custom-built game engine. Unlike standard RL approaches that map pixels directly to actions, DeepDash explicitly separates **visual perception** from **control policy**.
 
 This project implements a modified "World Models" architecture, demonstrating how an agent can learn a compressed **latent representation** of the game world and "dream" deterministic future states to optimize its trajectory.
@@ -15,11 +18,15 @@ The system is composed of three distinct neural networks trained sequentially:
 
 ### A. Vision Model (V) - *The Representation Learner*
 * **Type:** Variational Autoencoder (VAE).
-* **Input:** Raw RGB frames ($64 \times 64 \times 3$) from the custom engine, rendered with a semantic color palette.
+* **Input:** Raw RGB frames ($64 \times 64 \times 3$).
 * **Function:** Compresses visual data into a low-dimensional latent vector ($z \in \mathbb{R}^{32}$).
-* **Relevance:** Demonstrates unsupervised feature extraction of game entities (spikes, blocks, player) from simplified semantic inputs.
+* **Optimization:** Utilizes $L_2$ loss for the Phase 1 semantic engine, and $L_1$ loss for Phase 3 real-game footage to enforce high-frequency noise rejection.
+* **Relevance:** Demonstrates unsupervised feature extraction of macroscopic game entities (spikes, blocks, player).
 
 ### B. Memory Model (M) - *The Dynamics Learner*
+
+![GRU vs LSTM Gate Architecture](docs/gru_vs_lstm.png)
+
 * **Type:** Gated Recurrent Unit (GRU).
 * **Function:** Predicts the exact next latent state ($z_{t+1}$) given the current state ($z_t$) and action ($a_t$).
 * **Relevance:** Learns the rigid physics engine and temporal dynamics using a computationally efficient RNN, allowing the agent to "hallucinate" precise trajectories without the complexity of LSTM gates.
@@ -81,7 +88,9 @@ The training pipeline is structured to validate components individually before f
 
 ### Phase 3: The "Transfer" (Real Game Video Dreams)
 * **Goal:** Master the real *Geometry Dash* application.
-* **Method:** Train a new V and M on **video recordings** of the real game to handle "sparky" visual noise. Train the Controller inside the dreams of this new model.
+* **Method:** Train a new V and M on **video recordings** of the real game. To filter high-frequency stochastic noise (particles, weather effects) without contrastive learning bloat, the Vision Model (V) is structurally modified:
+    * **Aggressive Spatial Downsampling:** Deep convolutional layers with Max Pooling to physically eradicate sub-pixel noise prior to the latent bottleneck.
+    * **Objective Function Shift:** Reconstruction loss is switched from $L_2$ (MSE) to $L_1$ (Mean Absolute Error) to prevent the decoder from penalizing localized, transient pixel anomalies.
 * **Deployment:** Run the trained Controller on the real game (Zero-Shot Transfer).
 
 ## 6. Benchmark Metrics
