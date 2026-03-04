@@ -85,8 +85,8 @@ class VAE(nn.Module):
         return self.reparameterize(mu, logvar)
 
 
-def vae_loss(recon_x, x, mu, logvar):
-    """L1 reconstruction + KL divergence."""
+def vae_loss(recon_x, x, mu, logvar, beta=1.0):
+    """L1 reconstruction + beta-weighted KL divergence."""
     recon_loss = nn.functional.l1_loss(recon_x, x, reduction='mean')
     kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-    return recon_loss + kl_loss, recon_loss, kl_loss
+    return recon_loss + beta * kl_loss, recon_loss, kl_loss

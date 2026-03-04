@@ -22,13 +22,13 @@ def make_loader(data_dir, batch_size, shuffle=True):
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=2, pin_memory=True)
 
 
-def train_epoch(model, loader, optimizer, device):
+def train_epoch(model, loader, optimizer, device, beta=1.0):
     model.train()
     total_loss, total_recon, total_kl, n = 0, 0, 0, 0
     for imgs, _ in loader:
         imgs = imgs.to(device)
         recon, mu, logvar = model(imgs)
-        loss, recon_l, kl_l = vae_loss(recon, imgs, mu, logvar)
+        loss, recon_l, kl_l = vae_loss(recon, imgs, mu, logvar, beta=beta)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -41,13 +41,13 @@ def train_epoch(model, loader, optimizer, device):
 
 
 @torch.no_grad()
-def val_epoch(model, loader, device):
+def val_epoch(model, loader, device, beta=1.0):
     model.eval()
     total_loss, total_recon, total_kl, n = 0, 0, 0, 0
     for imgs, _ in loader:
         imgs = imgs.to(device)
         recon, mu, logvar = model(imgs)
-        loss, recon_l, kl_l = vae_loss(recon, imgs, mu, logvar)
+        loss, recon_l, kl_l = vae_loss(recon, imgs, mu, logvar, beta=beta)
         bs = imgs.size(0)
         total_loss += loss.item() * bs
         total_recon += recon_l.item() * bs
@@ -63,6 +63,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--checkpoint-dir", default="checkpoints")
+    parser.add_argument("--beta-max", type=float, default=0.1, help="Max KL weight (default: 0.1)")
+    parser.add_argument("--beta-warmup", type=int, default=20, help="Epochs to linearly anneal beta from 0 to beta-max")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -107,12 +109,15 @@ def main():
     log_path = ckpt_dir / "train_log.csv"
     log_file = open(log_path, "w", newline="")
     log_writer = csv.writer(log_file)
-    log_writer.writerow(["epoch", "train_loss", "train_recon", "train_kl", "val_loss", "val_recon", "val_kl", "lr", "time_s"])
+    log_writer.writerow(["epoch", "train_loss", "train_recon", "train_kl", "val_loss", "val_recon", "val_kl", "beta", "lr", "time_s"])
+
+    print(f"Beta annealing: 0 -> {args.beta_max} over {args.beta_warmup} epochs")
 
     for epoch in range(1, args.epochs + 1):
+        beta = min(args.beta_max, args.beta_max * epoch / args.beta_warmup)
         t0 = time.time()
-        train_loss, train_recon, train_kl = train_epoch(model, train_loader, optimizer, device)
-        val_loss, val_recon, val_kl = val_epoch(model, val_loader, device)
+        train_loss, train_recon, train_kl = train_epoch(model, train_loader, optimizer, device, beta=beta)
+        val_loss, val_recon, val_kl = val_epoch(model, val_loader, device, beta=beta)
         scheduler.step(val_loss)
         dt = time.time() - t0
         lr = optimizer.param_groups[0]["lr"]
@@ -121,10 +126,10 @@ def main():
             f"Epoch {epoch:3d}/{args.epochs} ({dt:.1f}s) | "
             f"Train: {train_loss:.4f} (recon={train_recon:.4f}, kl={train_kl:.4f}) | "
             f"Val: {val_loss:.4f} (recon={val_recon:.4f}, kl={val_kl:.4f}) | "
-            f"LR: {lr:.1e}"
+            f"beta={beta:.4f} LR: {lr:.1e}"
         )
 
-        log_writer.writerow([epoch, f"{train_loss:.6f}", f"{train_recon:.6f}", f"{train_kl:.6f}", f"{val_loss:.6f}", f"{val_recon:.6f}", f"{val_kl:.6f}", f"{lr:.1e}", f"{dt:.1f}"])
+        log_writer.writerow([epoch, f"{train_loss:.6f}", f"{train_recon:.6f}", f"{train_kl:.6f}", f"{val_loss:.6f}", f"{val_recon:.6f}", f"{val_kl:.6f}", f"{beta:.4f}", f"{lr:.1e}", f"{dt:.1f}"])
         log_file.flush()
 
         if val_loss < best_val_loss:
