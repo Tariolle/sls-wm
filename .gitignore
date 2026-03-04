@@ -1,3 +1,6 @@
 *.json
 __pycache__/
 .venv/
+data/frames/
+data/train/
+data/val/
