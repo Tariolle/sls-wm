@@ -4,3 +4,4 @@ __pycache__/
 data/frames/
 data/train/
 data/val/
+eval_output/
