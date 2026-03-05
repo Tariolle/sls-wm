@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 
-LATENT_DIM = 32
+LATENT_DIM = 256
 IMG_CHANNELS = 1
 # Spatial dims after encoder (H, W): 96/16=6, 176/16=11
 ENCODER_SPATIAL = (6, 11)
@@ -85,8 +85,13 @@ class VAE(nn.Module):
         return self.reparameterize(mu, logvar)
 
 
-def vae_loss(recon_x, x, mu, logvar, beta=1.0):
-    """L1 reconstruction + beta-weighted KL divergence."""
-    recon_loss = nn.functional.l1_loss(recon_x, x, reduction='mean')
+def vae_loss(recon_x, x, mu, logvar, beta=1.0, pos_weight=20.0):
+    """Weighted BCE reconstruction + beta-weighted KL divergence.
+
+    pos_weight compensates for sparse edge maps (~5% white pixels)
+    by penalizing missed edges much more than false positives.
+    """
+    weight = torch.where(x > 0.1, pos_weight, 1.0)
+    recon_loss = nn.functional.binary_cross_entropy(recon_x, x, weight=weight, reduction='mean')
     kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
     return recon_loss + beta * kl_loss, recon_loss, kl_loss
