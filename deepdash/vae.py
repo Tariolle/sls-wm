@@ -37,7 +37,7 @@ class Encoder(nn.Module):
         return self.fc_mu(flat), self.fc_logvar(flat), [s1, s2, s3]
 
 
-SKIP_DROPOUT = 0.4
+SKIP_DROPOUT = 0.7
 
 
 class Decoder(nn.Module):
