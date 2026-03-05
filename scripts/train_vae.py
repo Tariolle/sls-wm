@@ -118,7 +118,7 @@ def main():
         t0 = time.time()
         train_loss, train_recon, train_kl = train_epoch(model, train_loader, optimizer, device, beta=beta)
         val_loss, val_recon, val_kl = val_epoch(model, val_loader, device, beta=beta)
-        scheduler.step(val_loss)
+        scheduler.step(val_recon)
         dt = time.time() - t0
         lr = optimizer.param_groups[0]["lr"]
 
