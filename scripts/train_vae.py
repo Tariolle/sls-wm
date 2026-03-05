@@ -17,7 +17,7 @@ from deepdash.vae import VAE, vae_loss
 
 def make_loader(data_dir, batch_size, shuffle=True):
     """Load PNG frames as normalized [0,1] tensors."""
-    transform = transforms.Compose([transforms.ToTensor()])
+    transform = transforms.Compose([transforms.Grayscale(), transforms.ToTensor()])
     dataset = ImageFolder(data_dir, transform=transform)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=2, pin_memory=True)
 

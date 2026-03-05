@@ -13,15 +13,15 @@ from deepdash.vae import VAE
 
 
 def load_image(path):
-    """Load PNG as [0,1] float tensor (C, H, W)."""
-    img = np.array(Image.open(path)).astype(np.float32) / 255.0
-    return torch.from_numpy(img).permute(2, 0, 1)
+    """Load grayscale PNG as [0,1] float tensor (1, H, W)."""
+    img = np.array(Image.open(path).convert("L")).astype(np.float32) / 255.0
+    return torch.from_numpy(img).unsqueeze(0)
 
 
 def tensor_to_image(t):
-    """Convert (C, H, W) tensor to PIL Image."""
-    arr = (t.clamp(0, 1).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-    return Image.fromarray(arr)
+    """Convert (1, H, W) grayscale tensor to PIL Image."""
+    arr = (t.clamp(0, 1).squeeze(0).cpu().numpy() * 255).astype(np.uint8)
+    return Image.fromarray(arr, mode="L")
 
 
 def main():
@@ -61,7 +61,7 @@ def main():
             recon_pil = tensor_to_image(recon[0])
 
             # Side-by-side
-            combined = Image.new("RGB", (orig_pil.width * 2, orig_pil.height))
+            combined = Image.new("L", (orig_pil.width * 2, orig_pil.height))
             combined.paste(orig_pil, (0, 0))
             combined.paste(recon_pil, (orig_pil.width, 0))
             combined.save(out_dir / f"sample_{i:02d}.png")

@@ -33,9 +33,11 @@ def extract_frames(video_dir: str, output_dir: str, every_n: int = 5, crop_top: 
                 cropped = frame[crop_top:, :, :]
                 # Resize to target
                 resized = cv2.resize(cropped, target_size, interpolation=cv2.INTER_AREA)
+                # Convert to grayscale
+                gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
                 # Save as PNG
                 filename = f"{level_name}_{frame_idx:06d}.png"
-                cv2.imwrite(str(output_dir / filename), resized)
+                cv2.imwrite(str(output_dir / filename), gray)
                 saved += 1
             frame_idx += 1
 
@@ -49,7 +51,7 @@ def extract_frames(video_dir: str, output_dir: str, every_n: int = 5, crop_top: 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract frames from gameplay videos")
-    parser.add_argument("--video-dir", default="data/videos", help="Directory with .mp4 files")
+    parser.add_argument("--video-dir", default="data/videos/Standard", help="Directory with .mp4 files")
     parser.add_argument("--output-dir", default="data/frames", help="Output directory for frames")
     parser.add_argument("--every-n", type=int, default=5, help="Sample every Nth frame (default: 5)")
     args = parser.parse_args()

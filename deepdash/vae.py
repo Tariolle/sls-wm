@@ -11,7 +11,7 @@ import torch.nn as nn
 
 
 LATENT_DIM = 32
-IMG_CHANNELS = 3
+IMG_CHANNELS = 1
 # Spatial dims after encoder (H, W): 96/16=6, 176/16=11
 ENCODER_SPATIAL = (6, 11)
 ENCODER_OUT_CHANNELS = 256
