@@ -2,8 +2,8 @@
 
 Replaces the Gaussian latent with a discrete codebook.
 No KL divergence = no blurriness from posterior averaging.
-Spatial latent: 8x8 grid of codebook indices (64 tokens per frame).
-Uses EMA codebook updates for training stability.
+Spatial latent: 6x6 grid of codebook indices (36 tokens per frame).
+Same encoder backbone as the working VAE, minus the last conv layer.
 """
 
 import torch
@@ -17,34 +17,19 @@ IMG_CHANNELS = 1
 
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings=NUM_EMBEDDINGS, embedding_dim=EMBEDDING_DIM,
-                 commitment_cost=0.25, decay=0.99, restart_threshold=1.0):
+                 commitment_cost=0.25):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.commitment_cost = commitment_cost
-        self.decay = decay
-        self.restart_threshold = restart_threshold
 
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
-        self.embedding.weight.data.normal_()
-        self.embedding.weight.requires_grad = False  # updated via EMA, not gradients
-
-        # EMA tracking
-        self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
-        self.register_buffer('ema_weight', self.embedding.weight.data.clone())
-        self.register_buffer('initialized', torch.tensor(False))
+        self.embedding.weight.data.uniform_(-1 / num_embeddings, 1 / num_embeddings)
 
     def forward(self, z_e):
         # z_e: (B, D, H, W)
         B, D, H, W = z_e.shape
         z_e_flat = z_e.permute(0, 2, 3, 1).reshape(-1, D)
-
-        # Initialize codebook from first batch of encoder outputs
-        if self.training and not self.initialized:
-            rand_idx = torch.randint(0, z_e_flat.shape[0], (self.num_embeddings,))
-            self.embedding.weight.data.copy_(z_e_flat[rand_idx].detach())
-            self.ema_weight.copy_(self.embedding.weight.data)
-            self.initialized.fill_(True)
 
         # Squared distances to codebook vectors
         distances = (
@@ -55,90 +40,47 @@ class VectorQuantizer(nn.Module):
 
         # Nearest codebook entry
         indices = distances.argmin(dim=1)
-        encodings = torch.zeros(indices.shape[0], self.num_embeddings, device=z_e.device)
-        encodings.scatter_(1, indices.unsqueeze(1), 1)
-
         z_q_flat = self.embedding(indices)
 
-        # EMA codebook update (training only)
-        if self.training:
-            self.ema_cluster_size.mul_(self.decay).add_(
-                encodings.sum(0), alpha=1 - self.decay
-            )
-            dw = encodings.t() @ z_e_flat
-            self.ema_weight.mul_(self.decay).add_(dw, alpha=1 - self.decay)
-
-            # Laplace smoothing to avoid division by zero
-            n = self.ema_cluster_size.sum()
-            cluster_size = (
-                (self.ema_cluster_size + 1e-5) /
-                (n + self.num_embeddings * 1e-5) * n
-            )
-            self.embedding.weight.data.copy_(self.ema_weight / cluster_size.unsqueeze(1))
-
-            # Dead code revival: reinitialize unused entries from random encoder outputs
-            dead = self.ema_cluster_size < self.restart_threshold
-            if dead.any():
-                n_dead = dead.sum().item()
-                rand_idx = torch.randint(0, z_e_flat.shape[0], (n_dead,))
-                self.embedding.weight.data[dead] = z_e_flat[rand_idx].detach()
-                self.ema_cluster_size[dead] = self.restart_threshold
-                self.ema_weight[dead] = z_e_flat[rand_idx].detach() * self.restart_threshold
-
-        # Commitment loss only (codebook updated via EMA, not gradient)
+        # Codebook loss: move codebook vectors towards encoder outputs
+        vq_loss = (z_q_flat - z_e_flat.detach()).pow(2).mean()
+        # Commitment loss: encourage encoder to commit to codebook entries
         commit_loss = (z_e_flat - z_q_flat.detach()).pow(2).mean()
 
         # Straight-through estimator
         z_q = z_e + (z_q_flat.reshape(B, H, W, D).permute(0, 3, 1, 2) - z_e).detach()
 
-        return z_q, self.commitment_cost * commit_loss, indices.reshape(B, H, W)
-
-
-class ResBlock(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
-
-    def forward(self, x):
-        return x + torch.relu(self.conv2(torch.relu(self.conv1(x))))
+        return z_q, vq_loss + self.commitment_cost * commit_loss, indices.reshape(B, H, W)
 
 
 class Encoder(nn.Module):
     def __init__(self, img_channels=IMG_CHANNELS, embedding_dim=EMBEDDING_DIM):
         super().__init__()
-        # 64x64 -> 32x32 -> 16x16 -> 8x8
-        self.conv1 = nn.Conv2d(img_channels, 64, 4, stride=2, padding=1)
-        self.conv2 = nn.Conv2d(64, 128, 4, stride=2, padding=1)
-        self.conv3 = nn.Conv2d(128, 256, 4, stride=2, padding=1)
-        self.res1 = ResBlock(256)
-        self.res2 = ResBlock(256)
-        self.proj = nn.Conv2d(256, embedding_dim, 1)
+        # Same no-padding convs as VAE, minus the last layer
+        # 64 -> 31 -> 14 -> 6 (stops here instead of going to 2)
+        self.conv1 = nn.Conv2d(img_channels, 32, 4, stride=2)
+        self.conv2 = nn.Conv2d(32, 64, 4, stride=2)
+        self.conv3 = nn.Conv2d(64, 128, 4, stride=2)
+        self.proj = nn.Conv2d(128, embedding_dim, 1)
 
     def forward(self, x):
         x = torch.relu(self.conv1(x))
         x = torch.relu(self.conv2(x))
         x = torch.relu(self.conv3(x))
-        x = self.res1(x)
-        x = self.res2(x)
-        return self.proj(x)  # (B, embedding_dim, 8, 8)
+        return self.proj(x)  # (B, embedding_dim, 6, 6)
 
 
 class Decoder(nn.Module):
     def __init__(self, img_channels=IMG_CHANNELS, embedding_dim=EMBEDDING_DIM):
         super().__init__()
-        self.proj = nn.Conv2d(embedding_dim, 256, 1)
-        self.res1 = ResBlock(256)
-        self.res2 = ResBlock(256)
-        # 8x8 -> 16x16 -> 32x32 -> 64x64
-        self.deconv1 = nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1)
-        self.deconv2 = nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1)
-        self.deconv3 = nn.ConvTranspose2d(64, img_channels, 4, stride=2, padding=1)
+        self.proj = nn.Conv2d(embedding_dim, 128, 1)
+        # 6 -> 14 -> 31 -> 64 (mirrors the encoder)
+        self.deconv1 = nn.ConvTranspose2d(128, 64, 4, stride=2)
+        self.deconv2 = nn.ConvTranspose2d(64, 32, 5, stride=2)
+        self.deconv3 = nn.ConvTranspose2d(32, img_channels, 4, stride=2)
 
     def forward(self, z_q):
         x = torch.relu(self.proj(z_q))
-        x = self.res1(x)
-        x = self.res2(x)
         x = torch.relu(self.deconv1(x))
         x = torch.relu(self.deconv2(x))
         return torch.sigmoid(self.deconv3(x))
