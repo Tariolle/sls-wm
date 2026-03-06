@@ -33,16 +33,25 @@ def main():
     parser.add_argument("--num-samples", type=int, default=8)
     parser.add_argument("--model", choices=["vae", "vqvae"], default="vqvae")
     parser.add_argument("--embedding-dim", type=int, default=64, help="Codebook vector dimension (must match checkpoint)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for frame selection")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if args.model == "vqvae":
-        model = VQVAE(embedding_dim=args.embedding_dim)
-    else:
-        model = VAE()
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device, weights_only=True))
-    model.to(device)
-    model.eval()
+
+    def load_model(checkpoint_path):
+        if args.model == "vqvae":
+            m = VQVAE(embedding_dim=args.embedding_dim)
+        else:
+            m = VAE()
+        m.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
+        m.to(device)
+        m.eval()
+        return m
+
+    model_best = load_model(args.checkpoint)
+    ckpt_dir = Path(args.checkpoint).parent
+    final_path = ckpt_dir / "vqvae_final.pt" if args.model == "vqvae" else ckpt_dir / "vae_final.pt"
+    model_final = load_model(str(final_path)) if final_path.exists() else None
 
     data_path = Path(args.data_dir)
     pngs = sorted(data_path.rglob("*.png"))
@@ -50,26 +59,51 @@ def main():
         print(f"No PNGs found in {data_path}")
         return
 
-    step = max(1, len(pngs) // args.num_samples)
-    selected = pngs[::step][:args.num_samples]
+    import random
+    random.seed(args.seed)
+    selected = random.sample(pngs, min(args.num_samples, len(pngs)))
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(exist_ok=True)
 
+    originals, recons_best, recons_final = [], [], []
     with torch.no_grad():
         for i, path in enumerate(selected):
             img = load_image(path).unsqueeze(0).to(device)
-            recon = model(img)[0]  # works for both VAE and VQVAE (first output is always recon)
 
             orig_pil = tensor_to_image(img[0])
-            recon_pil = tensor_to_image(recon[0])
+            recon_best_pil = tensor_to_image(model_best(img)[0][0])
+            originals.append(orig_pil)
+            recons_best.append(recon_best_pil)
+
+            if model_final:
+                recons_final.append(tensor_to_image(model_final(img)[0][0]))
 
             combined = Image.new("L", (orig_pil.width * 2, orig_pil.height))
             combined.paste(orig_pil, (0, 0))
-            combined.paste(recon_pil, (orig_pil.width, 0))
+            combined.paste(recon_best_pil, (orig_pil.width, 0))
             combined.save(out_dir / f"sample_{i:02d}.png")
 
     print(f"Saved {len(selected)} comparisons to {out_dir}/")
+
+    import matplotlib.pyplot as plt
+    n = len(originals)
+    rows = 3 if model_final else 2
+    fig, axes = plt.subplots(rows, n, figsize=(n * 2, rows * 2))
+    for i in range(n):
+        axes[0, i].imshow(originals[i], cmap="gray")
+        axes[0, i].axis("off")
+        axes[1, i].imshow(recons_best[i], cmap="gray")
+        axes[1, i].axis("off")
+        if model_final:
+            axes[2, i].imshow(recons_final[i], cmap="gray")
+            axes[2, i].axis("off")
+    axes[0, 0].set_title("Original", fontsize=10)
+    axes[1, 0].set_title("Best", fontsize=10)
+    if model_final:
+        axes[2, 0].set_title("Final", fontsize=10)
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":
