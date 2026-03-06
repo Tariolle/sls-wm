@@ -17,12 +17,13 @@ IMG_CHANNELS = 1
 
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings=NUM_EMBEDDINGS, embedding_dim=EMBEDDING_DIM,
-                 commitment_cost=0.25, decay=0.99):
+                 commitment_cost=0.25, decay=0.99, restart_threshold=1.0):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.commitment_cost = commitment_cost
         self.decay = decay
+        self.restart_threshold = restart_threshold
 
         self.embedding = nn.Embedding(num_embeddings, embedding_dim)
         self.embedding.weight.data.normal_()
@@ -66,6 +67,15 @@ class VectorQuantizer(nn.Module):
                 (n + self.num_embeddings * 1e-5) * n
             )
             self.embedding.weight.data.copy_(self.ema_weight / cluster_size.unsqueeze(1))
+
+            # Dead code revival: reinitialize unused entries from random encoder outputs
+            dead = self.ema_cluster_size < self.restart_threshold
+            if dead.any():
+                n_dead = dead.sum().item()
+                rand_idx = torch.randint(0, z_e_flat.shape[0], (n_dead,))
+                self.embedding.weight.data[dead] = z_e_flat[rand_idx].detach()
+                self.ema_cluster_size[dead] = self.restart_threshold
+                self.ema_weight[dead] = z_e_flat[rand_idx].detach() * self.restart_threshold
 
         # Commitment loss only (codebook updated via EMA, not gradient)
         commit_loss = (z_e_flat - z_q_flat.detach()).pow(2).mean()
