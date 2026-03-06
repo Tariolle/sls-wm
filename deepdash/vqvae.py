@@ -2,8 +2,8 @@
 
 Replaces the Gaussian latent with a discrete codebook.
 No KL divergence = no blurriness from posterior averaging.
-Spatial latent: 6x6 grid of codebook indices (36 tokens per frame).
-Same encoder backbone as the working VAE, minus the last conv layer.
+Spatial latent: 14x14 grid of codebook indices (196 tokens per frame).
+No-padding encoder: 64 -> 31 -> 14. L1 reconstruction loss.
 """
 
 import torch
@@ -56,34 +56,29 @@ class VectorQuantizer(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, img_channels=IMG_CHANNELS, embedding_dim=EMBEDDING_DIM):
         super().__init__()
-        # Same no-padding convs as VAE, minus the last layer
-        # 64 -> 31 -> 14 -> 6 (stops here instead of going to 2)
+        # No-padding convs: 64 -> 31 -> 14
         self.conv1 = nn.Conv2d(img_channels, 32, 4, stride=2)
         self.conv2 = nn.Conv2d(32, 64, 4, stride=2)
-        self.conv3 = nn.Conv2d(64, 128, 4, stride=2)
-        self.proj = nn.Conv2d(128, embedding_dim, 1)
+        self.proj = nn.Conv2d(64, embedding_dim, 1)
 
     def forward(self, x):
         x = torch.relu(self.conv1(x))
         x = torch.relu(self.conv2(x))
-        x = torch.relu(self.conv3(x))
-        return self.proj(x)  # (B, embedding_dim, 6, 6)
+        return self.proj(x)  # (B, embedding_dim, 14, 14)
 
 
 class Decoder(nn.Module):
     def __init__(self, img_channels=IMG_CHANNELS, embedding_dim=EMBEDDING_DIM):
         super().__init__()
-        self.proj = nn.Conv2d(embedding_dim, 128, 1)
-        # 6 -> 14 -> 31 -> 64 (mirrors the encoder)
-        self.deconv1 = nn.ConvTranspose2d(128, 64, 4, stride=2)
-        self.deconv2 = nn.ConvTranspose2d(64, 32, 5, stride=2)
-        self.deconv3 = nn.ConvTranspose2d(32, img_channels, 4, stride=2)
+        self.proj = nn.Conv2d(embedding_dim, 64, 1)
+        # 14 -> 31 -> 64 (mirrors the encoder)
+        self.deconv1 = nn.ConvTranspose2d(64, 32, 5, stride=2)
+        self.deconv2 = nn.ConvTranspose2d(32, img_channels, 4, stride=2)
 
     def forward(self, z_q):
         x = torch.relu(self.proj(z_q))
         x = torch.relu(self.deconv1(x))
-        x = torch.relu(self.deconv2(x))
-        return torch.sigmoid(self.deconv3(x))
+        return torch.sigmoid(self.deconv2(x))
 
 
 class VQVAE(nn.Module):
