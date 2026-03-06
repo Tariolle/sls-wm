@@ -2,8 +2,8 @@
 
 Replaces the Gaussian latent with a discrete codebook.
 No KL divergence = no blurriness from posterior averaging.
-Spatial latent: 14x14 grid of codebook indices (196 tokens per frame).
-Same encoder backbone as the working VAE, minus the last two conv layers.
+Spatial latent: 6x6 grid of codebook indices (36 tokens per frame).
+Same encoder backbone as the working VAE, minus the last conv layer.
 """
 
 import torch
@@ -56,30 +56,34 @@ class VectorQuantizer(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, img_channels=IMG_CHANNELS, embedding_dim=EMBEDDING_DIM):
         super().__init__()
-        # Same no-padding convs as VAE, minus the last two layers
-        # 64 -> 31 -> 14 (stops here instead of going to 6 -> 2)
+        # Same no-padding convs as VAE, minus the last layer
+        # 64 -> 31 -> 14 -> 6 (stops here instead of going to 2)
         self.conv1 = nn.Conv2d(img_channels, 32, 4, stride=2)
         self.conv2 = nn.Conv2d(32, 64, 4, stride=2)
-        self.proj = nn.Conv2d(64, embedding_dim, 1)
+        self.conv3 = nn.Conv2d(64, 128, 4, stride=2)
+        self.proj = nn.Conv2d(128, embedding_dim, 1)
 
     def forward(self, x):
         x = torch.relu(self.conv1(x))
         x = torch.relu(self.conv2(x))
-        return self.proj(x)  # (B, embedding_dim, 14, 14)
+        x = torch.relu(self.conv3(x))
+        return self.proj(x)  # (B, embedding_dim, 6, 6)
 
 
 class Decoder(nn.Module):
     def __init__(self, img_channels=IMG_CHANNELS, embedding_dim=EMBEDDING_DIM):
         super().__init__()
-        self.proj = nn.Conv2d(embedding_dim, 64, 1)
-        # 14 -> 31 -> 64 (mirrors the encoder)
-        self.deconv1 = nn.ConvTranspose2d(64, 32, 5, stride=2)
-        self.deconv2 = nn.ConvTranspose2d(32, img_channels, 4, stride=2)
+        self.proj = nn.Conv2d(embedding_dim, 128, 1)
+        # 6 -> 14 -> 31 -> 64 (mirrors the encoder)
+        self.deconv1 = nn.ConvTranspose2d(128, 64, 4, stride=2)
+        self.deconv2 = nn.ConvTranspose2d(64, 32, 5, stride=2)
+        self.deconv3 = nn.ConvTranspose2d(32, img_channels, 4, stride=2)
 
     def forward(self, z_q):
         x = torch.relu(self.proj(z_q))
         x = torch.relu(self.deconv1(x))
-        return torch.sigmoid(self.deconv2(x))
+        x = torch.relu(self.deconv2(x))
+        return torch.sigmoid(self.deconv3(x))
 
 
 class VQVAE(nn.Module):
@@ -107,6 +111,6 @@ class VQVAE(nn.Module):
 
 
 def vqvae_loss(recon_x, x, vq_loss):
-    """MSE reconstruction + VQ commitment loss."""
-    recon_loss = torch.nn.functional.mse_loss(recon_x, x, reduction='sum') / x.size(0)
+    """L1 reconstruction + VQ commitment loss."""
+    recon_loss = torch.nn.functional.l1_loss(recon_x, x, reduction='sum') / x.size(0)
     return recon_loss + vq_loss, recon_loss, vq_loss
