@@ -1,4 +1,4 @@
-"""Evaluate VAE: generate side-by-side original vs reconstruction images."""
+"""Evaluate VAE or VQ-VAE: generate side-by-side original vs reconstruction images."""
 
 import argparse
 import sys
@@ -10,6 +10,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.vae import VAE
+from deepdash.vqvae import VQVAE
 
 
 def load_image(path):
@@ -25,27 +26,29 @@ def tensor_to_image(t):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate VAE reconstructions")
-    parser.add_argument("--checkpoint", default="checkpoints/vae_best.pt")
+    parser = argparse.ArgumentParser(description="Evaluate VAE/VQ-VAE reconstructions")
+    parser.add_argument("--checkpoint", default="checkpoints/vqvae_best.pt")
     parser.add_argument("--data-dir", default="data/val")
     parser.add_argument("--output-dir", default="eval_output")
     parser.add_argument("--num-samples", type=int, default=8)
+    parser.add_argument("--model", choices=["vae", "vqvae"], default="vqvae")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = VAE()
+    if args.model == "vqvae":
+        model = VQVAE()
+    else:
+        model = VAE()
     model.load_state_dict(torch.load(args.checkpoint, map_location=device, weights_only=True))
     model.to(device)
     model.eval()
 
-    # Find PNG files (may be in a subdirectory from ImageFolder restructuring)
     data_path = Path(args.data_dir)
     pngs = sorted(data_path.rglob("*.png"))
     if not pngs:
         print(f"No PNGs found in {data_path}")
         return
 
-    # Sample evenly across the dataset
     step = max(1, len(pngs) // args.num_samples)
     selected = pngs[::step][:args.num_samples]
 
@@ -55,12 +58,11 @@ def main():
     with torch.no_grad():
         for i, path in enumerate(selected):
             img = load_image(path).unsqueeze(0).to(device)
-            recon, _, _ = model(img)
+            recon = model(img)[0]
 
             orig_pil = tensor_to_image(img[0])
             recon_pil = tensor_to_image(recon[0])
 
-            # Side-by-side
             combined = Image.new("L", (orig_pil.width * 2, orig_pil.height))
             combined.paste(orig_pil, (0, 0))
             combined.paste(recon_pil, (orig_pil.width, 0))
