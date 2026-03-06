@@ -98,7 +98,7 @@ def vae_loss(recon_x, x, mu, logvar, kl_tolerance=0.5, edge_weight=5.0):
         edges = edges / (edges.max() + 1e-8)  # normalize to [0, 1]
         weight = 1.0 + edge_weight * edges
     recon_loss = torch.sum(torch.abs(recon_x - x) * weight, dim=[1, 2, 3]).mean()
-    # KL: sum over latent dims per sample, apply tolerance floor, mean over batch
+    # KL disabled (pure autoencoder) to diagnose reconstruction capacity
     kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
-    kl_loss = torch.maximum(kl_per_sample, torch.tensor(kl_tolerance * mu.size(1))).mean()
+    kl_loss = torch.tensor(0.0, device=recon_x.device)
     return recon_loss + kl_loss, recon_loss, kl_loss
