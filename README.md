@@ -1,9 +1,10 @@
 # DeepDash
+
 **Latent Dynamics & Temporal Sequence Control for Geometry Dash**
 
 **Course:** Representation Learning
 
-**Architecture:** World Models (VAE + GRU + Controller)
+**Architecture:** World Models (VQ-VAE + Transformer + Controller)
 
 ## 1. Project Overview
 
@@ -14,92 +15,118 @@ DeepDash is a Deep Reinforcement Learning agent designed to master *Geometry Das
 This project implements a modified "World Models" architecture, demonstrating how an agent can learn a compressed **latent representation** of the real game world and "dream" deterministic future states to optimize its trajectory.
 
 ## 2. Technical Architecture
+
 The system is composed of three distinct neural networks trained sequentially:
 
-### A. Vision Model (V) - *The Representation Learner*
-* **Type:** Variational Autoencoder (VAE).
-* **Input:** Preprocessed RGB frames ($176 \times 96 \times 3$) captured from real *Geometry Dash* gameplay.
+### A. Vision Model (V) - *The Tokenizer*
+
+* **Type:** Vector Quantized Variational Autoencoder (VQ-VAE).
+* **Input:** Preprocessed grayscale Sobel edge maps ($64 \times 64 \times 1$) captured from real *Geometry Dash* gameplay.
 * **Preprocessing Pipeline:**
 
-| Raw frame (640×360) | UI cropped (640×342) | Downscaled (176×96) |
+| Raw frame (640x360) | Square crop (344x344) | Sobel edges (64x64) |
 |:---:|:---:|:---:|
 | ![Original](docs/preprocessing_1_original.png) | ![Cropped](docs/preprocessing_2_cropped.png) | ![Downscaled](docs/preprocessing_3_downscaled.png) |
 
-  Raw 360p footage is first cropped (top 18px removed) to discard the UI bar (progress indicator, percentage), then resized to $176 \times 96$. The rectangular format preserves the game's native aspect ratio — unlike the original paper's $64 \times 64$ square input — preventing spatial distortion of the horizontal obstacle field. The UI is deliberately excluded to prevent the model from memorizing level layouts via the progress indicator, forcing it to learn **reactive dynamics** rather than positional lookup.
-* **Function:** Compresses visual data into a low-dimensional latent vector ($z \in \mathbb{R}^{32}$).
-* **Noise Filtering:** Real game footage contains high-frequency stochastic noise (particles, weather effects, visual polish). To reject this without contrastive learning bloat, the Vision Model is structurally modified:
-    * **Aggressive Spatial Downsampling:** Deep convolutional layers with Max Pooling to physically eradicate sub-pixel noise prior to the latent bottleneck.
-    * **$L_1$ Reconstruction Loss:** Mean Absolute Error prevents the decoder from over-penalizing localized, transient pixel anomalies (unlike $L_2$ which amplifies outlier noise).
-* **Relevance:** Demonstrates unsupervised feature extraction of macroscopic game entities (spikes, blocks, player) from visually noisy real-world footage.
+  Raw 360p footage is cropped to a 344x344 square at (220, 16) — bottom-aligned to discard the UI progress bar, player flush to the left edge, maximizing forward obstacle visibility. Sobel edge detection is applied at full resolution before downscaling to $64 \times 64$ with `cv2.INTER_AREA`. The UI is deliberately excluded to prevent the model from memorizing level layouts via the progress indicator, forcing it to learn **reactive dynamics** rather than positional lookup.
+
+* **Function:** Tokenizes visual data into a $6 \times 6$ grid of discrete codebook indices (36 tokens per frame, vocabulary of 512). Each token is a discrete symbol, not a continuous vector — enabling **101x compression** (324 bits vs 32,768 bits per frame).
+* **Noise Filtering:** Real game footage contains high-frequency stochastic noise (particles, weather effects, visual polish). Sobel edge detection extracts only structural boundaries (platforms, spikes, player outline), and the discrete codebook further discards sub-token noise by snapping encoder outputs to the nearest learned prototype.
+* **Why VQ-VAE over beta-VAE:** A standard beta-VAE was extensively evaluated first (beta=0/0.1/1.0, cyclical annealing, MSE/L1/BCE, latent dims 32-64). All configurations produced fundamentally blurry reconstructions due to Gaussian posterior averaging — spikes were indistinguishable from blocks. For a precision rhythm game requiring pixel-accurate obstacle recognition, this is a dealbreaker. VQ-VAE's discrete codebook eliminates this blurriness entirely.
 
 ### B. Memory Model (M) - *The Dynamics Learner*
 
-![GRU vs LSTM Gate Architecture](docs/gru_vs_lstm.png)
-
-* **Type:** Gated Recurrent Unit (GRU).
-* **Function:** Predicts the next latent state ($z_{t+1}$) given the current state ($z_t$) and action ($a_t$).
-* **Relevance:** Learns the game's physics and temporal dynamics using a computationally efficient RNN, allowing the agent to "hallucinate" precise trajectories without the complexity of LSTM gates.
+* **Type:** Transformer (autoregressive, on discrete tokens).
+* **Input:** Sequence of 36 codebook indices per frame + action token.
+* **Function:** Predicts the next frame's 36 tokens given the current tokenized state and action — a classification task over vocabulary 512, not continuous regression.
+* **Why Transformer over GRU:** With a GRU, the VQ-VAE's quantized vectors must be flattened into a continuous input (36 x 32d = 1,152 floats), yielding only 3.6x compression over the raw frame — making the vision model a near pass-through. A Transformer operates directly on discrete token indices, preserving the full 101x compression. The Transformer also naturally handles action conditioning via attention and captures long-range spatial dependencies across the token grid. This aligns with modern world model architectures (IRIS, GENIE) that use Transformers on VQ-VAE tokens.
+* **Relevance:** Learns the game's physics and temporal dynamics entirely in discrete latent space, allowing the agent to "hallucinate" precise trajectories as token sequences.
 
 ### C. Controller (C) - *The Agent*
+
 * **Type:** Linear Single-Layer Perceptron.
-* **Function:** Maps the concatenated state vector ($z_t, h_t$) to an optimal action (Jump / No Jump).
+* **Function:** Maps the Transformer's hidden state to an optimal action (Jump / No Jump).
 * **Environment:** **Latent Dream.** The agent is trained entirely inside the hallucinated environment generated by the Memory Model, allowing for massive parallelization (thousands of episodes per second) before being deployed zero-shot into the real game.
 * **Optimization:** Covariance Matrix Adaptation Evolution Strategy (CMA-ES).
 
 ## 3. Design Rationale & Engineering Decisions
+
 This implementation optimizes the original World Models architecture (Ha & Schmidhuber, 2018) to align with the specific constraints of the *Geometry Dash* environment.
 
 ### 3.1 Deterministic Dynamics (Removal of MDN)
+
 The original architecture utilized a **Mixture Density Network (MDN)** to model environmental uncertainty (e.g., enemy movement in *Doom*).
+
 * **Observation:** *Geometry Dash* physics are strictly deterministic; a specific input at a specific state always yields the same outcome. Visual stochasticity (particles, effects) is noise, not meaningful state.
-* **Decision:** Replaced the probabilistic MDN-RNN with a deterministic regression RNN.
+* **Decision:** Replaced the probabilistic MDN-RNN with a deterministic sequence model.
 * **Benefit:** Eliminates sampling noise and "representation blurring," allowing for high-fidelity latent rollouts with significantly lower computational overhead.
 
-### 3.2 Recurrent Efficiency (GRU vs. LSTM)
-The selection of the GRU over the standard LSTM is grounded in the architectural efficiency demonstrated by Cho et al. (2014).
-* **Observation:** The LSTM architecture requires four gating mechanisms, introducing redundant parameters for this specific task.
-* **Decision:** Implemented a Gated Recurrent Unit (GRU).
-* **Benefit:** The GRU's two-gate structure (Reset and Update) efficiently captures the necessary temporal dependencies (jump timing) while reducing training time and parameter count compared to an LSTM.
+### 3.2 Discrete Tokenization (VQ-VAE over beta-VAE)
 
-### 3.3 Inference Latency (Rejection of MPC)
+The original World Models paper uses a beta-VAE with continuous Gaussian latents.
+
+* **Observation:** Beta-VAE reconstructions are fundamentally blurred by posterior averaging. After exhaustive hyperparameter search (beta values, annealing schedules, loss functions, latent dimensions), reconstructions could not distinguish spikes from blocks — a fatal limitation for a precision game.
+* **Decision:** Replaced the beta-VAE with a VQ-VAE producing 36 discrete tokens per frame.
+* **Benefit:** Sharp reconstructions that preserve gameplay-critical structure. The discrete codebook acts as a learned visual vocabulary — each token represents a meaningful spatial pattern (block, spike, floor, empty space) rather than a blurry average.
+
+### 3.3 Transformer World Model (over GRU)
+
+The original architecture uses a GRU operating on flattened continuous latent vectors.
+
+* **Observation:** Feeding the GRU flattened VQ-VAE vectors (36 x 32d = 1,152 floats) yields only 3.6x compression over the raw 4,096-pixel input. The vision model becomes a near pass-through rather than a meaningful compression stage. At higher spatial resolutions (14x14), the flattened representation actually *expands* beyond the input size.
+* **Decision:** Replaced the GRU with a Transformer operating on discrete codebook indices.
+* **Benefit:** Preserves the full 101x compression ratio (36 tokens x 9 bits = 324 bits vs 32,768 bits). The Transformer classifies over a 512-entry vocabulary rather than regressing continuous vectors, and its own embedding layer decouples working dimensionality from the VQ-VAE codebook.
+
+### 3.4 Inference Latency (Rejection of MPC)
+
 **Model Predictive Control (MPC)** was evaluated as a replacement for the Linear Controller.
+
 * **Observation:** *Geometry Dash* requires high-frequency decisions (60 FPS / ~16ms window). MPC requires iterative rollout simulations during inference time.
-* **Decision:** Retained the reactive Linear Controller ($Action = W \cdot [z, h]$).
+* **Decision:** Retained the reactive Linear Controller ($Action = W \cdot h_t$).
 * **Benefit:** Ensures $O(1)$ inference time, preventing input lag that would otherwise cause agent failure in a high-speed reaction environment.
 
-### 3.4 Input Preprocessing (176×96, UI Cropping)
-The original World Models paper uses $64 \times 64$ square inputs. This project departs from that convention.
-* **Observation:** *Geometry Dash* renders in 16:9 widescreen. The horizontal axis carries the critical information (upcoming obstacles). Squashing to a square distorts spatial relationships and compresses the obstacle field.
-* **Decision:** The top 18 pixels of UI are cropped (640×360 → 640×342), then resized to $176 \times 96$. Both dimensions are divisible by 16, allowing 4 stride-2 downsampling layers (176×96 → 88×48 → 44×24 → 22×12 → 11×6) — matching the original paper's encoder depth on $64 \times 64$ input.
-* **Benefit (Aspect Ratio):** Preserves the spatial geometry of platforms and obstacle spacing at a comparable pixel budget (~17K pixels vs. ~16K for $128 \times 128$).
-* **Benefit (UI Removal):** The progress bar encodes the player's absolute position within a specific level. Retaining it would allow the model to memorize level layouts ("at 47%, a triple spike appears") rather than learning **reactive obstacle dynamics**. Removing it forces the agent to rely solely on visual obstacle perception, producing a more generalizable policy and a stronger demonstration of learned representation.
+### 3.5 Input Preprocessing (64x64 Square Crop, Sobel Edges)
 
-### 3.5 Training Protocol: The "Dreaming" Loop
+The original World Models paper uses $64 \times 64$ RGB inputs.
+
+* **Observation:** *Geometry Dash* renders in 16:9 widescreen with visually noisy backgrounds. Raw RGB wastes encoder capacity on particles, color gradients, and decorations that carry zero gameplay information.
+* **Decision:** Crop to a 344x344 gameplay square (player left-aligned, forward obstacles visible), apply Sobel edge detection at full resolution, then downscale to $64 \times 64$ grayscale. The encoder uses 3 no-padding stride-2 convolutions (64 → 31 → 14 → 6), producing the $6 \times 6$ spatial grid for tokenization.
+* **Benefit (Sobel):** Extracts structural boundaries — platforms, spikes, player outline — while discarding most of the visual noise. Binary-like edges are far easier for the VQ-VAE to reconstruct sharply.
+* **Benefit (UI Removal):** The progress bar encodes the player's absolute position within a specific level. Retaining it would allow the model to memorize level layouts ("at 47%, a triple spike appears") rather than learning **reactive obstacle dynamics**. Removing it forces the agent to rely solely on visual obstacle perception, producing a more generalizable policy.
+
+### 3.6 Training Protocol: The "Dreaming" Loop
+
 To overcome the limitations of deterministic generation (Mode Collapse), the agent is trained using an **Iterative Burn-In Strategy**:
-1.  **Context Injection (Burn-In):** The Memory Model (M) is primed with a sequence of $T=64$ real frames from recorded gameplay. This "seeds" the RNN hidden state ($h_t$) with the position and velocity of incoming obstacles.
-2.  **Latent Extrapolation (Dreaming):** The real footage is disconnected. The Memory Model takes over, extrapolating the physics of the seeded obstacles for $T=100+$ steps.
-3.  **Policy Optimization:** The Controller (C) interacts solely with this hallucinated environment.
-4.  **Reset & Diversify:** Upon death or timeout, a new random 64-frame "seed" from a different gameplay segment is loaded.
+
+1. **Context Injection (Burn-In):** The Memory Model (M) is primed with a sequence of $T=64$ real frames (as token sequences) from recorded gameplay. This "seeds" the Transformer's context with the position and velocity of incoming obstacles.
+2. **Latent Extrapolation (Dreaming):** The real footage is disconnected. The Memory Model takes over, autoregressively predicting token sequences for $T=100+$ steps.
+3. **Policy Optimization:** The Controller (C) interacts solely with this hallucinated environment.
+4. **Reset & Diversify:** Upon death or timeout, a new random 64-frame "seed" from a different gameplay segment is loaded.
 
 ## 4. Project Roadmap
 
-### Phase 1: Vision — VAE on Real Game Footage
-* **Goal:** Train the Vision Model (V) to produce meaningful latent representations from real *Geometry Dash* frames.
-* **Method:** Capture gameplay footage, extract frames, and train the VAE with $L_1$ loss and aggressive downsampling.
-* **Success Metric:** The VAE reconstructs gameplay frames preserving macroscopic structure (platforms, spikes, player position) while discarding visual noise.
+### Phase 1: Vision — VQ-VAE Tokenizer on Real Game Footage
+
+* **Goal:** Train the Vision Model (V) to tokenize gameplay frames into a compact discrete representation.
+* **Method:** Capture gameplay footage, extract Sobel edge frames, and train the VQ-VAE with MSE loss and a 512-entry codebook.
+* **Success Metric:** The VQ-VAE reconstructs gameplay frames preserving macroscopic structure (platforms, spikes, player position) while discarding visual noise. Codebook entries correspond to distinct gameplay elements.
 * **Milestone:** This phase alone validates the core contribution of the project.
 
-### Phase 2: Dynamics — GRU World Model
-* **Goal:** Learn the game's temporal dynamics entirely in latent space.
-* **Method:** Train the GRU on sequences of $(z_t, a_t) \rightarrow z_{t+1}$ from recorded gameplay.
-* **Success Metric:** The Memory Model accurately predicts future latent states over extended rollouts.
+### Phase 2: Dynamics — Transformer World Model
+
+* **Goal:** Learn the game's temporal dynamics entirely in discrete latent space.
+* **Method:** Train the Transformer on sequences of $(tokens_t, a_t) \rightarrow tokens_{t+1}$ from recorded gameplay.
+* **Success Metric:** The Memory Model accurately predicts future token sequences over extended rollouts.
 
 ### Phase 3: Control — Dream-Trained Agent
+
 * **Goal:** Train an agent that masters *Geometry Dash* levels without ever touching the real game.
 * **Method:** Train the Linear Controller with CMA-ES inside the "Dream" using the Burn-In strategy.
 * **Success Metric:** Zero-shot deployment — the agent plays the real game using only the learned latent dynamics.
 
 ## 5. References
+
 * **Primary Architecture:** Ha, D., & Schmidhuber, J. (2018). *World Models*. [arXiv:1803.10122](https://arxiv.org/abs/1803.10122)
-* **Recurrent Dynamics (GRU):** Cho, K., et al. (2014). *Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation*. [arXiv:1406.1078](https://arxiv.org/abs/1406.1078)
+* **VQ-VAE:** van den Oord, A., Vinyals, O., & Kavukcuoglu, K. (2017). *Neural Discrete Representation Learning*. [arXiv:1711.00937](https://arxiv.org/abs/1711.00937)
+* **Transformer World Model (IRIS):** Micheli, V., Alonso, E., & Fleuret, F. (2023). *Transformers are Sample-Efficient World Models*. [arXiv:2209.00588](https://arxiv.org/abs/2209.00588)[arXiv:1406.1078](https://arxiv.org/abs/1406.1078)
 * **Foundational RL:** Mnih, V., et al. (2013). *Playing Atari with Deep Reinforcement Learning*. [arXiv:1312.5602](https://arxiv.org/abs/1312.5602)
