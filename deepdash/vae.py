@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 
-LATENT_DIM = 32
+LATENT_DIM = 64
 IMG_CHANNELS = 1
 FLATTEN_DIM = 2 * 2 * 256  # 1024 — no padding encoder: 64→31→14→6→2
 
@@ -78,27 +78,12 @@ class VAE(nn.Module):
         return self.reparameterize(mu, logvar)
 
 
-_sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
-_sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3)
-
-
-def _sobel_magnitude(x):
-    """Compute Sobel edge magnitude map (no grad, same device)."""
-    kern_x = _sobel_x.to(x.device)
-    kern_y = _sobel_y.to(x.device)
-    gx = torch.nn.functional.conv2d(x, kern_x, padding=1)
-    gy = torch.nn.functional.conv2d(x, kern_y, padding=1)
-    return torch.sqrt(gx ** 2 + gy ** 2)
-
-
-def vae_loss(recon_x, x, mu, logvar, kl_tolerance=0.5, edge_weight=5.0):
-    """L1 reconstruction with 5x edge weighting + KL with tolerance floor."""
-    with torch.no_grad():
-        edges = _sobel_magnitude(x)
-        edges = edges / (edges.max() + 1e-8)  # normalize to [0, 1]
-        weight = 1.0 + edge_weight * edges
-    recon_loss = torch.sum(torch.abs(recon_x - x) * weight, dim=[1, 2, 3]).mean()
-    # KL disabled (pure autoencoder) to diagnose reconstruction capacity
+def vae_loss(recon_x, x, mu, logvar, kl_tolerance=0.5, pos_weight=20.0):
+    """Weighted BCE reconstruction + KL divergence with tolerance floor."""
+    bce = torch.nn.functional.binary_cross_entropy(recon_x, x, reduction='none')
+    weight = torch.where(x > 0.5, pos_weight, 1.0)
+    recon_loss = (bce * weight).sum(dim=[1, 2, 3]).mean()
+    # KL: sum over latent dims per sample, apply tolerance floor, mean over batch
     kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
-    kl_loss = torch.tensor(0.0, device=recon_x.device)
+    kl_loss = torch.maximum(kl_per_sample, torch.tensor(kl_tolerance * mu.size(1))).mean()
     return recon_loss + kl_loss, recon_loss, kl_loss

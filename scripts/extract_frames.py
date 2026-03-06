@@ -44,8 +44,11 @@ def extract_frames(video_dir: str, output_dir: str, every_n: int = 5,
                 cropped = frame[crop_y:crop_y + crop_size, crop_x:crop_x + crop_size]
                 # Downscale to 64x64 with area interpolation (preserves thin structures)
                 resized = cv2.resize(cropped, (target_size, target_size), interpolation=cv2.INTER_AREA)
-                # Convert to grayscale
-                resized = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+                # Convert to grayscale + Sobel edge detection (ksize=3)
+                gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+                sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+                sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+                resized = cv2.convertScaleAbs(cv2.magnitude(sobel_x, sobel_y))
                 # Save as PNG
                 filename = f"{level_name}_{frame_idx:06d}.png"
                 cv2.imwrite(str(output_dir / filename), resized)
