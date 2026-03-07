@@ -24,13 +24,13 @@ The system is composed of three distinct neural networks trained sequentially:
 * **Input:** Preprocessed grayscale Sobel edge maps ($64 \times 64 \times 1$) captured from real *Geometry Dash* gameplay.
 * **Preprocessing Pipeline:**
 
-| Raw frame (640x360) | Square crop (344x344) | Sobel edges (64x64) |
-|:---:|:---:|:---:|
-| ![Original](docs/preprocessing_1_original.png) | ![Cropped](docs/preprocessing_2_cropped.png) | ![Downscaled](docs/preprocessing_3_downscaled.png) |
+| Raw frame (640x360) | Square crop (344x344) | Sobel edges (344x344) | Final input (64x64) |
+|:---:|:---:|:---:|:---:|
+| ![Original](docs/preprocessing_1_original.png) | ![Cropped](docs/preprocessing_2_cropped.png) | ![Sobel](docs/preprocessing_3_sobel.png) | ![Final](docs/preprocessing_4_final.png) |
 
   Raw 360p footage is cropped to a 344x344 square at (220, 16) — bottom-aligned to discard the UI progress bar, player flush to the left edge, maximizing forward obstacle visibility. Sobel edge detection is applied at full resolution before downscaling to $64 \times 64$ with `cv2.INTER_AREA`. The UI is deliberately excluded to prevent the model from memorizing level layouts via the progress indicator, forcing it to learn **reactive dynamics** rather than positional lookup.
 
-* **Function:** Tokenizes visual data into a $6 \times 6$ grid of discrete codebook indices (36 tokens per frame, vocabulary of 512). Each token is a discrete symbol, not a continuous vector — enabling **101x compression** (324 bits vs 32,768 bits per frame).
+* **Function:** Tokenizes visual data into a $6 \times 6$ grid of discrete codebook indices (36 tokens per frame, vocabulary of 1024). Each token is a discrete symbol, not a continuous vector — enabling **91x compression** (360 bits vs 32,768 bits per frame).
 * **Noise Filtering:** Real game footage contains high-frequency stochastic noise (particles, weather effects, visual polish). Sobel edge detection extracts only structural boundaries (platforms, spikes, player outline), and the discrete codebook further discards sub-token noise by snapping encoder outputs to the nearest learned prototype.
 * **Why VQ-VAE over beta-VAE:** A standard beta-VAE was extensively evaluated first (beta=0/0.1/1.0, cyclical annealing, MSE/L1/BCE, latent dims 32-64). All configurations produced fundamentally blurry reconstructions due to Gaussian posterior averaging — spikes were indistinguishable from blocks. For a precision rhythm game requiring pixel-accurate obstacle recognition, this is a dealbreaker. VQ-VAE's discrete codebook eliminates this blurriness entirely.
 
@@ -38,8 +38,8 @@ The system is composed of three distinct neural networks trained sequentially:
 
 * **Type:** Transformer (autoregressive, on discrete tokens).
 * **Input:** Sequence of 36 codebook indices per frame + action token.
-* **Function:** Predicts the next frame's 36 tokens given the current tokenized state and action — a classification task over vocabulary 512, not continuous regression.
-* **Why Transformer over GRU:** With a GRU, the VQ-VAE's quantized vectors must be flattened into a continuous input (36 x 32d = 1,152 floats), yielding only 3.6x compression over the raw frame — making the vision model a near pass-through. A Transformer operates directly on discrete token indices, preserving the full 101x compression. The Transformer also naturally handles action conditioning via attention and captures long-range spatial dependencies across the token grid. This aligns with modern world model architectures (IRIS, GENIE) that use Transformers on VQ-VAE tokens.
+* **Function:** Predicts the next frame's 36 tokens given the current tokenized state and action — a classification task over vocabulary 1024, not continuous regression.
+* **Why Transformer over GRU:** With a GRU, the VQ-VAE's quantized vectors must be flattened into a continuous input (36 x 32d = 1,152 floats), yielding only 3.6x compression over the raw frame — making the vision model a near pass-through. A Transformer operates directly on discrete token indices, preserving the full 91x compression. The Transformer also naturally handles action conditioning via attention and captures long-range spatial dependencies across the token grid. This aligns with modern world model architectures (IRIS, GENIE) that use Transformers on VQ-VAE tokens.
 * **Relevance:** Learns the game's physics and temporal dynamics entirely in discrete latent space, allowing the agent to "hallucinate" precise trajectories as token sequences.
 
 ### C. Controller (C) - *The Agent*
@@ -75,7 +75,7 @@ The original architecture uses a GRU operating on flattened continuous latent ve
 
 * **Observation:** Feeding the GRU flattened VQ-VAE vectors (36 x 32d = 1,152 floats) yields only 3.6x compression over the raw 4,096-pixel input. The vision model becomes a near pass-through rather than a meaningful compression stage. At higher spatial resolutions (14x14), the flattened representation actually *expands* beyond the input size.
 * **Decision:** Replaced the GRU with a Transformer operating on discrete codebook indices.
-* **Benefit:** Preserves the full 101x compression ratio (36 tokens x 9 bits = 324 bits vs 32,768 bits). The Transformer classifies over a 512-entry vocabulary rather than regressing continuous vectors, and its own embedding layer decouples working dimensionality from the VQ-VAE codebook.
+* **Benefit:** Preserves the full 91x compression ratio (36 tokens x 10 bits = 360 bits vs 32,768 bits). The Transformer classifies over a 1024-entry vocabulary rather than regressing continuous vectors, and its own embedding layer decouples working dimensionality from the VQ-VAE codebook.
 
 ### 3.4 Inference Latency (Rejection of MPC)
 
@@ -108,7 +108,7 @@ To overcome the limitations of deterministic generation (Mode Collapse), the age
 ### Phase 1: Vision — VQ-VAE Tokenizer on Real Game Footage
 
 * **Goal:** Train the Vision Model (V) to tokenize gameplay frames into a compact discrete representation.
-* **Method:** Capture gameplay footage, extract Sobel edge frames, and train the VQ-VAE with MSE loss and a 512-entry codebook.
+* **Method:** Capture gameplay footage, extract Sobel edge frames, and train the VQ-VAE with MSE loss and a 1024-entry codebook.
 * **Success Metric:** The VQ-VAE reconstructs gameplay frames preserving macroscopic structure (platforms, spikes, player position) while discarding visual noise. Codebook entries correspond to distinct gameplay elements.
 * **Milestone:** This phase alone validates the core contribution of the project.
 
