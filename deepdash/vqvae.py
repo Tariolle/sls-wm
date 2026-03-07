@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 
-NUM_EMBEDDINGS = 512
+NUM_EMBEDDINGS = 1024
 EMBEDDING_DIM = 8
 IMG_CHANNELS = 1
 
@@ -32,6 +32,25 @@ class VectorQuantizer(nn.Module):
         self.register_buffer('ema_embed_sum', self.embedding.weight.data.clone())
         self.register_buffer('forward_count', torch.tensor(0))
 
+    @torch.no_grad()
+    def _kmeans_init(self, z_e_flat, n_iter=10):
+        idx = torch.randperm(z_e_flat.size(0), device=z_e_flat.device)[:self.num_embeddings]
+        centroids = z_e_flat[idx].detach().clone()
+        for _ in range(n_iter):
+            dists = (z_e_flat.pow(2).sum(1, keepdim=True)
+                     - 2 * z_e_flat @ centroids.t()
+                     + centroids.pow(2).sum(1, keepdim=True).t())
+            assignments = dists.argmin(dim=1)
+            encodings = torch.zeros(z_e_flat.size(0), self.num_embeddings, device=z_e_flat.device)
+            encodings.scatter_(1, assignments.unsqueeze(1), 1)
+            cluster_size = encodings.sum(0)
+            new_centroids = encodings.t() @ z_e_flat
+            mask = cluster_size > 0
+            centroids[mask] = new_centroids[mask] / cluster_size[mask].unsqueeze(1)
+        self.embedding.weight.data.copy_(centroids)
+        self.ema_embed_sum.copy_(centroids)
+        self.ema_cluster_size.fill_(1)
+
     def _reset_dead_entries(self, z_e_flat):
         dead = self.ema_cluster_size < 1
         n_dead = dead.sum().item()
@@ -47,6 +66,10 @@ class VectorQuantizer(nn.Module):
         # z_e: (B, D, H, W)
         B, D, H, W = z_e.shape
         z_e_flat = z_e.permute(0, 2, 3, 1).reshape(-1, D)
+
+        # K-means init on first training forward pass
+        if self.training and self.forward_count == 0:
+            self._kmeans_init(z_e_flat)
 
         # Squared distances to codebook vectors
         distances = (

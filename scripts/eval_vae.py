@@ -32,7 +32,7 @@ def main():
     parser.add_argument("--output-dir", default="eval_output")
     parser.add_argument("--num-samples", type=int, default=8)
     parser.add_argument("--model", choices=["vae", "vqvae"], default="vqvae")
-    parser.add_argument("--num-embeddings", type=int, default=512, help="Codebook size (must match checkpoint)")
+    parser.add_argument("--num-embeddings", type=int, default=1024, help="Codebook size (must match checkpoint)")
     parser.add_argument("--embedding-dim", type=int, default=8, help="Codebook vector dimension (must match checkpoint)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for frame selection")
     args = parser.parse_args()
