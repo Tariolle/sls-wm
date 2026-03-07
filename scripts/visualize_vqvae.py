@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -35,7 +36,7 @@ def main():
     parser = argparse.ArgumentParser(description="Visualize VQ-VAE input/output alongside original video")
     parser.add_argument("video", help="Path to video file")
     parser.add_argument("--checkpoint", default="checkpoints/vqvae_best.pt", help="VQ-VAE checkpoint")
-    parser.add_argument("--every-n", type=int, default=5, help="Frame sampling rate (default: 5)")
+
     parser.add_argument("--crop-x", type=int, default=220)
     parser.add_argument("--crop-y", type=int, default=16)
     parser.add_argument("--crop-size", type=int, default=344)
@@ -58,7 +59,7 @@ def main():
     print(f"{args.video}: {total} frames, {fps:.1f} FPS, {w}x{h}")
     print("Controls: SPACE=pause/resume, Q/ESC=quit")
 
-    delay_ms = max(1, int(1000 / fps)) if fps > 0 else 33
+    frame_time = 1.0 / fps if fps > 0 else 1.0 / 30
     panel_h = h  # side panels match video height (square)
 
     # Black placeholder for model panels before first sample
@@ -70,6 +71,7 @@ def main():
 
     while True:
         if not paused:
+            t0 = time.perf_counter()
             ret, frame = cap.read()
             if not ret:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -81,17 +83,16 @@ def main():
             x, y, s = args.crop_x, args.crop_y, args.crop_size
             cv2.rectangle(display_frame, (x, y), (x + s, y + s), (0, 255, 0), 2)
 
-            # Update model panels on sampled frames
-            if frame_idx % args.every_n == 0:
-                model_input = preprocess_frame(frame, x, y, s, args.target_size)
-                model_output = run_model(model, model_input, device)
+            # Process every frame (matches inference behavior)
+            model_input = preprocess_frame(frame, x, y, s, args.target_size)
+            model_output = run_model(model, model_input, device)
 
-                # Upscale with nearest neighbor for crisp pixels
-                input_up = cv2.resize(model_input, (panel_h, panel_h), interpolation=cv2.INTER_NEAREST)
-                output_up = cv2.resize(model_output, (panel_h, panel_h), interpolation=cv2.INTER_NEAREST)
+            # Upscale with nearest neighbor for crisp pixels
+            input_up = cv2.resize(model_input, (panel_h, panel_h), interpolation=cv2.INTER_NEAREST)
+            output_up = cv2.resize(model_output, (panel_h, panel_h), interpolation=cv2.INTER_NEAREST)
 
-                model_input_display = cv2.cvtColor(input_up, cv2.COLOR_GRAY2BGR)
-                model_output_display = cv2.cvtColor(output_up, cv2.COLOR_GRAY2BGR)
+            model_input_display = cv2.cvtColor(input_up, cv2.COLOR_GRAY2BGR)
+            model_output_display = cv2.cvtColor(output_up, cv2.COLOR_GRAY2BGR)
 
             # Compose and label
             combined = np.hstack([display_frame, model_input_display, model_output_display])
@@ -105,7 +106,12 @@ def main():
             cv2.imshow("DeepDash Visualizer", combined)
             frame_idx += 1
 
-        key = cv2.waitKey(delay_ms) & 0xFF
+            elapsed = time.perf_counter() - t0
+            wait = max(1, int((frame_time - elapsed) * 1000))
+        else:
+            wait = 30
+
+        key = cv2.waitKey(wait) & 0xFF
         if key == ord('q') or key == 27:
             break
         elif key == ord(' '):
