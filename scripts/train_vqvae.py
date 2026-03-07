@@ -77,7 +77,7 @@ def val_epoch(model, loader, device):
 def main():
     parser = argparse.ArgumentParser(description="Train VQ-VAE on Geometry Dash frames")
     parser.add_argument("--data-dir", default="data", help="Root data dir (must contain train/ and val/ subdirs)")
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--checkpoint-dir", default="checkpoints")
@@ -112,7 +112,7 @@ def main():
     print(f"Codebook: {args.num_embeddings} entries x {args.embedding_dim}d")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
 
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(exist_ok=True)
@@ -130,7 +130,7 @@ def main():
             t0 = time.time()
             train_loss, train_recon, train_vq = train_epoch(model, train_loader, optimizer, device)
             val_loss, val_recon, val_vq = val_epoch(model, val_loader, device)
-            scheduler.step(val_recon)
+            scheduler.step()
             dt = time.time() - t0
             lr = optimizer.param_groups[0]["lr"]
 

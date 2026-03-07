@@ -34,7 +34,11 @@ class VectorQuantizer(nn.Module):
 
     @torch.no_grad()
     def _kmeans_init(self, z_e_flat, n_iter=10):
-        idx = torch.randperm(z_e_flat.size(0), device=z_e_flat.device)[:self.num_embeddings]
+        n = z_e_flat.size(0)
+        if n >= self.num_embeddings:
+            idx = torch.randperm(n, device=z_e_flat.device)[:self.num_embeddings]
+        else:
+            idx = torch.randint(0, n, (self.num_embeddings,), device=z_e_flat.device)
         centroids = z_e_flat[idx].detach().clone()
         for _ in range(n_iter):
             dists = (z_e_flat.pow(2).sum(1, keepdim=True)
@@ -114,13 +118,13 @@ class ResBlock(nn.Module):
         self.block = nn.Sequential(
             nn.Conv2d(channels, channels, 3, padding=1),
             nn.BatchNorm2d(channels),
-            nn.ReLU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.Conv2d(channels, channels, 3, padding=1),
             nn.BatchNorm2d(channels),
         )
 
     def forward(self, x):
-        return torch.relu(x + self.block(x))
+        return torch.nn.functional.silu(x + self.block(x))
 
 
 class Encoder(nn.Module):
@@ -136,11 +140,11 @@ class Encoder(nn.Module):
         self.proj = nn.Conv2d(128, embedding_dim, 1)
 
     def forward(self, x):
-        x = torch.relu(self.conv1(x))
+        x = torch.nn.functional.silu(self.conv1(x))
         x = self.res1(x)
-        x = torch.relu(self.conv2(x))
+        x = torch.nn.functional.silu(self.conv2(x))
         x = self.res2(x)
-        x = torch.relu(self.conv3(x))
+        x = torch.nn.functional.silu(self.conv3(x))
         x = self.res3(x)
         return self.proj(x)  # (B, embedding_dim, 6, 6)
 
@@ -158,11 +162,11 @@ class Decoder(nn.Module):
         self.deconv3 = nn.ConvTranspose2d(32, img_channels, 4, stride=2)
 
     def forward(self, z_q):
-        x = torch.relu(self.proj(z_q))
+        x = torch.nn.functional.silu(self.proj(z_q))
         x = self.res1(x)
-        x = torch.relu(self.deconv1(x))
+        x = torch.nn.functional.silu(self.deconv1(x))
         x = self.res2(x)
-        x = torch.relu(self.deconv2(x))
+        x = torch.nn.functional.silu(self.deconv2(x))
         x = self.res3(x)
         return torch.sigmoid(self.deconv3(x))
 
