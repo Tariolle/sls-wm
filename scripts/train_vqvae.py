@@ -116,7 +116,11 @@ def main():
 
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(exist_ok=True)
+    best_recon_path = ckpt_dir / "best_val_recon.txt"
     best_val_recon = float("inf")
+    if best_recon_path.exists():
+        best_val_recon = float(best_recon_path.read_text().strip())
+        print(f"Previous best val_recon: {best_val_recon:.4f}")
 
     log_path = ckpt_dir / "train_log.csv"
     resuming = args.resume and log_path.exists()
@@ -148,6 +152,7 @@ def main():
             if val_recon < best_val_recon:
                 best_val_recon = val_recon
                 torch.save(model.state_dict(), ckpt_dir / "vqvae_best.pt")
+                best_recon_path.write_text(f"{best_val_recon:.6f}\n")
     except KeyboardInterrupt:
         print("\nInterrupted — saving final checkpoint...")
 
