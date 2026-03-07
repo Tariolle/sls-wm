@@ -47,7 +47,7 @@ def extract_frames(video_dir: str, output_dir: str, every_n: int = 5,
                 sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
                 sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
                 edges = cv2.convertScaleAbs(cv2.magnitude(sobel_x, sobel_y))
-                # Downscale to 64x64 with area interpolation
+                # Downscale to 64x64
                 resized = cv2.resize(edges, (target_size, target_size), interpolation=cv2.INTER_AREA)
                 # Save as PNG
                 filename = f"{level_name}_{frame_idx:06d}.png"
