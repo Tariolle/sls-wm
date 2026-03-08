@@ -85,7 +85,7 @@ def main():
             combined.paste(recon_best_pil, (orig_pil.width, 0))
             combined.save(out_dir / f"sample_{i:02d}.png")
 
-    print(f"Saved {len(selected)} comparisons to {out_dir}/")
+    print(f"Saved {len(indices)} comparisons to {out_dir}/")
 
     import matplotlib.pyplot as plt
     n = len(originals)
