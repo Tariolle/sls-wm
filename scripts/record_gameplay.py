@@ -1,15 +1,17 @@
 """Record Geometry Dash gameplay: screen capture + keyboard input + death detection.
 
-Reads game memory to auto-detect death and split episodes automatically.
-Just press F5 once to start, play the game, and episodes are saved on each death.
+Fully automated recording — press F5 once, then just play. Episodes are saved
+on each death (respawn noise skipped). Auto-resumes after respawn.
+Press F5 again to stop (trims last --trim-end seconds to remove win animation
+or other end noise).
 
 Usage:
     python scripts/record_gameplay.py --monitor-top 0 --monitor-left 0
 
 Controls:
-    F5  — start/stop recording
+    F5  — start/stop auto-recording (stop trims last --trim-end seconds)
     F6  — manual episode split (saves current, starts fresh)
-    ESC — quit (saves current episode if recording)
+    F10 — quit (saves current episode if recording)
 
 Output:
     data/episodes/ep_NNNN/
@@ -27,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 import ctypes
+import ctypes.wintypes as wt
 import cv2
 import keyboard
 import mss
@@ -35,8 +38,6 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from deepdash.gd_mem import GDReader
 
-
-import ctypes.wintypes as wt
 
 # Win32 always-on-top helper with proper 64-bit type annotations
 _user32 = ctypes.windll.user32
@@ -82,7 +83,8 @@ def preprocess_frame(bgra: np.ndarray, crop_x: int, crop_y: int,
 
 
 def save_episode(episode_dir: Path, frames: list, actions: list,
-                 fps_target: int, t_start: float, t_end: float):
+                 fps_target: int, t_start: float, t_end: float,
+                 level: int = 0):
     """Save a single episode to disk."""
     if not frames:
         return
@@ -93,6 +95,7 @@ def save_episode(episode_dir: Path, frames: list, actions: list,
     duration = t_end - t_start
     fps_actual = num_frames / duration if duration > 0 else 0
     metadata = {
+        "level": level,
         "fps_target": fps_target,
         "fps_actual": round(fps_actual, 2),
         "num_frames": num_frames,
@@ -112,6 +115,13 @@ def next_episode_id(episodes_dir: Path) -> int:
         return 1
     last = existing[-1].name
     return int(last.split("_")[1]) + 1
+
+
+# Auto-record states
+STATE_IDLE = "IDLE"           # F5 not pressed yet
+STATE_RECORDING = "REC"       # Actively capturing frames
+STATE_WAIT_RESPAWN = "WAIT"   # Dead, waiting for respawn
+STATE_WAIT_ATTEMPT = "DELAY"  # Respawned, waiting for "ATTEMPT" to clear
 
 
 def main():
@@ -137,8 +147,16 @@ def main():
                         help="Target capture FPS (default: 60)")
     parser.add_argument("--jump-key", default="space",
                         help="Key used for jumping (default: space)")
+    parser.add_argument("--level", type=int, required=True,
+                        help="Level number being recorded (saved in metadata)")
     parser.add_argument("--output-dir", default="data/episodes",
                         help="Output directory for episodes")
+    parser.add_argument("--respawn-delay", type=float, default=0.75,
+                        help="Seconds to wait after respawn before recording "
+                             "(skip ATTEMPT overlay, default: 0.7)")
+    parser.add_argument("--trim-end", type=float, default=0.5,
+                        help="Seconds to trim from end when stopping with F5 "
+                             "(remove win animation noise, default: 0.5)")
     args = parser.parse_args()
 
     # Connect to GD process for death detection
@@ -162,107 +180,153 @@ def main():
     }
 
     frame_interval = 1.0 / args.fps
-    recording = False
+    state = STATE_IDLE
+    auto_mode = False  # True after F5 pressed
     frames = []
     actions = []
     t_episode_start = 0.0
-    was_dead = False
+    t_respawn = 0.0
 
     print(f"Capture region: {monitor}")
     print(f"Target FPS: {args.fps}")
     print(f"Jump key: {args.jump_key}")
     print(f"Episodes dir: {episodes_dir}")
+    print(f"Respawn delay: {args.respawn_delay}s")
+    print(f"F5 stop trim: {args.trim_end}s")
     print()
     print("Controls:")
-    print("  F5  — start/stop recording")
+    print("  F5  — start/stop auto-recording (stop trims last "
+          f"{args.trim_end}s)")
     print("  F6  — manual episode split")
-    print("  ESC — quit")
+    print("  F10 — quit")
     print()
-    print("Death detection: ON (auto-splits episodes on death)")
+    print("Auto-record: death splits + respawn skip")
     print("Preview window open — verify capture region is correct.")
 
     with mss.mss() as sct:
         while True:
             t_loop_start = time.perf_counter()
 
-            # Capture screen
+            # Read game state every frame (cheap memory read)
+            gd_state = gd.get_state()
+            in_level = gd_state["in_level"]
+            is_dead = gd_state["is_dead"]
+
+            # --- State machine transitions ---
+            if auto_mode:
+                if state == STATE_RECORDING:
+                    if is_dead:
+                        # Death detected — save episode, wait for respawn
+                        t_end = time.perf_counter()
+                        ep_dir = episodes_dir / f"ep_{episode_id:04d}"
+                        save_episode(ep_dir, frames, actions,
+                                     args.fps, t_episode_start, t_end,
+                                     args.level)
+                        episode_id += 1
+                        frames = []
+                        actions = []
+                        state = STATE_WAIT_RESPAWN
+                        print(f">> Death detected. Waiting for respawn...")
+
+                elif state == STATE_WAIT_RESPAWN:
+                    if not is_dead and in_level:
+                        # Player respawned — start delay timer
+                        t_respawn = time.perf_counter()
+                        state = STATE_WAIT_ATTEMPT
+                        print(f">> Respawned. Skipping ATTEMPT overlay "
+                              f"({args.respawn_delay}s)...")
+
+                elif state == STATE_WAIT_ATTEMPT:
+                    if is_dead:
+                        # Died again during delay — restart wait
+                        state = STATE_WAIT_RESPAWN
+                    elif time.perf_counter() - t_respawn >= args.respawn_delay:
+                        # Delay done — start recording
+                        frames = []
+                        actions = []
+                        t_episode_start = time.perf_counter()
+                        state = STATE_RECORDING
+                        print(f">> Recording ep_{episode_id:04d}...")
+
+            # --- Capture + preprocess ---
             screenshot = sct.grab(monitor)
             img = np.array(screenshot)
-
-            # Preprocess
             edge_frame = preprocess_frame(
                 img, args.crop_x, args.crop_y,
                 args.crop_size, args.target_size)
 
-            # Show preview
+            # --- Show preview ---
             preview = cv2.resize(edge_frame, (256, 256),
                                  interpolation=cv2.INTER_NEAREST)
-            status = "REC" if recording else "IDLE"
-            color = (0, 0, 255) if recording else (128, 128, 128)
+            color_map = {
+                STATE_IDLE: (128, 128, 128),
+                STATE_RECORDING: (0, 0, 255),
+                STATE_WAIT_RESPAWN: (0, 165, 255),
+                STATE_WAIT_ATTEMPT: (0, 255, 255),
+            }
+            color = color_map.get(state, (128, 128, 128))
             preview_bgr = cv2.cvtColor(preview, cv2.COLOR_GRAY2BGR)
-            cv2.putText(preview_bgr, status, (10, 25),
+            cv2.putText(preview_bgr, state, (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-            if recording:
+            if state == STATE_RECORDING:
                 cv2.putText(preview_bgr,
                             f"ep_{episode_id:04d}  {len(frames)} frames",
                             (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                             (0, 0, 255), 1)
             cv2.imshow("DeepDash Recorder", preview_bgr)
-
-            # Force always-on-top every frame via Win32 API
-            # (cv2.setWindowProperty alone doesn't beat fullscreen games)
             _force_topmost("DeepDash Recorder")
 
-            # Record frame + action if recording
-            if recording:
+            # --- Record frame + action if recording ---
+            if state == STATE_RECORDING:
                 jump = keyboard.is_pressed(args.jump_key)
                 frames.append(edge_frame)
                 actions.append(1 if jump else 0)
 
-            # Death detection — auto-split episodes
-            if recording:
-                state = gd.get_state()
-                is_dead = state["is_dead"]
-                if is_dead and not was_dead and frames:
-                    # Player just died — save episode
-                    t_end = time.perf_counter()
-                    ep_dir = episodes_dir / f"ep_{episode_id:04d}"
-                    save_episode(ep_dir, frames, actions,
-                                 args.fps, t_episode_start, t_end)
-                    episode_id += 1
-                    frames = []
-                    actions = []
-                    t_episode_start = time.perf_counter()
-                    print(f">> Death detected. New episode: ep_{episode_id:04d}")
-                was_dead = is_dead
-
-            # Handle OpenCV key events (1ms wait)
+            # --- Handle OpenCV key events ---
             key = cv2.waitKey(1) & 0xFF
 
-            # Hotkeys
+            # --- Hotkeys ---
             if keyboard.is_pressed("f5"):
-                if not recording:
-                    recording = True
-                    frames = []
-                    actions = []
-                    was_dead = False
-                    t_episode_start = time.perf_counter()
-                    print(f"\n>> Recording ep_{episode_id:04d}...")
+                if not auto_mode:
+                    auto_mode = True
+                    if in_level and not is_dead:
+                        frames = []
+                        actions = []
+                        t_episode_start = time.perf_counter()
+                        state = STATE_RECORDING
+                        print(f"\n>> Auto-record ON. Recording "
+                              f"ep_{episode_id:04d}...")
+                    elif in_level and is_dead:
+                        state = STATE_WAIT_RESPAWN
+                        print(f"\n>> Auto-record ON. Waiting for respawn...")
+                    else:
+                        state = STATE_WAIT_RESPAWN
+                        print(f"\n>> Auto-record ON. Waiting for level...")
                 else:
-                    recording = False
-                    t_end = time.perf_counter()
-                    ep_dir = episodes_dir / f"ep_{episode_id:04d}"
-                    save_episode(ep_dir, frames, actions,
-                                 args.fps, t_episode_start, t_end)
-                    episode_id += 1
+                    # Stop — trim end and save current episode
+                    auto_mode = False
+                    if state == STATE_RECORDING and frames:
+                        trim_frames = int(args.trim_end * args.fps)
+                        if trim_frames > 0 and len(frames) > trim_frames:
+                            frames = frames[:-trim_frames]
+                            actions = actions[:-trim_frames]
+                        t_end = time.perf_counter() - args.trim_end
+                        ep_dir = episodes_dir / f"ep_{episode_id:04d}"
+                        save_episode(ep_dir, frames, actions,
+                                     args.fps, t_episode_start, t_end,
+                                     args.level)
+                        episode_id += 1
+                        print(f">> Stopped. Trimmed last {args.trim_end}s.")
+                    else:
+                        print(">> Stopped.")
                     frames = []
                     actions = []
-                    print(">> Stopped recording.")
+                    state = STATE_IDLE
                 while keyboard.is_pressed("f5"):
                     time.sleep(0.01)
 
             if keyboard.is_pressed("f6"):
-                if recording and frames:
+                if state == STATE_RECORDING and frames:
                     t_end = time.perf_counter()
                     ep_dir = episodes_dir / f"ep_{episode_id:04d}"
                     save_episode(ep_dir, frames, actions,
@@ -271,12 +335,13 @@ def main():
                     frames = []
                     actions = []
                     t_episode_start = time.perf_counter()
-                    print(f"\n>> New episode: ep_{episode_id:04d}...")
+                    print(f"\n>> Manual split. Recording "
+                          f"ep_{episode_id:04d}...")
                 while keyboard.is_pressed("f6"):
                     time.sleep(0.01)
 
-            if keyboard.is_pressed("escape") or key == 27:
-                if recording and frames:
+            if keyboard.is_pressed("f10"):
+                if state == STATE_RECORDING and frames:
                     t_end = time.perf_counter()
                     ep_dir = episodes_dir / f"ep_{episode_id:04d}"
                     save_episode(ep_dir, frames, actions,
@@ -284,7 +349,7 @@ def main():
                     print(">> Saved final episode on exit.")
                 break
 
-            # Frame rate limiting
+            # --- Frame rate limiting ---
             elapsed = time.perf_counter() - t_loop_start
             sleep_time = frame_interval - elapsed
             if sleep_time > 0:
