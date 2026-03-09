@@ -4,4 +4,6 @@ __pycache__/
 data/frames/
 data/train/
 data/val/
+data/episodes/*/tokens.npy
+data/videos/
 eval_output/

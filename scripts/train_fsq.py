@@ -106,9 +106,9 @@ def val_epoch(model, loader):
 def main():
     parser = argparse.ArgumentParser(description="Train FSQ-VAE on Geometry Dash frames")
     parser.add_argument("--episodes-dir", default="data/episodes")
-    parser.add_argument("--epochs", type=int, default=400)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=2e-3)
+    parser.add_argument("--lr", type=float, default=4e-3)
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5],
