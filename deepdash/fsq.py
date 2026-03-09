@@ -52,10 +52,16 @@ class FSQQuantizer(nn.Module):
             z_q: (B, D, H, W) float — quantized (straight-through gradient).
             indices: (B, H, W) long — flat codebook indices.
         """
-        # Bound to [-half, +half] per channel, then round
+        # Bound and round per channel.
+        # Odd L:  values in {-floor(L/2), ..., +floor(L/2)}  (symmetric)
+        # Even L: values in {-L/2+1, ..., L/2}  then shift by -0.5 to center
+        # Following the FSQ paper's approach for even levels.
         half = self.half_levels.view(1, -1, 1, 1)  # (1, D, 1, 1)
         z_bounded = torch.tanh(z_e) * half
         z_q = z_bounded.round()
+        # Clamp to valid range to handle even levels correctly
+        levels = self.levels.float().view(1, -1, 1, 1)
+        z_q = z_q.clamp(-half, half - (1.0 - levels % 2))
 
         # Straight-through estimator: gradient flows through tanh, not round
         z_q = z_bounded + (z_q - z_bounded).detach()
@@ -65,8 +71,8 @@ class FSQQuantizer(nn.Module):
 
     def _codes_to_indices(self, z_q):
         """Convert quantized codes to flat indices via mixed-radix encoding."""
-        # z_q: (B, D, H, W), values in {-half..+half}
-        # Shift to non-negative: code_d + half_d
+        # z_q: (B, D, H, W), values in {-half..+half} (odd) or {-half..+half-1} (even)
+        # Shift to non-negative: code_d + half_d → {0..L-1}
         half = self.half_levels.view(1, -1, 1, 1)
         codes_shifted = (z_q + half).long()  # (B, D, H, W) in {0..L-1}
         divs = self.divisors.view(1, -1, 1, 1)
