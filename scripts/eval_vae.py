@@ -1,4 +1,4 @@
-"""Evaluate VQ-VAE: generate side-by-side original vs reconstruction images."""
+"""Evaluate VQ-VAE or FSQ-VAE: generate side-by-side original vs reconstruction images."""
 
 import argparse
 import sys
@@ -9,7 +9,6 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from deepdash.vqvae import VQVAE
 
 
 def load_image(path):
@@ -25,20 +24,34 @@ def tensor_to_image(t):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate VQ-VAE reconstructions")
-    parser.add_argument("--checkpoint", default="checkpoints/vqvae_best.pt")
-    parser.add_argument("--data-dir", default="data/val.npy")
+    parser = argparse.ArgumentParser(description="Evaluate tokenizer reconstructions")
+    parser.add_argument("--checkpoint", default=None,
+                        help="Checkpoint path (default: checkpoints/{model}_best.pt)")
+    parser.add_argument("--model", choices=["vqvae", "fsq"], default="fsq")
+    parser.add_argument("--data-dir", default=None,
+                        help="Path to .npy file with frames (default: sample from episodes)")
+    parser.add_argument("--episodes-dir", default="data/episodes",
+                        help="Episode directory (used when --data-dir is not set)")
     parser.add_argument("--output-dir", default="eval_output")
     parser.add_argument("--num-samples", type=int, default=8)
-    parser.add_argument("--num-embeddings", type=int, default=1024, help="Codebook size (must match checkpoint)")
-    parser.add_argument("--embedding-dim", type=int, default=8, help="Codebook vector dimension (must match checkpoint)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for frame selection")
+    parser.add_argument("--num-embeddings", type=int, default=1024)
+    parser.add_argument("--embedding-dim", type=int, default=8)
+    parser.add_argument("--levels", type=int, nargs="+", default=[7, 5, 5, 5, 5])
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+
+    if args.checkpoint is None:
+        args.checkpoint = f"checkpoints/{args.model}_best.pt"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def load_model(checkpoint_path):
-        m = VQVAE(num_embeddings=args.num_embeddings, embedding_dim=args.embedding_dim)
+        if args.model == "fsq":
+            from deepdash.fsq import FSQVAE
+            m = FSQVAE(levels=args.levels)
+        else:
+            from deepdash.vqvae import VQVAE
+            m = VQVAE(num_embeddings=args.num_embeddings, embedding_dim=args.embedding_dim)
         m.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
         m.to(device)
         m.eval()
@@ -46,12 +59,23 @@ def main():
 
     model_best = load_model(args.checkpoint)
     ckpt_dir = Path(args.checkpoint).parent
-    final_path = ckpt_dir / "vqvae_final.pt"
+    final_name = "fsq_final.pt" if args.model == "fsq" else "vqvae_final.pt"
+    final_path = ckpt_dir / final_name
     model_final = load_model(str(final_path)) if final_path.exists() else None
 
-    data = np.load(args.data_dir)  # (N, 64, 64) uint8
+    if args.data_dir is not None:
+        data = np.load(args.data_dir)  # (N, 64, 64) uint8
+    else:
+        # Load frames from episodes
+        episodes_dir = Path(args.episodes_dir)
+        all_frames = []
+        for ep in sorted(episodes_dir.glob("*")):
+            fp = ep / "frames.npy"
+            if fp.exists():
+                all_frames.append(np.load(fp))
+        data = np.concatenate(all_frames, axis=0)
     if len(data) == 0:
-        print(f"No frames found in {args.data_dir}")
+        print("No frames found")
         return
 
     import random
