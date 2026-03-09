@@ -1,13 +1,11 @@
-"""Transformer world model V4 — block-causal + RoPE + death + AC-CPC.
+"""Transformer world model V5 — block-causal + RoPE + death token + AC-CPC.
 
-Predicts next-frame tokens + death probability given past frames + actions.
-Uses Rotary Position Embeddings (RoPE) instead of absolute positional encoding
-for better relative position awareness and length generalization.
-AC-CPC (Action-Conditioned Contrastive Predictive Coding) adds a contrastive
-loss that predicts future hidden states conditioned on actions (TWISTER).
+Predicts next-frame tokens given past frames + actions.
+Death is represented as a token (not a separate head) — the 65th position
+of each frame block predicts ALIVE or DEATH via the same cross-entropy loss.
 
-Sequence format (K context frames):
-    [f0 (36 tokens)] [a0 (1 token)] ... [fK-1 (36)] [aK-1 (1)] [target (36)]
+Sequence format (K context frames, T tokens/frame):
+    [f0 (T visual + 1 status)] [a0] ... [fK-1 (T+1)] [aK-1] [target (T+1)]
 
 Block-causal attention: bidirectional within each frame/action block, causal across.
 Target frame uses causal masking within. GPT-shift: position t-1 predicts token t.
@@ -21,9 +19,6 @@ References:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-# Tokens per frame (6x6 VQ-VAE grid)
-TOKENS_PER_FRAME = 36
 
 
 def apply_rope(x, cos, sin):
@@ -46,7 +41,7 @@ def apply_rope(x, cos, sin):
 class WorldModel(nn.Module):
     def __init__(
         self,
-        vocab_size: int = 1024,
+        vocab_size: int = 4375,
         n_actions: int = 2,
         n_levels: int = 8,
         embed_dim: int = 128,
@@ -55,19 +50,28 @@ class WorldModel(nn.Module):
         context_frames: int = 4,
         dropout: float = 0.1,
         cpc_dim: int = 64,
+        tokens_per_frame: int = 64,
     ):
         super().__init__()
         self.vocab_size = vocab_size
         self.n_actions = n_actions
         self.embed_dim = embed_dim
         self.context_frames = context_frames
-        self.tokens_per_frame = TOKENS_PER_FRAME
+        self.tokens_per_frame = tokens_per_frame
 
-        # Sequence length: K * (36 + 1) + 36
-        self.seq_len = context_frames * (TOKENS_PER_FRAME + 1) + TOKENS_PER_FRAME
+        # Death token indices (appended as 65th position per frame)
+        self.ALIVE_TOKEN = vocab_size      # index for alive status
+        self.DEATH_TOKEN = vocab_size + 1  # index for death status
+        self.full_vocab_size = vocab_size + 2  # visual tokens + ALIVE + DEATH
 
-        # Embeddings (no absolute positional — using RoPE instead)
-        self.token_embed = nn.Embedding(vocab_size, embed_dim)
+        # Tokens per frame block: visual tokens + 1 status token
+        self.block_size = tokens_per_frame + 1
+
+        # Sequence length: K * (block_size + 1 action) + block_size target
+        self.seq_len = context_frames * (self.block_size + 1) + self.block_size
+
+        # Embeddings (no absolute positional — using RoPE)
+        self.token_embed = nn.Embedding(self.full_vocab_size, embed_dim)
         self.action_embed = nn.Embedding(n_actions, embed_dim)
         self.level_embed = nn.Embedding(n_levels, embed_dim)
 
@@ -84,13 +88,11 @@ class WorldModel(nn.Module):
         ])
         self.ln_f = nn.LayerNorm(embed_dim)
         self.embed_drop = nn.Dropout(dropout)
-        self.head = nn.Linear(embed_dim, vocab_size, bias=False)
-        self.death_head = nn.Linear(embed_dim, 1)
+        self.head = nn.Linear(embed_dim, self.full_vocab_size, bias=False)
 
         # AC-CPC: contrastive prediction of future hidden states
         self.cpc_dim = cpc_dim
         self.cpc_target_proj = nn.Linear(embed_dim, cpc_dim)
-        # One predictor per horizon step (1..K)
         self.cpc_predictors = nn.ModuleList([
             nn.Sequential(
                 nn.Linear(embed_dim + embed_dim, cpc_dim),
@@ -100,7 +102,7 @@ class WorldModel(nn.Module):
             for _ in range(context_frames)
         ])
 
-        # Block-causal attention mask (bidirectional within blocks, causal across)
+        # Block-causal attention mask
         self.register_buffer("attn_mask", self._build_mask())
 
         self._init_weights()
@@ -109,39 +111,38 @@ class WorldModel(nn.Module):
     def _precompute_rope(dim, max_len, theta=10000.0):
         freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
         t = torch.arange(max_len, dtype=torch.float32)
-        angles = torch.outer(t, freqs)  # (max_len, dim//2)
+        angles = torch.outer(t, freqs)
         return torch.cos(angles), torch.sin(angles)
 
     def _build_mask(self):
         """Build hybrid attention mask.
 
-        Context frames: block-causal (bidirectional within frame, causal across).
-        Target frame: causal within the block (position t sees target tokens 0..t-1
-        only, plus all context). This prevents cheating via bidirectional attention.
+        Context frames: block-causal (bidirectional within frame block, causal across).
+        Target frame: causal within the block.
 
         Returns:
             mask: (seq_len, seq_len) bool — True = blocked.
         """
         S = self.seq_len
         K = self.context_frames
-        TPF = TOKENS_PER_FRAME
-        ctx_end = K * (TPF + 1)  # start of target block
+        BS = self.block_size  # tokens_per_frame + 1 (status token)
 
         # Assign block index to each position
         block_idx = torch.zeros(S, dtype=torch.long)
         pos = 0
         for i in range(K):
-            block_idx[pos:pos + TPF] = 2 * i        # frame i
-            pos += TPF
-            block_idx[pos] = 2 * i + 1               # action i
+            block_idx[pos:pos + BS] = 2 * i       # frame block i (visual + status)
+            pos += BS
+            block_idx[pos] = 2 * i + 1             # action i
             pos += 1
-        block_idx[pos:] = 2 * K                      # target frame
+        block_idx[pos:] = 2 * K                    # target frame block
 
         # Block-causal: query can attend to same or earlier blocks
         mask = block_idx.unsqueeze(1) < block_idx.unsqueeze(0)
 
         # Override target block: causal within (not bidirectional)
-        target_size = TPF
+        ctx_end = K * (BS + 1)
+        target_size = BS
         for i in range(target_size):
             for j in range(i + 1, target_size):
                 mask[ctx_end + i, ctx_end + j] = True
@@ -158,38 +159,24 @@ class WorldModel(nn.Module):
                 nn.init.normal_(module.weight, std=0.02)
 
     def _compute_cpc_loss(self, x, actions, temperature=0.1):
-        """Compute AC-CPC contrastive loss over context frame hidden states.
-
-        For each pair (source_step t, target_step t+k), predicts the hidden
-        representation at t+k conditioned on actions t..t+k-1.
-
-        Args:
-            x: (B, seq_len, D) — transformer output after ln_f.
-            actions: (B, K) long — action indices for context frames.
-            temperature: InfoNCE temperature.
-
-        Returns:
-            cpc_loss: scalar tensor.
-        """
+        """Compute AC-CPC contrastive loss over context frame hidden states."""
         K = self.context_frames
-        TPF = TOKENS_PER_FRAME
+        BS = self.block_size
         B = x.size(0)
 
         if B < 2:
             return torch.tensor(0.0, device=x.device)
 
-        # Action positions in sequence: after each frame's 36 tokens
-        action_positions = [i * (TPF + 1) + TPF for i in range(K)]
+        # Action positions: after each frame block (block_size tokens)
+        action_positions = [i * (BS + 1) + BS for i in range(K)]
 
-        # Extract hidden states at action positions + target summary (last pos)
+        # Hidden states at action positions + target summary (last pos)
         h_steps = [x[:, pos] for pos in action_positions]
         h_steps.append(x[:, -1])
 
-        # Project targets to CPC space (stop gradient on targets)
         z_targets = [F.normalize(self.cpc_target_proj(h.detach()), dim=-1)
                      for h in h_steps]
 
-        # Action embeddings for conditioning
         act_embeds = self.action_embed(actions)  # (B, K, D)
 
         total_loss = 0.0
@@ -197,19 +184,15 @@ class WorldModel(nn.Module):
 
         for step_idx, k in enumerate(range(1, K + 1)):
             predictor = self.cpc_predictors[step_idx]
-
             for t in range(K + 1 - k):
                 h_src = h_steps[t]
                 end = min(t + k, K)
                 if end <= t:
                     continue
                 act_ctx = act_embeds[:, t:end].mean(dim=1)
-
                 z_pred = predictor(torch.cat([h_src, act_ctx], dim=-1))
                 z_pred = F.normalize(z_pred, dim=-1)
                 z_pos = z_targets[t + k]
-
-                # InfoNCE: (B, B) similarity, diagonal = positives
                 sim = torch.mm(z_pred, z_pos.t()) / temperature
                 labels = torch.arange(B, device=sim.device)
                 total_loss += F.cross_entropy(sim, labels)
@@ -221,81 +204,88 @@ class WorldModel(nn.Module):
         """Forward pass.
 
         Args:
-            frame_tokens: (B, K+1, 36) long — K context frames + 1 target frame.
+            frame_tokens: (B, K+1, tokens_per_frame+1) long — K context + 1 target.
+                          Last column is the status token (ALIVE or DEATH).
             actions: (B, K) long — action for each context frame.
-            level_ids: (B,) long — level index (0-based). None = no conditioning.
+            level_ids: (B,) long — level index (0-based).
 
         Returns:
-            logits: (B, 36, vocab_size) — predictions for the target frame tokens.
-            death_logit: (B, 1) — death prediction logit (raw, pre-sigmoid).
-            cpc_loss: scalar — AC-CPC contrastive loss (0 during eval).
+            logits: (B, tokens_per_frame+1, full_vocab_size) — predictions for target.
+            cpc_loss: scalar — AC-CPC contrastive loss.
         """
         B = frame_tokens.size(0)
         K = self.context_frames
 
-        # Build interleaved sequence: [f0 a0 f1 a1 ... fK-1 aK-1 fK]
+        # Build interleaved sequence: [f0(65) a0 f1(65) a1 ... fK-1(65) aK-1 fK(65)]
         parts = []
         for i in range(K):
-            parts.append(self.token_embed(frame_tokens[:, i]))  # (B, 36, D)
-            act = self.action_embed(actions[:, i])               # (B, D)
+            parts.append(self.token_embed(frame_tokens[:, i]))  # (B, 65, D)
+            act = self.action_embed(actions[:, i])
             parts.append(act.unsqueeze(1))                       # (B, 1, D)
-        parts.append(self.token_embed(frame_tokens[:, K]))       # (B, 36, D) target
+        parts.append(self.token_embed(frame_tokens[:, K]))       # (B, 65, D) target
 
         x = torch.cat(parts, dim=1)  # (B, seq_len, D)
 
-        # Level conditioning (no absolute pos embed — RoPE handles position)
         if level_ids is not None:
             x = x + self.level_embed(level_ids).unsqueeze(1)
         x = self.embed_drop(x)
 
-        # Transformer blocks with RoPE
         for block in self.blocks:
             x = block(x, self.attn_mask, self.rope_cos, self.rope_sin)
         x = self.ln_f(x)
 
-        # GPT-style shift: predict target token t from position t-1.
-        predict_positions = x[:, -(TOKENS_PER_FRAME + 1):-1]  # (B, 36, D)
-        logits = self.head(predict_positions)  # (B, 36, vocab_size)
+        # GPT-style shift: predict target token t from position t-1
+        predict_positions = x[:, -(self.block_size + 1):-1]  # (B, 65, D)
+        logits = self.head(predict_positions)  # (B, 65, full_vocab_size)
 
-        # Death prediction from last position
-        death_logit = self.death_head(x[:, -1])  # (B, 1)
-
-        # AC-CPC loss (training only)
         if self.training:
             cpc_loss = self._compute_cpc_loss(x, actions)
         else:
             cpc_loss = torch.tensor(0.0, device=x.device)
 
-        return logits, death_logit, cpc_loss
+        return logits, cpc_loss
 
     @torch.no_grad()
     def predict_next_frame(self, frame_tokens, actions, level_ids=None):
-        """Predict next frame tokens autoregressively.
+        """Predict next frame tokens + death autoregressively.
 
         Args:
-            frame_tokens: (B, K, 36) long — K context frames.
+            frame_tokens: (B, K, tokens_per_frame+1) long — K context frames
+                          with status tokens.
             actions: (B, K) long — actions for context frames.
-            level_ids: (B,) long — level index (0-based). None = no conditioning.
+            level_ids: (B,) long — level index.
 
         Returns:
-            predicted: (B, 36) long — predicted next frame tokens.
-            death_prob: (B,) float — probability of death at predicted frame.
+            predicted: (B, tokens_per_frame) long — predicted visual tokens.
+            death_prob: (B,) float — probability of death.
         """
         B = frame_tokens.size(0)
-        predicted = torch.zeros(B, TOKENS_PER_FRAME, dtype=torch.long,
+        TPF = self.tokens_per_frame
+        predicted = torch.zeros(B, self.block_size, dtype=torch.long,
                                 device=frame_tokens.device)
+        # Initialize status token as ALIVE (will be overwritten)
+        predicted[:, TPF] = self.ALIVE_TOKEN
 
-        for t in range(TOKENS_PER_FRAME):
+        for t in range(self.block_size):
             full_frames = torch.cat([
                 frame_tokens,
                 predicted.unsqueeze(1),
             ], dim=1)
 
-            logits, death_logit, _ = self.forward(full_frames, actions, level_ids)
+            logits, _ = self.forward(full_frames, actions, level_ids)
             predicted[:, t] = logits[:, t].argmax(dim=-1)
 
-        death_prob = torch.sigmoid(death_logit).squeeze(-1)
-        return predicted, death_prob
+        # Death probability from the status position
+        # Re-run forward with final predictions to get status logits
+        full_frames = torch.cat([
+            frame_tokens,
+            predicted.unsqueeze(1),
+        ], dim=1)
+        logits, _ = self.forward(full_frames, actions, level_ids)
+        status_logits = logits[:, TPF]  # (B, full_vocab_size)
+        death_prob = F.softmax(status_logits, dim=-1)[:, self.DEATH_TOKEN]
+
+        return predicted[:, :TPF], death_prob
 
 
 class TransformerBlock(nn.Module):
@@ -322,17 +312,14 @@ class TransformerBlock(nn.Module):
         B, T, D = x.shape
         h = self.ln1(x)
 
-        # QKV projection → (B, T, 3, n_heads, head_dim)
         qkv = self.qkv(h).reshape(B, T, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)  # 3 × (B, n_heads, T, head_dim)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)
 
-        # Apply RoPE to Q and K
         q = apply_rope(q, rope_cos, rope_sin)
         k = apply_rope(k, rope_cos, rope_sin)
 
-        # Scaled dot-product attention
         scale = self.head_dim ** -0.5
-        attn = (q @ k.transpose(-2, -1)) * scale  # (B, n_heads, T, T)
+        attn = (q @ k.transpose(-2, -1)) * scale
 
         if attn_mask is not None:
             attn = attn.masked_fill(attn_mask, float('-inf'))
