@@ -21,7 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.world_model import WorldModel
 
 
-def train_epoch(model, loader, optimizer, cpc_weight, device, token_noise=0.0):
+def train_epoch(model, loader, optimizer, cpc_weight, device, token_noise=0.0,
+                label_smoothing=0.0):
     model.train()
     tpf = model.tokens_per_frame
     bs_tok = model.block_size  # tpf + 1 (visual + status)
@@ -53,6 +54,7 @@ def train_epoch(model, loader, optimizer, cpc_weight, device, token_noise=0.0):
         token_loss = torch.nn.functional.cross_entropy(
             logits.reshape(-1, model.full_vocab_size),
             target.reshape(-1),
+            label_smoothing=label_smoothing,
         )
         loss = token_loss + cpc_weight * cpc_loss
 
@@ -145,6 +147,8 @@ def main():
     parser.add_argument("--cpc-weight", type=float, default=0.1)
     parser.add_argument("--token-noise", type=float, default=0.10,
                         help="Scheduled sampling noise rate")
+    parser.add_argument("--label-smoothing", type=float, default=0.1,
+                        help="Label smoothing for cross-entropy loss")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -302,7 +306,8 @@ def main():
             t0 = time.time()
             train_loss, train_acc, train_death_acc, train_cpc = train_epoch(
                 model, train_loader, optimizer,
-                args.cpc_weight, device, token_noise=args.token_noise)
+                args.cpc_weight, device, token_noise=args.token_noise,
+                label_smoothing=args.label_smoothing)
             val_loss, val_acc, val_death_acc = val_epoch(
                 model, val_loader, device)
             scheduler.step()

@@ -61,6 +61,13 @@ def main():
     parser.add_argument("--n-layers", type=int, default=6)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    # Sampling
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="Sampling temperature for rollouts. 0 = greedy (default)")
+    parser.add_argument("--top-k", type=int, default=0,
+                        help="Top-k sampling. 0 = disabled")
+    parser.add_argument("--top-p", type=float, default=0.0,
+                        help="Nucleus sampling threshold. 0 = disabled")
     # Tokenizer-specific
     parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5])
     parser.add_argument("--num-embeddings", type=int, default=1024)
@@ -199,7 +206,10 @@ def main():
 
                 ctx_t = torch.from_numpy(ctx_with_status.astype(np.int64)).unsqueeze(0).to(device)
                 ctx_a = torch.from_numpy(ctx_actions.astype(np.int64)).unsqueeze(0).to(device)
-                pred_visual, death_prob = model.predict_next_frame(ctx_t, ctx_a, level_t)
+                pred_visual, death_prob = model.predict_next_frame(
+                    ctx_t, ctx_a, level_t,
+                    temperature=args.temperature, top_k=args.top_k,
+                    top_p=args.top_p)
                 pred_np = pred_visual[0].cpu().numpy()
                 dp = death_prob[0].item()
 
