@@ -404,16 +404,16 @@ class TransformerBlock(nn.Module):
 
         present_kv = (k, v) if use_cache else None
 
-        scale = self.head_dim ** -0.5
-        attn = (q @ k.transpose(-2, -1)) * scale
-
+        # SDPA expects bool mask where True = attend (opposite of ours)
         if attn_mask is not None:
-            attn = attn.masked_fill(attn_mask, float('-inf'))
+            sdpa_mask = ~attn_mask
+        else:
+            sdpa_mask = None
 
-        attn = F.softmax(attn, dim=-1)
-        attn = self.attn_drop(attn)
-
-        h = (attn @ v).transpose(1, 2).reshape(B, T, D)
+        drop_p = self.attn_drop.p if self.training else 0.0
+        h = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=sdpa_mask, dropout_p=drop_p,
+        ).transpose(1, 2).reshape(B, T, D)
         h = self.out_proj(h)
 
         x = x + self.resid_drop(h)
