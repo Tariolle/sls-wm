@@ -336,12 +336,23 @@ def main():
         last_epoch=start_epoch - 2 if start_epoch > 1 else -1)
 
     log_path = ckpt_dir / "transformer_log.csv"
-    if args.resume and start_epoch > 1:
+    # Append if log exists and last epoch is start_epoch-1 (seamless resume)
+    append = False
+    if log_path.exists() and start_epoch > 1:
+        with open(log_path) as f:
+            rows = list(csv.reader(f))
+            if rows:
+                try:
+                    last_logged = int(rows[-1][0])
+                    append = last_logged == start_epoch - 1
+                except (ValueError, IndexError):
+                    pass
+    if append:
         log_file = open(log_path, "a", newline="")
     else:
         log_file = open(log_path, "w", newline="")
     log_writer = csv.writer(log_file)
-    if not (args.resume and start_epoch > 1):
+    if not append:
         log_writer.writerow(["epoch", "train_loss", "train_acc", "train_death_acc",
                              "train_cpc", "val_loss", "val_acc", "val_death_acc",
                              "lr", "time_s"])
