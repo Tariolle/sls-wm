@@ -89,6 +89,8 @@ class WorldModel(nn.Module):
         self.ln_f = nn.LayerNorm(embed_dim)
         self.embed_drop = nn.Dropout(dropout)
         self.head = nn.Linear(embed_dim, self.full_vocab_size, bias=False)
+        # Weight tying: share embedding and output projection weights
+        self.head.weight = self.token_embed.weight
 
         # AC-CPC: contrastive prediction of future hidden states
         self.cpc_dim = cpc_dim
@@ -231,7 +233,7 @@ class WorldModel(nn.Module):
         x = self.embed_drop(x)
 
         for block in self.blocks:
-            x = block(x, self.attn_mask, self.rope_cos, self.rope_sin)
+            x, _ = block(x, self.attn_mask, self.rope_cos, self.rope_sin)
         x = self.ln_f(x)
 
         # GPT-style shift: predict target token t from position t-1
@@ -245,15 +247,56 @@ class WorldModel(nn.Module):
 
         return logits, cpc_loss
 
+    @staticmethod
+    def _sample_token(logits, temperature, top_k, top_p):
+        """Sample a token from logits with temperature, top-k, and top-p.
+
+        Args:
+            logits: (B, vocab) raw logits.
+            temperature: Scaling factor. 0 = greedy (argmax).
+            top_k: Keep only top-k logits. 0 = disabled.
+            top_p: Nucleus sampling threshold. 0 = disabled.
+
+        Returns:
+            (B,) sampled token indices.
+        """
+        if temperature <= 0:
+            return logits.argmax(dim=-1)
+
+        logits = logits / temperature
+
+        if top_k > 0:
+            top_values = logits.topk(top_k, dim=-1).values
+            logits[logits < top_values[..., -1:]] = float('-inf')
+
+        if 0 < top_p < 1.0:
+            sorted_logits, sorted_indices = logits.sort(dim=-1, descending=True)
+            cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+            # Remove tokens with cumulative probability above the threshold
+            # (keep at least one token)
+            remove = cumulative_probs - sorted_logits.softmax(dim=-1) >= top_p
+            sorted_logits[remove] = float('-inf')
+            logits = sorted_logits.scatter(-1, sorted_indices, sorted_logits)
+
+        probs = logits.softmax(dim=-1)
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
     @torch.no_grad()
-    def predict_next_frame(self, frame_tokens, actions, level_ids=None):
-        """Predict next frame tokens + death autoregressively.
+    def predict_next_frame(self, frame_tokens, actions, level_ids=None,
+                           temperature=0.0, top_k=0, top_p=0.0):
+        """Predict next frame tokens + death autoregressively (KV-cached).
+
+        Uses KV cache: one prefill pass over context, then single-token
+        decode steps for the target frame.
 
         Args:
             frame_tokens: (B, K, tokens_per_frame+1) long — K context frames
                           with status tokens.
             actions: (B, K) long — actions for context frames.
             level_ids: (B,) long — level index.
+            temperature: Sampling temperature. 0 = greedy (default).
+            top_k: Keep only top-k logits. 0 = disabled.
+            top_p: Nucleus sampling threshold. 0 = disabled.
 
         Returns:
             predicted: (B, tokens_per_frame) long — predicted visual tokens.
@@ -261,29 +304,64 @@ class WorldModel(nn.Module):
         """
         B = frame_tokens.size(0)
         TPF = self.tokens_per_frame
+        K = self.context_frames
+        device = frame_tokens.device
+
+        # --- Phase 1: Prefill context ---
+        # Build interleaved context: [f0(65) a0 f1(65) a1 ... fK-1(65) aK-1]
+        parts = []
+        for i in range(K):
+            parts.append(self.token_embed(frame_tokens[:, i]))   # (B, 65, D)
+            act = self.action_embed(actions[:, i])
+            parts.append(act.unsqueeze(1))                        # (B, 1, D)
+        x = torch.cat(parts, dim=1)  # (B, ctx_len, D)
+
+        if level_ids is not None:
+            x = x + self.level_embed(level_ids).unsqueeze(1)
+
+        ctx_len = K * (self.block_size + 1)
+        ctx_mask = self.attn_mask[:ctx_len, :ctx_len]
+        rope_cos_ctx = self.rope_cos[:ctx_len]
+        rope_sin_ctx = self.rope_sin[:ctx_len]
+
+        past_kvs = []
+        for block in self.blocks:
+            x, kv = block(x, ctx_mask, rope_cos_ctx, rope_sin_ctx,
+                          use_cache=True)
+            past_kvs.append(kv)
+        x = self.ln_f(x)
+
+        # First target token: predicted from last context position (GPT shift)
+        logits = self.head(x[:, -1])  # (B, full_vocab_size)
         predicted = torch.zeros(B, self.block_size, dtype=torch.long,
-                                device=frame_tokens.device)
-        # Initialize status token as ALIVE (will be overwritten)
-        predicted[:, TPF] = self.ALIVE_TOKEN
+                                device=device)
+        predicted[:, 0] = self._sample_token(logits, temperature, top_k, top_p)
 
-        for t in range(self.block_size):
-            full_frames = torch.cat([
-                frame_tokens,
-                predicted.unsqueeze(1),
-            ], dim=1)
+        # --- Phase 2: Decode target tokens 1..64 ---
+        for t in range(self.block_size - 1):
+            tok = self.token_embed(predicted[:, t:t + 1])  # (B, 1, D)
+            if level_ids is not None:
+                tok = tok + self.level_embed(level_ids).unsqueeze(1)
 
-            logits, _ = self.forward(full_frames, actions, level_ids)
-            predicted[:, t] = logits[:, t].argmax(dim=-1)
+            pos = ctx_len + t
+            rope_cos_t = self.rope_cos[pos:pos + 1]
+            rope_sin_t = self.rope_sin[pos:pos + 1]
 
-        # Death probability from the status position
-        # Re-run forward with final predictions to get status logits
-        full_frames = torch.cat([
-            frame_tokens,
-            predicted.unsqueeze(1),
-        ], dim=1)
-        logits, _ = self.forward(full_frames, actions, level_ids)
-        status_logits = logits[:, TPF]  # (B, full_vocab_size)
-        death_prob = F.softmax(status_logits, dim=-1)[:, self.DEATH_TOKEN]
+            h = tok
+            new_kvs = []
+            for i, block in enumerate(self.blocks):
+                h, kv = block(h, None, rope_cos_t, rope_sin_t,
+                              past_kv=past_kvs[i], use_cache=True)
+                new_kvs.append(kv)
+            past_kvs = new_kvs
+
+            h = self.ln_f(h)
+            logits = self.head(h[:, 0])  # (B, full_vocab_size)
+            predicted[:, t + 1] = self._sample_token(
+                logits, temperature, top_k, top_p)
+
+        # Death probability from the final logits (status token prediction)
+        death_prob = F.softmax(logits, dim=-1)[:, self.DEATH_TOKEN]
 
         return predicted[:, :TPF], death_prob
 
@@ -308,7 +386,8 @@ class TransformerBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, x, attn_mask, rope_cos, rope_sin):
+    def forward(self, x, attn_mask, rope_cos, rope_sin,
+                past_kv=None, use_cache=False):
         B, T, D = x.shape
         h = self.ln1(x)
 
@@ -317,6 +396,13 @@ class TransformerBlock(nn.Module):
 
         q = apply_rope(q, rope_cos, rope_sin)
         k = apply_rope(k, rope_cos, rope_sin)
+
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            k = torch.cat([past_k, k], dim=2)
+            v = torch.cat([past_v, v], dim=2)
+
+        present_kv = (k, v) if use_cache else None
 
         scale = self.head_dim ** -0.5
         attn = (q @ k.transpose(-2, -1)) * scale
@@ -332,4 +418,4 @@ class TransformerBlock(nn.Module):
 
         x = x + self.resid_drop(h)
         x = x + self.mlp(self.ln2(x))
-        return x
+        return x, present_kv
