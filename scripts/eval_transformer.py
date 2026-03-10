@@ -96,7 +96,11 @@ def main():
     model.load_state_dict(torch.load(args.transformer_checkpoint, map_location=device,
                                      weights_only=True))
     model.eval()
-    model = torch.compile(model)
+    if sys.platform != "win32":
+        try:
+            model = torch.compile(model)
+        except Exception:
+            pass
     _m = model._orig_mod if hasattr(model, "_orig_mod") else model
 
     # Find episodes
