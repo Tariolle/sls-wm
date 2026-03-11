@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from deepdash.gd_mem import GDReader
 
 
-# Win32 always-on-top helper with proper 64-bit type annotations
+# Win32 helpers
 _user32 = ctypes.windll.user32
 _user32.FindWindowW.argtypes = [wt.LPCWSTR, wt.LPCWSTR]
 _user32.FindWindowW.restype = wt.HWND
@@ -48,19 +48,18 @@ _user32.SetWindowPos.argtypes = [
     ctypes.c_int, ctypes.c_int, ctypes.c_uint,
 ]
 _user32.SetWindowPos.restype = wt.BOOL
+
 _HWND_TOPMOST = wt.HWND(-1)
-_SWP_FLAGS = 0x0002 | 0x0001 | 0x0010  # NOMOVE | NOSIZE | NOACTIVATE
-_cached_hwnd = None
+_SWP_NOACTIVATE = 0x0010
 
 
 def _force_topmost(window_title: str):
-    """Force a window to stay on top using Win32 SetWindowPos."""
-    global _cached_hwnd
-    if _cached_hwnd is None:
-        _cached_hwnd = _user32.FindWindowW(None, window_title)
-    if _cached_hwnd:
+    """Force a window to stay on top using Win32 SetWindowPos (every frame)."""
+    hwnd = _user32.FindWindowW(None, window_title)
+    if hwnd:
         _user32.SetWindowPos(
-            _cached_hwnd, _HWND_TOPMOST, 0, 0, 0, 0, _SWP_FLAGS)
+            hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
+            0x0002 | 0x0001 | _SWP_NOACTIVATE)  # NOMOVE | NOSIZE
 
 
 def preprocess_frame(rgb: np.ndarray, crop_x: int, crop_y: int,
@@ -127,12 +126,6 @@ STATE_WAIT_ATTEMPT = "DELAY"  # Respawned, waiting for "ATTEMPT" to clear
 def main():
     parser = argparse.ArgumentParser(
         description="Record Geometry Dash gameplay for training data")
-    parser.add_argument("--crop-x", type=int, default=660,
-                        help="Crop X offset within captured window (default: 660)")
-    parser.add_argument("--crop-y", type=int, default=48,
-                        help="Crop Y offset within captured window (default: 48)")
-    parser.add_argument("--crop-size", type=int, default=1032,
-                        help="Crop square size (default: 1032)")
     parser.add_argument("--target-size", type=int, default=64,
                         help="Output frame size (default: 64)")
     parser.add_argument("--fps", type=int, default=30,
@@ -169,13 +162,17 @@ def main():
         print("Make sure Geometry Dash is running.")
         return
 
+    # Capture full screen (GD should be in fullscreen mode)
+    region = (0, 0, 1920, 1080)
+    crop_x, crop_y, crop_size = 660, 48, 1032
+    print(f"  Capture: {region}, crop: {crop_size}x{crop_size} at ({crop_x}, {crop_y})")
+
     episodes_dir = Path(args.output_dir)
     episodes_dir.mkdir(parents=True, exist_ok=True)
     episode_id = next_episode_id(episodes_dir)
 
     # DXGI hardware-accelerated capture
     cam = dxcam.create()
-    region = (0, 0, 1920, 1080)
 
     frame_interval = 1.0 / args.fps
     state = STATE_IDLE
@@ -249,8 +246,8 @@ def main():
         img = cam.grab(region=region)
         if img is not None:
             edge_frame = preprocess_frame(
-                img, args.crop_x, args.crop_y,
-                args.crop_size, args.target_size)
+                img, crop_x, crop_y,
+                crop_size, args.target_size)
 
             # --- Record frame + action if recording ---
             if state == STATE_RECORDING:
@@ -277,9 +274,7 @@ def main():
                             (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                             (0, 0, 255), 1)
             cv2.imshow("DeepDash Recorder", preview_bgr)
-            if not preview_topmost_set:
-                _force_topmost("DeepDash Recorder")
-                preview_topmost_set = True
+            _force_topmost("DeepDash Recorder")
 
         # --- Handle OpenCV key events ---
         cv2.waitKey(1)
