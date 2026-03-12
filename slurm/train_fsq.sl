@@ -7,7 +7,7 @@
 #SBATCH -n 1
 #SBATCH --cpus-per-gpu 8
 #SBATCH --mem 64G
-#SBATCH --time=02:00:00
+#SBATCH --time=08:00:00
 
 # Train FSQ-VAE on A100 with bf16 AMP and torch.compile.
 #
@@ -24,8 +24,8 @@ module load aidl/pytorch/2.6.0-cuda12.6
 python -u scripts/train_fsq.py \
     --episodes-dir data/episodes \
     --epochs 200 \
-    --batch-size 512 \
-    --lr 4e-3 \
+    --batch-size 2048 \
+    --lr 1e-3 \
     --checkpoint-dir checkpoints \
     --levels 8 5 5 5 \
     --alpha-slow 0.1 \
