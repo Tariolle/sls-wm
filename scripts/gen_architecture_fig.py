@@ -22,7 +22,7 @@ boxes = [
     (3.5,  0.8, 3.0, 3.2, "#2d6a4f", "V",
      "FSQ-VAE", "Encoder"),
     (7.3,  0.8, 3.0, 3.2, "#1a5276", "M",
-     "Transformer", "P(tokens$_{t+1}$ | tokens$_t$, $a_t$)"),
+     "Transformer", "P(tokens$_{t+1}$, death | tokens$_t$, $a_t$)"),
     (11.1, 0.8, 3.0, 3.2, "#7b2d3b", "C",
      "Linear Controller", "$a = W \\cdot h_t$"),
     (14.5, 0.8, 1.3, 3.2, "#1a1f2e", "OUT",
@@ -53,7 +53,7 @@ arrow_props = dict(arrowstyle="-|>", color="#4aa3df", lw=2.5,
 # (x_start, x_end, label_above, label_below)
 arrows = [
     (2.7,  3.5,  "4,096 floats",       "32,768 bits"),
-    (6.5,  7.3,  "8×8 = 64 tokens",    "638 bits (51× compression)"),
+    (6.5,  7.3,  "64 tokens + death",   "638 bits (51× compression)"),
     (10.3, 11.1, "$h_t \\in R^d$",     ""),
     (14.1, 14.5, "",                    "1 bit"),
 ]
