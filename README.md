@@ -39,7 +39,7 @@ The system is composed of three distinct neural networks trained sequentially:
 * **Type:** Transformer (autoregressive, on discrete tokens).
 * **Input:** Sequence of 64 FSQ codes per frame + action token + status token, with block-causal attention (bidirectional within frames, causal across) and RoPE (Rotary Position Embeddings).
 * **Function:** Predicts the next frame's 64 tokens given the current tokenized state and action — a classification task over vocabulary 1002 (1000 visual codes + ALIVE + DEATH status tokens), not continuous regression. Death is predicted via a dedicated **death token** appended as the 65th position of each frame block, turning death prediction into the same next-token classification task.
-* **Training Losses:** Cross-entropy on next-frame tokens + death token classification + AC-CPC contrastive loss (TWISTER, ICLR 2025) that predicts future hidden states conditioned on actions. Scheduled sampling (5% token noise) reduces train/inference distribution gap.
+* **Training Losses:** Cross-entropy on next-frame tokens + death token classification + AC-CPC contrastive loss (TWISTER, ICLR 2025) that predicts future hidden states conditioned on actions. Scheduled sampling (10% token noise) reduces train/inference distribution gap.
 * **AC-CPC Lineage:** AC-CPC extends Contrastive Predictive Coding (CPC, Oord et al., 2018), which pioneered the idea of predicting future representations in latent space rather than reconstructing raw inputs. AC-CPC adds **action conditioning** — predicting future hidden states conditioned on the action sequence taken between timesteps, making it suitable for control settings. This principle of latent-space prediction is the same one that LeCun later formalized as the **JEPA** (Joint-Embedding Predictive Architecture, 2022) framework, which retroactively unifies methods like CPC, BYOL, and VICReg under a single conceptual family. In this sense, AC-CPC can be seen as an action-conditioned instance of the JEPA paradigm.
 * **Architecture:** 6 layers, 128d embeddings, 4 heads, C=4 context frames.
 * **Why Transformer over RNN:** With an LSTM/GRU, the FSQ's quantized vectors must be flattened into a continuous input (64 x 4d = 256 floats), yielding only 16x compression over the raw frame. A Transformer operates directly on discrete token indices, preserving the full 51x compression — a 3.2x improvement. The Transformer also naturally handles action conditioning via attention and captures long-range spatial dependencies across the token grid. This aligns with modern world model architectures (IRIS, GENIE) that use Transformers on discrete visual tokens.
@@ -123,22 +123,23 @@ The initial dataset was recorded on the first official levels of the game (level
 
 ### Current Dataset
 
-* **~2,000 episodes**, **~95K frames** across official levels (1–7) and vanilla-style custom levels, recorded at 30 FPS.
+* **~3,600 episodes**, **~179K frames** across official levels (1–7) and vanilla-style custom levels, recorded at 30 FPS.
 * Episodes range from a few frames (instant deaths) to several hundred (successful runs or clears).
+* Multi-user recording supported (`--user` flag) with 10K episode ranges per user, enabling parallel data collection.
 * The dataset has been scaled incrementally — the last time we tripled the dataset size, transformer accuracy roughly doubled, suggesting the model is still in the data-hungry regime.
 
 ## 5. Project Roadmap
 
 ### Phase 1: Vision — FSQ-VAE Tokenizer on Real Game Footage ✓
 
-* **Status:** Complete (val_recon ~1.79 on 1080p data).
-* **Result:** FSQ levels $[8,5,5,5]$ (1000 codes), 4d latents, 8×8 spatial grid (64 tokens/frame). Sharp reconstructions preserving platforms, spikes, and player position.
+* **Status:** Complete. Retrained on expanded 30 FPS dataset (~179K frames) on A100 with bf16 AMP and torch.compile (val_recon 2.57). Sharp reconstructions preserving platforms, spikes, and player position while filtering visual noise.
+* **Result:** FSQ levels $[8,5,5,5]$ (1000 codes), 4d latents, 8×8 spatial grid (64 tokens/frame).
+* **Training:** GRWM regularization (temporal slowness + uniformity), ±4px random shift augmentation, cosine LR schedule. Batch size 2048 on A100.
 
 ### Phase 2: Dynamics — Transformer World Model (current)
 
-* **Status:** V5 architecture defined. Previous training on old dataset (332 episodes, ~21 FPS) achieved 21.9% val token accuracy. Retraining on new dataset (~2,000 episodes, 30 FPS) pending.
-* **Architecture:** Block-causal + RoPE + AC-CPC contrastive loss + death token + scheduled sampling.
-* **Next:** Retrain FSQ and Transformer on expanded 30 FPS dataset.
+* **Status:** Training on A100 with expanded 30 FPS dataset (~3,600 episodes, ~179K frames). Previous training on old dataset (332 episodes, ~21 FPS) achieved 21.9% val token accuracy.
+* **Architecture:** Block-causal attention + 3D-RoPE (row, col, frame) + AC-CPC contrastive loss + death token + focal loss + scheduled sampling (10% noise) + death oversampling (15×).
 
 ### Phase 3: Control — Dream-Trained Agent
 
