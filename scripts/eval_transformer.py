@@ -31,8 +31,9 @@ def load_tokenizer(args, device):
         model = VQVAE(num_embeddings=args.num_embeddings,
                       embedding_dim=args.embedding_dim).to(device)
         grid_size = 6
-    model.load_state_dict(torch.load(args.tokenizer_checkpoint, map_location=device,
-                                     weights_only=True))
+    state = torch.load(args.tokenizer_checkpoint, map_location=device, weights_only=True)
+    state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
+    model.load_state_dict(state)
     model.eval()
     return model, grid_size
 
@@ -93,8 +94,9 @@ def main():
         dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
     ).to(device)
-    model.load_state_dict(torch.load(args.transformer_checkpoint, map_location=device,
-                                     weights_only=True))
+    state = torch.load(args.transformer_checkpoint, map_location=device, weights_only=True)
+    state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
+    model.load_state_dict(state)
     model.eval()
     if sys.platform != "win32":
         try:
