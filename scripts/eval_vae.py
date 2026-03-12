@@ -52,7 +52,10 @@ def main():
         else:
             from deepdash.vqvae import VQVAE
             m = VQVAE(num_embeddings=args.num_embeddings, embedding_dim=args.embedding_dim)
-        m.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
+        state = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        # Strip _orig_mod. prefix from torch.compile checkpoints
+        state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
+        m.load_state_dict(state)
         m.to(device)
         m.eval()
         return m

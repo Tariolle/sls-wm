@@ -50,7 +50,9 @@ def main():
         grid_size = 6
         tokens_per_frame = 36
 
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device, weights_only=True))
+    state = torch.load(args.checkpoint, map_location=device, weights_only=True)
+    state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
+    model.load_state_dict(state)
     model.eval()
     print(f"Loaded {args.model.upper()} from {args.checkpoint}")
 

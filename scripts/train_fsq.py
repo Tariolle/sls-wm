@@ -179,7 +179,9 @@ def main():
 
     model = FSQVAE(levels=args.levels).to(device)
     if args.resume:
-        model.load_state_dict(torch.load(args.resume, map_location=device, weights_only=True))
+        state = torch.load(args.resume, map_location=device, weights_only=True)
+        state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
+        model.load_state_dict(state)
         print(f"Resumed from {args.resume}")
 
     param_count = sum(p.numel() for p in model.parameters())
@@ -239,12 +241,17 @@ def main():
 
             if val_recon < best_val_recon:
                 best_val_recon = val_recon
-                torch.save(model.state_dict(), ckpt_dir / "fsq_best.pt")
+                # Strip _orig_mod. prefix from torch.compile for portable checkpoints
+                clean_state = {k.removeprefix("_orig_mod."): v
+                               for k, v in model.state_dict().items()}
+                torch.save(clean_state, ckpt_dir / "fsq_best.pt")
     except KeyboardInterrupt:
         print("\nInterrupted — saving final checkpoint...")
 
     log_file.close()
-    torch.save(model.state_dict(), ckpt_dir / "fsq_final.pt")
+    clean_state = {k.removeprefix("_orig_mod."): v
+                   for k, v in model.state_dict().items()}
+    torch.save(clean_state, ckpt_dir / "fsq_final.pt")
     print(f"\nTraining complete. Best val recon: {best_val_recon:.4f}")
     print(f"Checkpoints saved to {ckpt_dir}/")
 
