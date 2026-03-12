@@ -1,4 +1,4 @@
-"""Transformer world model V5 — block-causal + RoPE + death token + AC-CPC.
+"""Transformer world model V5 — block-causal + 3D-RoPE + death token + AC-CPC.
 
 Predicts next-frame tokens given past frames + actions.
 Death is represented as a token (not a separate head) — the 65th position
@@ -10,10 +10,16 @@ Sequence format (K context frames, T tokens/frame):
 Block-causal attention: bidirectional within each frame/action block, causal across.
 Target frame uses causal masking within. GPT-shift: position t-1 predicts token t.
 
+3D-RoPE: Each token gets (row, col, frame_idx) coordinates. Head dimensions are
+split into three bands with separate frequency bases — lower theta for spatial
+axes (positions 0–7) to give meaningful angular variation at small distances.
+Inspired by V-JEPA 2 (Bardes et al., 2025).
+
 References:
     - IRIS (Micheli et al., ICLR 2023): block-causal attention on VQ tokens
     - TWISTER (Burchert et al., ICLR 2025): AC-CPC contrastive loss
     - Su et al., 2021: RoFormer / Rotary Position Embeddings
+    - Bardes et al., 2025: V-JEPA 2 — 3D factored RoPE
 """
 
 import torch
@@ -73,9 +79,10 @@ class WorldModel(nn.Module):
         self.token_embed = nn.Embedding(self.full_vocab_size, embed_dim)
         self.action_embed = nn.Embedding(n_actions, embed_dim)
 
-        # RoPE precomputed frequencies
+        # 3D-RoPE precomputed frequencies
         head_dim = embed_dim // n_heads
-        rope_cos, rope_sin = self._precompute_rope(head_dim, self.seq_len)
+        self.grid_size = int(tokens_per_frame ** 0.5)
+        rope_cos, rope_sin = self._precompute_rope_3d(head_dim)
         self.register_buffer("rope_cos", rope_cos)
         self.register_buffer("rope_sin", rope_sin)
 
@@ -107,11 +114,90 @@ class WorldModel(nn.Module):
 
         self._init_weights()
 
-    @staticmethod
-    def _precompute_rope(dim, max_len, theta=10000.0):
-        freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-        t = torch.arange(max_len, dtype=torch.float32)
-        angles = torch.outer(t, freqs)
+    def _build_position_ids(self):
+        """Build 3D position IDs (row, col, frame) for each sequence position.
+
+        Visual tokens get their grid coordinates. Status and action tokens
+        get the grid center as their spatial position (they summarise the
+        whole frame, so no single spatial location is preferred).
+        """
+        S = self.seq_len
+        K = self.context_frames
+        BS = self.block_size
+        G = self.grid_size
+        center = (G - 1) / 2.0  # 3.5 for 8×8
+
+        rows = torch.zeros(S)
+        cols = torch.zeros(S)
+        frames = torch.zeros(S)
+
+        pos = 0
+        for i in range(K):
+            # Visual tokens (tokens_per_frame positions)
+            for j in range(self.tokens_per_frame):
+                rows[pos + j] = j // G
+                cols[pos + j] = j % G
+                frames[pos + j] = i
+            # Status token
+            rows[pos + self.tokens_per_frame] = center
+            cols[pos + self.tokens_per_frame] = center
+            frames[pos + self.tokens_per_frame] = i
+            pos += BS
+            # Action token
+            rows[pos] = center
+            cols[pos] = center
+            frames[pos] = i
+            pos += 1
+
+        # Target frame
+        for j in range(self.tokens_per_frame):
+            rows[pos + j] = j // G
+            cols[pos + j] = j % G
+            frames[pos + j] = K
+        rows[pos + self.tokens_per_frame] = center
+        cols[pos + self.tokens_per_frame] = center
+        frames[pos + self.tokens_per_frame] = K
+
+        return rows, cols, frames
+
+    def _precompute_rope_3d(self, head_dim, theta_spatial=10.0,
+                            theta_temporal=10000.0):
+        """Precompute 3D-RoPE cos/sin tables.
+
+        Splits head_dim into three bands (row, col, time) and uses a
+        lower base frequency for spatial axes so that positions 0–7
+        produce meaningful angular variation.
+
+        Args:
+            head_dim: Dimension per attention head.
+            theta_spatial: Base frequency for row/col axes (default 10).
+            theta_temporal: Base frequency for frame axis (default 10000).
+
+        Returns:
+            cos, sin: (seq_len, head_dim // 2) each.
+        """
+        # Split head_dim into three even-sized bands
+        d_row = (head_dim // 3) & ~1  # round down to nearest even
+        d_col = d_row
+        d_time = head_dim - d_row - d_col
+        assert d_time > 0 and d_time % 2 == 0, (
+            f"head_dim={head_dim} does not split cleanly into 3 even bands"
+        )
+
+        row_freqs = 1.0 / (theta_spatial ** (
+            torch.arange(0, d_row, 2, dtype=torch.float32) / d_row))
+        col_freqs = 1.0 / (theta_spatial ** (
+            torch.arange(0, d_col, 2, dtype=torch.float32) / d_col))
+        time_freqs = 1.0 / (theta_temporal ** (
+            torch.arange(0, d_time, 2, dtype=torch.float32) / d_time))
+
+        rows, cols, frames = self._build_position_ids()
+
+        row_angles = torch.outer(rows, row_freqs)      # (S, d_row/2)
+        col_angles = torch.outer(cols, col_freqs)       # (S, d_col/2)
+        time_angles = torch.outer(frames, time_freqs)   # (S, d_time/2)
+
+        angles = torch.cat([row_angles, col_angles, time_angles], dim=-1)
         return torch.cos(angles), torch.sin(angles)
 
     def _build_mask(self):
