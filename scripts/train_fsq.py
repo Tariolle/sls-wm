@@ -65,22 +65,25 @@ class FramePairDataset(Dataset):
         return ft, ft1
 
 
-def train_epoch(model, loader, optimizer, alpha_slow, alpha_uniform):
+def train_epoch(model, loader, optimizer, alpha_slow, alpha_uniform,
+                scaler=None, amp_dtype=None):
     model.train()
     total_recon, total_slow, total_uniform, n = 0, 0, 0, 0
     for ft, ft1 in loader:
-        recon_t, z_e_t, _ = model(ft)
-        recon_t1, z_e_t1, _ = model(ft1)
+        with torch.amp.autocast("cuda", enabled=amp_dtype is not None, dtype=amp_dtype):
+            recon_t, z_e_t, _ = model(ft)
+            recon_t1, z_e_t1, _ = model(ft1)
 
-        recon_loss = (fsqvae_loss(recon_t, ft) + fsqvae_loss(recon_t1, ft1)) / 2
-        slow_loss = grwm_slowness(z_e_t, z_e_t1)
-        uniform_loss = grwm_uniformity(z_e_t)
+            recon_loss = (fsqvae_loss(recon_t, ft) + fsqvae_loss(recon_t1, ft1)) / 2
+            slow_loss = grwm_slowness(z_e_t, z_e_t1)
+            uniform_loss = grwm_uniformity(z_e_t)
 
-        loss = recon_loss + alpha_slow * slow_loss + alpha_uniform * uniform_loss
+            loss = recon_loss + alpha_slow * slow_loss + alpha_uniform * uniform_loss
 
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         bs = ft.size(0)
         total_recon += recon_loss.item() * bs
@@ -91,12 +94,13 @@ def train_epoch(model, loader, optimizer, alpha_slow, alpha_uniform):
 
 
 @torch.no_grad()
-def val_epoch(model, loader):
+def val_epoch(model, loader, amp_dtype=None):
     model.eval()
     total_recon, n = 0, 0
     for ft, ft1 in loader:
-        recon_t, _, _ = model(ft)
-        recon_loss = fsqvae_loss(recon_t, ft)
+        with torch.amp.autocast("cuda", enabled=amp_dtype is not None, dtype=amp_dtype):
+            recon_t, _, _ = model(ft)
+            recon_loss = fsqvae_loss(recon_t, ft)
         bs = ft.size(0)
         total_recon += recon_loss.item() * bs
         n += bs
@@ -120,6 +124,10 @@ def main():
     parser.add_argument("--val-ratio", type=float, default=0.1,
                         help="Fraction of episodes for validation")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--amp", action="store_true",
+                        help="Enable bf16 automatic mixed precision (A100+)")
+    parser.add_argument("--compile", action="store_true",
+                        help="Use torch.compile for faster training")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -162,6 +170,20 @@ def main():
     print(f"Model parameters: {param_count:,}")
     print(f"FSQ levels: {args.levels} -> {model.codebook_size} implicit codes")
 
+    if args.compile:
+        try:
+            model = torch.compile(model)
+            print("torch.compile enabled")
+        except Exception as e:
+            print(f"torch.compile failed ({e}), continuing without it")
+
+    use_amp = args.amp and device.type == "cuda"
+    amp_dtype = torch.bfloat16 if use_amp else None
+    # bf16 doesn't need loss scaling; GradScaler with enabled=False is a no-op passthrough
+    scaler = torch.amp.GradScaler(device.type, enabled=False)
+    if use_amp:
+        print(f"AMP enabled with {amp_dtype}")
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=1e-5)
@@ -180,8 +202,9 @@ def main():
         for epoch in range(1, args.epochs + 1):
             t0 = time.time()
             train_recon, train_slow, train_uniform = train_epoch(
-                model, train_loader, optimizer, args.alpha_slow, args.alpha_uniform)
-            val_recon = val_epoch(model, val_loader)
+                model, train_loader, optimizer, args.alpha_slow, args.alpha_uniform,
+                scaler=scaler, amp_dtype=amp_dtype)
+            val_recon = val_epoch(model, val_loader, amp_dtype=amp_dtype)
             scheduler.step()
             dt = time.time() - t0
             lr = optimizer.param_groups[0]["lr"]
