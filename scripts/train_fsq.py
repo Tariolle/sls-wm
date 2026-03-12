@@ -52,16 +52,31 @@ class FramePairDataset(Dataset):
         return self.frames_t[idx], self.frames_t1[idx]
 
 
-def augment_batch(ft, ft1, pad=4):
-    """Batch-level random shift augmentation (same shift for both frames)."""
+def augment_batch(ft, ft1, pad=4, size=64):
+    """Batch-level random shift augmentation (per-sample offsets via grid_sample)."""
     B = ft.size(0)
-    # Pad with edge replication: (B, 1, 64, 64) -> (B, 1, 72, 72)
-    padded_t = F.pad(ft, [pad] * 4, mode='replicate')
-    padded_t1 = F.pad(ft1, [pad] * 4, mode='replicate')
-    # Random crop offset (same for entire batch per call)
-    i = torch.randint(0, 2 * pad + 1, (1,)).item()
-    j = torch.randint(0, 2 * pad + 1, (1,)).item()
-    return padded_t[:, :, i:i+64, j:j+64], padded_t1[:, :, i:i+64, j:j+64]
+    # Random pixel offsets per sample: values in [0, 2*pad]
+    di = torch.randint(0, 2 * pad + 1, (B,), device=ft.device, dtype=ft.dtype)
+    dj = torch.randint(0, 2 * pad + 1, (B,), device=ft.device, dtype=ft.dtype)
+    # Convert pixel offsets to normalized [-1, 1] grid coordinates
+    # Original 64px maps to [-1, 1]. Shift by di/dj pixels = shift by di/32 in norm coords.
+    # Crop window: start at (-1 + di/32), span 64px = 2.0 in norm coords (no pad needed).
+    # With pad=4, we want to sample from [-1 - 4/32, 1 + 4/32] range (edge-padded by grid_sample).
+    shift_i = (di - pad) / (size / 2)  # (B,) in [-pad/32, +pad/32]
+    shift_j = (dj - pad) / (size / 2)
+    # Base grid: uniform [-1, 1] for 64x64
+    grid_y = torch.linspace(-1, 1, size, device=ft.device)
+    grid_x = torch.linspace(-1, 1, size, device=ft.device)
+    gy, gx = torch.meshgrid(grid_y, grid_x, indexing='ij')
+    grid = torch.stack([gx, gy], dim=-1).unsqueeze(0).expand(B, -1, -1, -1)  # (B, 64, 64, 2)
+    # Apply per-sample shifts
+    grid = grid.clone()
+    grid[..., 0] += shift_j.view(B, 1, 1)
+    grid[..., 1] += shift_i.view(B, 1, 1)
+    # grid_sample with border padding (equivalent to edge replication)
+    out_t = F.grid_sample(ft, grid, mode='nearest', padding_mode='border', align_corners=True)
+    out_t1 = F.grid_sample(ft1, grid, mode='nearest', padding_mode='border', align_corners=True)
+    return out_t, out_t1
 
 
 def train_epoch(model, loader, optimizer, alpha_slow, alpha_uniform,
