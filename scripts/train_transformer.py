@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader, WeightedRandomSampler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.world_model import WorldModel
@@ -117,6 +117,7 @@ def val_epoch(model, loader, device):
     vocab = m.full_vocab_size
     total_loss, total_correct, total_tokens = 0, 0, 0
     total_death_correct, total_death_samples = 0, 0
+    total_cpc_loss = 0.0
 
     use_amp = device.type == "cuda"
 
@@ -127,18 +128,21 @@ def val_epoch(model, loader, device):
         target = frame_tokens[:, -1]
 
         with torch.autocast(device.type, dtype=torch.float16, enabled=use_amp):
-            logits, _ = model(frame_tokens, actions)
+            logits, cpc_loss = model(frame_tokens, actions)
 
-        visual_target = target[:, :tpf]
-        visual_logits = logits[:, :tpf]
-        token_loss = torch.nn.functional.cross_entropy(
-            visual_logits.reshape(-1, vocab),
-            visual_target.reshape(-1),
+        # Loss on all tokens (visual + status) — consistent with train_epoch
+        token_loss = F.cross_entropy(
+            logits.reshape(-1, vocab),
+            target.reshape(-1),
         )
 
         bs = frame_tokens.size(0)
-        total_loss += token_loss.item() * bs * tpf
-        total_correct += (visual_logits.argmax(dim=-1) == visual_target).sum().item()
+        total_loss += token_loss.item() * bs
+        total_cpc_loss += cpc_loss.item() * bs
+
+        visual_preds = logits[:, :tpf].argmax(dim=-1)
+        visual_target = target[:, :tpf]
+        total_correct += (visual_preds == visual_target).sum().item()
         total_tokens += bs * tpf
 
         status_target = target[:, tpf]
@@ -146,8 +150,9 @@ def val_epoch(model, loader, device):
         total_death_correct += (status_pred == status_target).sum().item()
         total_death_samples += bs
 
-    return (total_loss / total_tokens, total_correct / total_tokens,
-            total_death_correct / total_death_samples)
+    return (total_loss / total_death_samples, total_correct / total_tokens,
+            total_death_correct / total_death_samples,
+            total_cpc_loss / total_death_samples)
 
 
 def main():
@@ -204,7 +209,7 @@ def main():
 
     K = args.context_frames
     TPF = args.tokens_per_frame
-    train_frames, train_actions = [], []
+    train_frames, train_actions, train_weights = [], [], []
     val_frames, val_actions = [], []
 
     n_deaths = 0
@@ -235,10 +240,11 @@ def main():
 
             # Pack: (K+1, TPF+1) where last col is status
             frame_with_status = np.concatenate([frame_window, status], axis=1)
-            repeats = args.death_oversample if is_death_frame else 1
-            for _ in range(repeats):
-                f_list.append(frame_with_status)
-                a_list.append(action_window)
+            f_list.append(frame_with_status)
+            a_list.append(action_window)
+            if not is_val:
+                train_weights.append(
+                    float(args.death_oversample) if is_death_frame else 1.0)
 
     # Create model first to get token indices
     model = WorldModel(
@@ -269,17 +275,18 @@ def main():
 
     train_dataset = TensorDataset(train_frames_t, train_actions_t)
     val_dataset = TensorDataset(val_frames_t, val_actions_t)
-    total_samples = len(train_dataset) + len(val_dataset)
-    print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
-    print(f"Death frames: {n_deaths} unique, {n_deaths * args.death_oversample} after {args.death_oversample}x oversample ({100*n_deaths*args.death_oversample/total_samples:.1f}%)")
+    print(f"Train samples: {len(train_dataset)} unique, Val samples: {len(val_dataset)}")
+    print(f"Death frames: {n_deaths} unique, weighted {args.death_oversample}x via sampler")
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {param_count:,}")
     print(f"Context: {args.context_frames} frames, Sequence length: {model.seq_len}")
     print(f"Vocab: {args.vocab_size} visual + 2 status = {model.full_vocab_size}")
 
+    train_sampler = WeightedRandomSampler(
+        train_weights, num_samples=int(sum(train_weights)), replacement=True)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
-                              shuffle=True, num_workers=0, pin_memory=True)
+                              sampler=train_sampler, num_workers=0, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
                             shuffle=False, num_workers=0, pin_memory=True)
 
@@ -341,7 +348,7 @@ def main():
     if not append:
         log_writer.writerow(["epoch", "train_loss", "train_acc", "train_death_acc",
                              "train_cpc", "val_loss", "val_acc", "val_death_acc",
-                             "lr", "time_s"])
+                             "val_cpc", "lr", "time_s"])
 
     patience_counter = 0
 
@@ -354,7 +361,7 @@ def main():
                 args.cpc_weight, device, token_noise=args.token_noise,
                 label_smoothing=args.label_smoothing,
                 focal_gamma=args.focal_gamma)
-            val_loss, val_acc, val_death_acc = val_epoch(
+            val_loss, val_acc, val_death_acc, val_cpc = val_epoch(
                 model, val_loader, device)
             scheduler.step()
             dt = time.time() - t0
@@ -364,14 +371,15 @@ def main():
                 f"Epoch {epoch:3d}/{args.epochs} ({dt:.1f}s) | "
                 f"Train: loss={train_loss:.4f} acc={train_acc:.3f} "
                 f"death={train_death_acc:.3f} cpc={train_cpc:.3f} | "
-                f"Val: loss={val_loss:.4f} acc={val_acc:.3f} death={val_death_acc:.3f} | "
+                f"Val: loss={val_loss:.4f} acc={val_acc:.3f} "
+                f"death={val_death_acc:.3f} cpc={val_cpc:.3f} | "
                 f"LR: {lr:.1e}"
             )
 
             log_writer.writerow([
                 epoch, f"{train_loss:.6f}", f"{train_acc:.4f}", f"{train_death_acc:.4f}",
                 f"{train_cpc:.4f}", f"{val_loss:.6f}", f"{val_acc:.4f}",
-                f"{val_death_acc:.4f}", f"{lr:.1e}", f"{dt:.1f}"
+                f"{val_death_acc:.4f}", f"{val_cpc:.4f}", f"{lr:.1e}", f"{dt:.1f}"
             ])
             log_file.flush()
 

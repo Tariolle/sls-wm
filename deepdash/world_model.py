@@ -320,10 +320,7 @@ class WorldModel(nn.Module):
         predict_positions = x[:, -(self.block_size + 1):-1]  # (B, 65, D)
         logits = self.head(predict_positions)  # (B, 65, full_vocab_size)
 
-        if self.training:
-            cpc_loss = self._compute_cpc_loss(x, actions)
-        else:
-            cpc_loss = torch.tensor(0.0, device=x.device)
+        cpc_loss = self._compute_cpc_loss(x, actions)
 
         return logits, cpc_loss
 
