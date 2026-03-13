@@ -1,17 +1,20 @@
-"""Visualize FSQ neighbor similarity: decode a token and its ±1 neighbors in each dim.
+"""Visualize FSQ neighbor similarity on real frames.
 
-For 5 random tokens, shows the original decoded patch and its 8 neighbors
-(±1 in each of the 4 FSQ dimensions). Helps verify whether FSQ neighbors
-are semantically similar (for structured token noise augmentation).
+For 5 random frames, picks a random token position, swaps it with each
+FSQ neighbor (±1 in each of the 4 dimensions), and decodes the full 8×8
+grid to show the visual effect. Helps verify whether FSQ neighbors
+produce semantically similar reconstructions.
 
 Usage:
     python scripts/visualize_fsq_neighbors.py
-    python scripts/visualize_fsq_neighbors.py --checkpoint checkpoints/fsq_best.pt
+    python scripts/visualize_fsq_neighbors.py --episodes-dir data/episodes
 """
 
 import argparse
 import sys
 from pathlib import Path
+
+from matplotlib.patches import Rectangle
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -19,12 +22,13 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from deepdash.fsq import FSQVAE, FSQQuantizer
+from deepdash.fsq import FSQVAE
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", default="checkpoints/fsq_best.pt")
+    parser.add_argument("--episodes-dir", default="data/episodes")
     parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5])
     parser.add_argument("--n-examples", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
@@ -43,50 +47,81 @@ def main():
     levels = args.levels
     n_dims = len(levels)
 
+    # Load random frames from episodes
+    episodes_dir = Path(args.episodes_dir)
+    all_frames_files = sorted(episodes_dir.glob("*/frames.npy"))
     rng = np.random.default_rng(args.seed)
-    token_ids = rng.integers(0, fsq.codebook_size, size=args.n_examples)
 
-    # Layout: n_examples rows, (1 original + 2*n_dims neighbors) columns
-    n_cols = 1 + 2 * n_dims
-    fig, axes = plt.subplots(args.n_examples, n_cols, figsize=(n_cols * 1.5, args.n_examples * 1.5))
+    frames = []
+    for _ in range(args.n_examples):
+        ep_frames = np.load(rng.choice(all_frames_files))
+        frames.append(ep_frames[rng.integers(0, len(ep_frames))])
+    frames = np.stack(frames)  # (N, 64, 64)
 
-    col_labels = ["Original"]
+    # Encode all frames
+    x = torch.from_numpy(frames).float().unsqueeze(1).to(device) / 255.0  # (N, 1, 64, 64)
+
+    # Layout: n_examples rows, (1 original + 1 recon + 2*n_dims neighbors) columns
+    n_cols = 2 + 2 * n_dims
+    fig, axes = plt.subplots(args.n_examples, n_cols,
+                             figsize=(n_cols * 1.5, args.n_examples * 1.5))
+
+    col_labels = ["Original", "Recon"]
     for d in range(n_dims):
         col_labels.append(f"d{d}-1")
         col_labels.append(f"d{d}+1")
 
     with torch.no_grad():
-        for row, token_id in enumerate(token_ids):
-            # Decode original: create a 1x1 spatial grid
-            idx = torch.tensor([[[token_id]]], dtype=torch.long, device=device)  # (1,1,1)
-            z_q = fsq.indices_to_codes(idx)  # (1, D, 1, 1)
-            patch = model.decoder(z_q)  # (1, 1, H, W)
-            img = patch[0, 0].cpu().numpy()
+        for row in range(args.n_examples):
+            frame = x[row:row + 1]  # (1, 1, 64, 64)
 
-            axes[row, 0].imshow(img, cmap="gray", vmin=0, vmax=1)
-            axes[row, 0].set_ylabel(f"token {token_id}", fontsize=8)
+            # Encode to get z_q codes and indices
+            z_e = model.encoder(frame)  # (1, D, 8, 8)
+            z_q, indices = fsq(z_e)  # z_q: (1, D, 8, 8), indices: (1, 8, 8)
 
-            # Decode neighbors: ±1 in each dimension
-            col = 1
+            # Pick a random non-border position for clearer effect
+            pos_r = rng.integers(1, 7)
+            pos_c = rng.integers(1, 7)
+            token_id = indices[0, pos_r, pos_c].item()
+
+            # Show original frame
+            axes[row, 0].imshow(frames[row], cmap="gray")
+            rect = Rectangle((pos_c * 8, pos_r * 8), 8, 8,
+                             linewidth=1, edgecolor='r', facecolor='none')
+            axes[row, 0].add_patch(rect)
+            axes[row, 0].set_ylabel(f"pos=({pos_r},{pos_c})\ntok={token_id}", fontsize=7)
+
+            # Show reconstruction from original codes
+            recon = model.decoder(z_q)
+            axes[row, 1].imshow(recon[0, 0].cpu().numpy(), cmap="gray")
+            rect2 = Rectangle((pos_c * 8, pos_r * 8), 8, 8,
+                               linewidth=1, edgecolor='r', facecolor='none')
+            axes[row, 1].add_patch(rect2)
+
+            # Swap token at (pos_r, pos_c) with each neighbor
+            col = 2
             for d in range(n_dims):
                 for delta in [-1, +1]:
-                    z_neighbor = z_q.clone()
-                    z_neighbor[0, d, 0, 0] += delta
+                    z_mod = z_q.clone()
+                    new_val = z_mod[0, d, pos_r, pos_c].item() + delta
 
-                    # Clamp to valid range
+                    # Check bounds
                     half = levels[d] // 2
-                    max_val = half if levels[d] % 2 == 1 else half
                     min_val = -half
-                    val = z_neighbor[0, d, 0, 0].item()
+                    max_val = half if levels[d] % 2 == 1 else half
 
-                    if val < min_val or val > max_val:
-                        # Out of range — show blank
-                        axes[row, col].imshow(np.zeros_like(img), cmap="gray", vmin=0, vmax=1)
+                    if new_val < min_val or new_val > max_val:
+                        axes[row, col].imshow(np.ones((64, 64)) * 0.5, cmap="gray",
+                                              vmin=0, vmax=1)
                         axes[row, col].set_title("OOB", fontsize=6, color="red")
                     else:
-                        patch_n = model.decoder(z_neighbor)
-                        img_n = patch_n[0, 0].cpu().numpy()
-                        axes[row, col].imshow(img_n, cmap="gray", vmin=0, vmax=1)
+                        z_mod[0, d, pos_r, pos_c] = new_val
+                        recon_mod = model.decoder(z_mod)
+                        img_mod = recon_mod[0, 0].cpu().numpy()
+                        axes[row, col].imshow(img_mod, cmap="gray")
+                        rect_n = Rectangle((pos_c * 8, pos_r * 8), 8, 8,
+                                           linewidth=1, edgecolor='r', facecolor='none')
+                        axes[row, col].add_patch(rect_n)
                     col += 1
 
     for col, label in enumerate(col_labels):
@@ -96,7 +131,7 @@ def main():
         ax.set_xticks([])
         ax.set_yticks([])
 
-    fig.suptitle("FSQ Token Neighbors: ±1 in each dimension", fontsize=10)
+    fig.suptitle("FSQ Neighbor Substitution: ±1 in each dim at marked position", fontsize=10)
     plt.tight_layout()
     plt.savefig(args.output, dpi=150)
     print(f"Saved to {args.output}")
