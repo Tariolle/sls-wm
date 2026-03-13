@@ -1,13 +1,16 @@
 """Encode episode frames through frozen tokenizer to produce token sequences.
 
 Supports both VQ-VAE (6x6, 36 tokens) and FSQ-VAE (8x8, 64 tokens).
+Optional spatial shift augmentation: re-encodes frames with pixel shifts
+to create augmented episode directories with different tokenizations.
 
 Usage:
     python scripts/tokenize_episodes.py --model fsq --checkpoint checkpoints/fsq_best.pt
-    python scripts/tokenize_episodes.py --model vqvae --checkpoint checkpoints/vqvae_best.pt
+    python scripts/tokenize_episodes.py --model fsq --shifts -4 -2 0 2 4 --shifts-v -3 0 3
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -15,6 +18,30 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+def _shift_frames(frames, dx, dy):
+    """Shift frames by (dx, dy) pixels, filling with zero (black)."""
+    shifted = np.zeros_like(frames)
+    H, W = frames.shape[-2], frames.shape[-1]
+    # Source and destination slices
+    src_y = slice(max(0, -dy), min(H, H - dy))
+    dst_y = slice(max(0, dy), min(H, H + dy))
+    src_x = slice(max(0, -dx), min(W, W - dx))
+    dst_x = slice(max(0, dx), min(W, W + dx))
+    shifted[..., dst_y, dst_x] = frames[..., src_y, src_x]
+    return shifted
+
+
+def _tokenize_frames(model, frames, batch_size, tokens_per_frame, device):
+    """Encode frames through the model and return flat token array."""
+    all_tokens = []
+    for i in range(0, len(frames), batch_size):
+        batch = frames[i:i + batch_size]
+        x = torch.from_numpy(batch).float().unsqueeze(1).to(device) / 255.0
+        indices = model.encode(x)  # (B, grid, grid)
+        all_tokens.append(indices.cpu().reshape(-1, tokens_per_frame).numpy())
+    return np.concatenate(all_tokens, axis=0).astype(np.uint16)
 
 
 def main():
@@ -29,6 +56,11 @@ def main():
     parser.add_argument("--embedding-dim", type=int, default=8)
     # FSQ specific
     parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5])
+    # Shift augmentation
+    parser.add_argument("--shifts", type=int, nargs="+", default=None,
+                        help="Horizontal pixel shifts (e.g. -4 -2 0 2 4)")
+    parser.add_argument("--shifts-v", type=int, nargs="+", default=None,
+                        help="Vertical pixel shifts (e.g. -3 0 3)")
     args = parser.parse_args()
 
     if args.checkpoint is None:
@@ -41,13 +73,11 @@ def main():
     if args.model == "fsq":
         from deepdash.fsq import FSQVAE
         model = FSQVAE(levels=args.levels).to(device)
-        grid_size = 8
         tokens_per_frame = 64
     else:
         from deepdash.vqvae import VQVAE
         model = VQVAE(num_embeddings=args.num_embeddings,
                       embedding_dim=args.embedding_dim).to(device)
-        grid_size = 6
         tokens_per_frame = 36
 
     state = torch.load(args.checkpoint, map_location=device, weights_only=True)
@@ -60,31 +90,70 @@ def main():
     episodes = sorted(ep for ep in episodes_dir.glob("*") if (ep / "frames.npy").exists())
     print(f"Found {len(episodes)} episodes")
 
+    # Build shift grid
+    shifts_h = args.shifts or [0]
+    shifts_v = args.shifts_v or [0]
+    shift_combos = [(dx, dy) for dx in shifts_h for dy in shifts_v]
+    # Separate original (0,0) from augmented shifts
+    aug_shifts = [(dx, dy) for dx, dy in shift_combos if (dx, dy) != (0, 0)]
+
+    if aug_shifts:
+        print(f"Shift augmentation: {len(aug_shifts)} shifted variants per episode")
+        print(f"  Horizontal: {shifts_h}, Vertical: {shifts_v}")
+
     total_frames = 0
     skipped = 0
+    aug_created = 0
+
     with torch.no_grad():
         for ep in episodes:
+            frames = None  # lazy-load
+
+            # --- Original (0,0) tokenization ---
             if (ep / "tokens.npy").exists():
                 skipped += 1
-                continue
-            frames = np.load(ep / "frames.npy")  # (T, 64, 64) uint8
-            T = len(frames)
-            total_frames += T
+            else:
+                frames = np.load(ep / "frames.npy")  # (T, 64, 64) uint8
+                total_frames += len(frames)
+                tokens = _tokenize_frames(model, frames, args.batch_size,
+                                          tokens_per_frame, device)
+                np.save(ep / "tokens.npy", tokens)
+                print(f"  {ep.name}: {len(frames)} frames -> {tokens.shape} tokens")
 
-            all_tokens = []
-            for i in range(0, T, args.batch_size):
-                batch = frames[i:i + args.batch_size]
-                x = torch.from_numpy(batch).float().unsqueeze(1).to(device) / 255.0
-                indices = model.encode(x)  # (B, grid, grid)
-                all_tokens.append(indices.cpu().reshape(-1, tokens_per_frame).numpy())
+            # --- Shifted augmentations ---
+            for dx, dy in aug_shifts:
+                aug_name = f"{ep.name}_s{dx:+d}_{dy:+d}"
+                aug_dir = episodes_dir / aug_name
+                if (aug_dir / "tokens.npy").exists():
+                    continue
 
-            tokens = np.concatenate(all_tokens, axis=0).astype(np.uint16)
-            np.save(ep / "tokens.npy", tokens)
-            print(f"  {ep.name}: {T} frames -> {tokens.shape} tokens")
+                if frames is None:
+                    frames = np.load(ep / "frames.npy")
+
+                shifted = _shift_frames(frames, dx, dy)
+                tokens = _tokenize_frames(model, shifted, args.batch_size,
+                                          tokens_per_frame, device)
+
+                aug_dir.mkdir(exist_ok=True)
+                np.save(aug_dir / "tokens.npy", tokens)
+
+                # Symlink actions.npy and frames.npy from original episode
+                actions_link = aug_dir / "actions.npy"
+                if not actions_link.exists():
+                    os.symlink((ep / "actions.npy").resolve(), actions_link)
+                frames_link = aug_dir / "frames.npy"
+                if not frames_link.exists():
+                    os.symlink((ep / "frames.npy").resolve(), frames_link)
+
+                aug_created += 1
+                print(f"  {aug_name}: shift ({dx:+d},{dy:+d}) -> {tokens.shape} tokens")
 
     if skipped:
         print(f"Skipped {skipped} already-tokenized episodes.")
-    print(f"\nDone. Tokenized {total_frames} frames across {len(episodes) - skipped} episodes.")
+    if aug_created:
+        print(f"Created {aug_created} shifted augmentations.")
+    print(f"\nDone. Tokenized {total_frames} new frames across "
+          f"{len(episodes) - skipped} episodes.")
 
 
 if __name__ == "__main__":
