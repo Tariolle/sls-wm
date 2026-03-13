@@ -4,6 +4,9 @@ Two modes:
   - Prefill only: context → h_t (what real-time play actually needs)
   - Full predict_next_frame: prefill + 65-step autoregressive decode (dream rollouts)
 
+Tests each mode: eager, AMP, torch.compile + AMP.
+Compilation cost is paid upfront and excluded from timing.
+
 Usage:
     python scripts/benchmark_inference.py
     python scripts/benchmark_inference.py --device cpu
@@ -41,8 +44,12 @@ def prefill_only(model, ctx_s, actions):
     for block in model.blocks:
         x, _ = block(x, ctx_mask, rope_cos, rope_sin)
     x = model.ln_f(x)
-    h_t = x[:, -1]  # hidden state at last context position
-    return h_t
+    return x[:, -1]
+
+
+def _with_amp(fn):
+    with torch.autocast("cuda", dtype=torch.float16):
+        return fn()
 
 
 def main():
@@ -81,33 +88,83 @@ def main():
     ctx_s = torch.cat([ctx, status], dim=2)
     actions = torch.zeros(1, 4, dtype=torch.long, device=device)
 
+    use_cuda = device.type == "cuda"
+
     def sync():
-        if device.type == "cuda":
+        if use_cuda:
             torch.cuda.synchronize()
 
     def bench(fn, label):
         with torch.no_grad():
+            # Warmup (excluded from timing)
             for _ in range(args.warmup):
                 fn()
             sync()
+            # Timed runs
             start = time.perf_counter()
             for _ in range(args.n_runs):
                 fn()
             sync()
             ms = (time.perf_counter() - start) / args.n_runs * 1000
-        print(f"  {label}: {ms:.2f} ms", end="")
-        if ms < 33.3:
-            print(f"  -> OK ({33.3 / ms:.1f}x margin)")
-        else:
-            print(f"  -> TOO SLOW ({ms / 33.3:.1f}x over budget)")
+        verdict = f"OK ({33.3 / ms:.1f}x margin)" if ms < 33.3 else \
+                  f"TOO SLOW ({ms / 33.3:.1f}x over budget)"
+        print(f"  {label}: {ms:.2f} ms  -> {verdict}")
         return ms
 
-    print(f"\nBudget: 33.3 ms (30 FPS)\n")
+    print(f"\nBudget: 33.3 ms (30 FPS)")
 
+    # --- Eager ---
+    print(f"\n=== Eager ===")
     bench(lambda: prefill_only(model, ctx_s, actions),
-          "Prefill only (real-time play)")
+          "Prefill only")
     bench(lambda: model.predict_next_frame(ctx_s, actions, return_hidden=True),
-          "Full predict_next_frame (dream rollouts)")
+          "Full predict_next_frame")
+
+    # --- AMP ---
+    if use_cuda:
+        print(f"\n=== AMP (FP16) ===")
+        bench(lambda: _with_amp(lambda: prefill_only(model, ctx_s, actions)),
+              "Prefill only")
+        bench(lambda: _with_amp(lambda: model.predict_next_frame(
+            ctx_s, actions, return_hidden=True)),
+              "Full predict_next_frame")
+
+    # --- torch.compile + AMP ---
+    if sys.platform != "win32":
+        print(f"\n=== torch.compile + AMP ===")
+        print("  Compiling (one-time cost, excluded from benchmark)...")
+        try:
+            compiled_prefill = torch.compile(prefill_only)
+            compiled_model = torch.compile(model)
+            # Force compilation by running once
+            with torch.no_grad():
+                if use_cuda:
+                    _with_amp(lambda: compiled_prefill(model, ctx_s, actions))
+                    _with_amp(lambda: compiled_model.predict_next_frame(
+                        ctx_s, actions, return_hidden=True))
+                else:
+                    compiled_prefill(model, ctx_s, actions)
+                    compiled_model.predict_next_frame(
+                        ctx_s, actions, return_hidden=True)
+                sync()
+            print("  Compilation done.\n")
+
+            if use_cuda:
+                bench(lambda: _with_amp(
+                    lambda: compiled_prefill(model, ctx_s, actions)),
+                      "Prefill only (compiled)")
+                bench(lambda: _with_amp(
+                    lambda: compiled_model.predict_next_frame(
+                        ctx_s, actions, return_hidden=True)),
+                      "Full predict_next_frame (compiled)")
+            else:
+                bench(lambda: compiled_prefill(model, ctx_s, actions),
+                      "Prefill only (compiled)")
+                bench(lambda: compiled_model.predict_next_frame(
+                    ctx_s, actions, return_hidden=True),
+                      "Full predict_next_frame (compiled)")
+        except Exception as e:
+            print(f"  torch.compile failed: {e}")
 
 
 if __name__ == "__main__":
