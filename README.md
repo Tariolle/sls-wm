@@ -36,12 +36,17 @@ The system is composed of three distinct neural networks trained sequentially:
 
 ### B. Memory Model (M) - *The Dynamics Learner*
 
-* **Type:** Transformer (autoregressive, on discrete tokens).
-* **Input:** Sequence of 64 FSQ codes per frame + action token + status token, with block-causal attention (bidirectional within frames, causal across) and RoPE (Rotary Position Embeddings).
+* **Type:** Transformer with MaskGIT masked token prediction (parallel decoding at inference).
+* **Input:** Sequence of 64 FSQ codes per frame + action token + status token, with block-causal attention (bidirectional within frames, causal across) and 3D-RoPE (row, col, frame axes with factored frequency bases, inspired by V-JEPA 2).
 * **Function:** Predicts the next frame's 64 tokens given the current tokenized state and action — a classification task over vocabulary 1002 (1000 visual codes + ALIVE + DEATH status tokens), not continuous regression. Death is predicted via a dedicated **death token** appended as the 65th position of each frame block, turning death prediction into the same next-token classification task.
-* **Training Losses:** Cross-entropy on next-frame tokens + death token classification + AC-CPC contrastive loss (TWISTER, ICLR 2025) that predicts future hidden states conditioned on actions. Scheduled sampling (10% token noise) reduces train/inference distribution gap.
+* **Decoding:** MaskGIT (Chang et al., 2022) — during training, a random cosine-scheduled subset of target tokens is masked and predicted. At inference, all tokens start masked and are iteratively unmasked in order of confidence over ~8 steps, enabling parallel decoding instead of 65 sequential autoregressive steps.
+* **Training Losses:** Focal cross-entropy on masked next-frame tokens (with label smoothing) + AC-CPC contrastive loss (TWISTER, ICLR 2025) that predicts future hidden states conditioned on actions.
+* **Regularization:**
+  * **Spatial shift augmentation:** Episodes are re-tokenized through the frozen FSQ-VAE at multiple pixel offsets ({-4,-2,0,2,4} × {-3,0,3} with edge padding), creating 15 tokenization variants per episode (~15× data multiplier). Horizontal shifts are physically equivalent to a different camera scroll position.
+  * **Dual token noise:** Random token replacement (5%) acts as context-forcing dropout, while **FSQ neighbor substitution** (5%) replaces tokens with ±1 neighbors in the FSQ mixed-radix space. FSQ neighbors decode to visually near-identical patches but are distinct token indices — this forces the Transformer's embedding layer to learn that geometrically adjacent codes are semantically equivalent, injecting the codebook's topological structure as an inductive bias. The two noise types are complementary: random noise forces global robustness, neighbor noise smooths the embedding manifold.
+  * Dropout, weight decay, death frame oversampling (15×).
 * **AC-CPC Lineage:** AC-CPC extends Contrastive Predictive Coding (CPC, Oord et al., 2018), which pioneered the idea of predicting future representations in latent space rather than reconstructing raw inputs. AC-CPC adds **action conditioning** — predicting future hidden states conditioned on the action sequence taken between timesteps, making it suitable for control settings. This principle of latent-space prediction is the same one that LeCun later formalized as the **JEPA** (Joint-Embedding Predictive Architecture, 2022) framework, which retroactively unifies methods like CPC, BYOL, and VICReg under a single conceptual family. In this sense, AC-CPC can be seen as an action-conditioned instance of the JEPA paradigm.
-* **Architecture:** 6 layers, 128d embeddings, 4 heads, C=4 context frames.
+* **Architecture:** 8 layers, 256d embeddings, 8 heads, C=4 context frames (~6.7M parameters).
 * **Why Transformer over RNN:** With an LSTM/GRU, the FSQ's quantized vectors must be flattened into a continuous input (64 x 4d = 256 floats), yielding only 16x compression over the raw frame. A Transformer operates directly on discrete token indices, preserving the full 51x compression — a 3.2x improvement. The Transformer also naturally handles action conditioning via attention and captures long-range spatial dependencies across the token grid. This aligns with modern world model architectures (IRIS, GENIE) that use Transformers on discrete visual tokens.
 * **Relevance:** Learns the game's physics and temporal dynamics entirely in discrete latent space, allowing the agent to "hallucinate" precise trajectories as token sequences.
 
@@ -136,8 +141,8 @@ The initial dataset was recorded on the first official levels of the game (level
 
 ### Phase 2: Dynamics — Transformer World Model (current)
 
-* **Status:** Training on A100 with expanded 30 FPS dataset (~3,600 episodes, ~179K frames). Previous training on old dataset (332 episodes, ~21 FPS) achieved 21.9% val token accuracy.
-* **Architecture:** Block-causal attention + 3D-RoPE (row, col, frame) + AC-CPC contrastive loss + death token + focal loss + scheduled sampling (10% noise) + death oversampling (15×).
+* **Status:** Training on A100 with expanded 30 FPS dataset (~3,600 episodes, ~179K frames, ~2.2M samples with shift augmentation).
+* **Architecture:** MaskGIT + block-causal attention + 3D-RoPE (row, col, frame) + AC-CPC contrastive loss + death token + focal loss + spatial shift augmentation (15×) + dual token noise (random 5% + FSQ neighbor 5%) + death oversampling (15×). 256d/8H/8L (~6.7M params).
 
 ### Phase 3: Control — Dream-Trained Agent
 
@@ -152,6 +157,7 @@ The initial dataset was recorded on the first official levels of the game (level
 * **FSQ:** Mentzer, F., Minnen, D., Agustsson, E., & Tschannen, M. (2023). *Finite Scalar Quantization: VQ-VAE Made Simple*. [arXiv:2309.15505](https://arxiv.org/abs/2309.15505)
 * **VQ-VAE:** van den Oord, A., Vinyals, O., & Kavukcuoglu, K. (2017). *Neural Discrete Representation Learning*. [arXiv:1711.00937](https://arxiv.org/abs/1711.00937)
 * **Transformer World Model (IRIS):** Micheli, V., Alonso, E., & Fleuret, F. (2023). *Transformers are Sample-Efficient World Models*. [arXiv:2209.00588](https://arxiv.org/abs/2209.00588)
+* **MaskGIT:** Chang, H., Zhang, H., Jiang, L., Liu, C., & Freeman, W. T. (2022). *MaskGIT: Masked Generative Image Transformer*. [arXiv:2202.04200](https://arxiv.org/abs/2202.04200)
 * **CPC:** Oord, A. van den, Li, Y., & Vinyals, O. (2018). *Representation Learning with Contrastive Predictive Coding*. [arXiv:1807.03748](https://arxiv.org/abs/1807.03748)
 * **AC-CPC (TWISTER):** Burchert, J., et al. (2025). *Learning Transformer-based World Models with Contrastive Predictive Coding*. [arXiv:2503.04416](https://arxiv.org/abs/2503.04416)
 * **JEPA:** LeCun, Y. (2022). *A Path Towards Autonomous Machine Intelligence*. [OpenReview](https://openreview.net/pdf?id=BZ5a1r-kVsf)
