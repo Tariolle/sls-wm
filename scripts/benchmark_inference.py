@@ -2,7 +2,7 @@
 
 Two modes:
   - Prefill only: context → h_t (what real-time play actually needs)
-  - Full predict_next_frame: prefill + 65-step autoregressive decode (dream rollouts)
+  - Full predict_next_frame: prefill + MaskGIT iterative decode (dream rollouts)
 
 Tests each mode: eager, AMP, torch.compile + AMP.
 Compilation cost is paid upfront and excluded from timing.
@@ -70,7 +70,7 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name()}")
 
     model = WorldModel(
-        vocab_size=1000, embed_dim=128, n_heads=4, n_layers=6,
+        vocab_size=1000, embed_dim=256, n_heads=8, n_layers=8,
         context_frames=4, tokens_per_frame=64,
     ).to(device)
     state = torch.load(args.checkpoint, map_location=device, weights_only=True)

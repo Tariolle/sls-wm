@@ -209,9 +209,9 @@ def main():
     # Model architecture (must match checkpoint)
     parser.add_argument("--vocab-size", type=int, default=1000)
     parser.add_argument("--tokens-per-frame", type=int, default=64)
-    parser.add_argument("--embed-dim", type=int, default=128)
-    parser.add_argument("--n-heads", type=int, default=4)
-    parser.add_argument("--n-layers", type=int, default=6)
+    parser.add_argument("--embed-dim", type=int, default=256)
+    parser.add_argument("--n-heads", type=int, default=8)
+    parser.add_argument("--n-layers", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.1)
     # Output
     parser.add_argument("--checkpoint-dir", default="checkpoints")

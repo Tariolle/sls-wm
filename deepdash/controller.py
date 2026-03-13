@@ -3,7 +3,7 @@
 Maps the Transformer's hidden state h_t to a binary action (jump/idle).
     action = sigmoid(W @ h_t + b) > 0.5
 
-Total parameters: hidden_dim + 1 (129 for embed_dim=128).
+Total parameters: hidden_dim + 1 (257 for embed_dim=256).
 """
 
 import numpy as np
@@ -11,7 +11,7 @@ import torch
 
 
 class Controller:
-    def __init__(self, hidden_dim=128):
+    def __init__(self, hidden_dim=256):
         self.hidden_dim = hidden_dim
         self.n_params = hidden_dim + 1  # W + b
 
@@ -30,7 +30,7 @@ class Controller:
         np.save(path, flat)
 
     @classmethod
-    def load(cls, path, hidden_dim=128):
+    def load(cls, path, hidden_dim=256):
         flat = np.load(path)
         c = cls(hidden_dim)
         c.set_params(flat)
