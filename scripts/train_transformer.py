@@ -8,6 +8,7 @@ Usage:
 
 import argparse
 import csv
+import os
 import sys
 import time
 from pathlib import Path
@@ -318,8 +319,10 @@ def main():
     # torch.compile for fused ops (requires Triton — Linux/Colab only)
     if sys.platform != "win32":
         try:
-            model = torch.compile(model)
-            print("torch.compile enabled")
+            import torch._inductor.config as inductor_cfg
+            inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
+            model = torch.compile(model, dynamic=True)
+            print(f"torch.compile enabled (dynamic=True, {inductor_cfg.compile_threads} compile threads)")
         except Exception as e:
             print(f"torch.compile not available, running eager: {e}")
     else:
