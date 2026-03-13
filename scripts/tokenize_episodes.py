@@ -21,15 +21,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def _shift_frames(frames, dx, dy):
-    """Shift frames by (dx, dy) pixels, filling with zero (black)."""
-    shifted = np.zeros_like(frames)
+    """Shift frames by (dx, dy) pixels with edge padding.
+
+    dx>0 shifts content right (new pixels appear on left edge).
+    dy>0 shifts content down (new pixels appear on top edge).
+    """
+    if dx == 0 and dy == 0:
+        return frames
     H, W = frames.shape[-2], frames.shape[-1]
-    # Source and destination slices
-    src_y = slice(max(0, -dy), min(H, H - dy))
-    dst_y = slice(max(0, dy), min(H, H + dy))
-    src_x = slice(max(0, -dx), min(W, W - dx))
-    dst_x = slice(max(0, dx), min(W, W + dx))
-    shifted[..., dst_y, dst_x] = frames[..., src_y, src_x]
+    # np.roll shifts content, then overwrite wrapped borders with edge values
+    shifted = np.roll(np.roll(frames, dx, axis=-1), dy, axis=-2)
+    if dx > 0:
+        shifted[..., :, :dx] = frames[..., :, :1]
+    elif dx < 0:
+        shifted[..., :, dx:] = frames[..., :, -1:]
+    if dy > 0:
+        shifted[..., :dy, :] = frames[..., :1, :]
+    elif dy < 0:
+        shifted[..., dy:, :] = frames[..., -1:, :]
     return shifted
 
 
