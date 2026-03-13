@@ -96,8 +96,11 @@ def main():
     print(f"Loaded {args.model.upper()} from {args.checkpoint}")
 
     episodes_dir = Path(args.episodes_dir)
-    episodes = sorted(ep for ep in episodes_dir.glob("*") if (ep / "frames.npy").exists())
-    print(f"Found {len(episodes)} episodes")
+    import re
+    shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
+    episodes = sorted(ep for ep in episodes_dir.glob("*")
+                      if (ep / "frames.npy").exists() and not shift_re.search(ep.name))
+    print(f"Found {len(episodes)} base episodes")
 
     # Build shift grid
     shifts_h = args.shifts or [0]
