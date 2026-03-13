@@ -35,8 +35,8 @@ echo "=== Step 2: Train Transformer ==="
 python -u scripts/train_transformer.py \
     --episodes-dir data/episodes \
     --epochs 200 \
-    --batch-size 512 \
-    --lr 1e-3 \
+    --batch-size 64 \
+    --lr 1e-4 \
     --context-frames 4 \
     --vocab-size 1000 \
     --tokens-per-frame 64 \
@@ -44,7 +44,7 @@ python -u scripts/train_transformer.py \
     --n-heads 8 \
     --n-layers 8 \
     --dropout 0.1 \
-    --weight-decay 0.05 \
+    --weight-decay 0.01 \
     --cpc-weight 0.1 \
     --token-noise 0.10 \
     --label-smoothing 0.1 \
