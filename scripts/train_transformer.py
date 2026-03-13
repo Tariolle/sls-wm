@@ -74,10 +74,11 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
             frame_tokens = torch.cat([ctx, frame_tokens[:, -1:]], dim=1)
 
         with torch.autocast(device.type, dtype=torch.float16, enabled=use_amp):
-            logits, cpc_loss = model(frame_tokens, actions)
+            logits, cpc_loss, mask = model(frame_tokens, actions)
+            # Loss on masked tokens only
             token_loss = focal_cross_entropy(
-                logits.reshape(-1, vocab),
-                target.reshape(-1),
+                logits[mask],      # (n_masked, vocab)
+                target[mask],      # (n_masked,)
                 gamma=focal_gamma,
                 label_smoothing=label_smoothing,
             )
@@ -128,9 +129,9 @@ def val_epoch(model, loader, device):
         target = frame_tokens[:, -1]
 
         with torch.autocast(device.type, dtype=torch.float16, enabled=use_amp):
-            logits, cpc_loss = model(frame_tokens, actions)
+            logits, cpc_loss, mask = model(frame_tokens, actions, mask_ratio=1.0)
 
-        # Loss on all tokens (visual + status) — consistent with train_epoch
+        # All tokens masked → loss on all positions
         token_loss = F.cross_entropy(
             logits.reshape(-1, vocab),
             target.reshape(-1),
@@ -166,9 +167,9 @@ def main():
                         help="Tokenizer vocabulary size (1000 for FSQ, 1024 for VQ-VAE)")
     parser.add_argument("--tokens-per-frame", type=int, default=64,
                         help="Tokens per frame (64 for 8x8 FSQ, 36 for 6x6 VQ-VAE)")
-    parser.add_argument("--embed-dim", type=int, default=128)
-    parser.add_argument("--n-heads", type=int, default=4)
-    parser.add_argument("--n-layers", type=int, default=6)
+    parser.add_argument("--embed-dim", type=int, default=256)
+    parser.add_argument("--n-heads", type=int, default=8)
+    parser.add_argument("--n-layers", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--weight-decay", type=float, default=0.05)
     parser.add_argument("--val-ratio", type=float, default=0.1)
