@@ -9,6 +9,7 @@ Usage:
 import argparse
 import csv
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -186,6 +187,8 @@ def main():
                         help="Focal loss gamma (0 = standard CE)")
     parser.add_argument("--death-oversample", type=int, default=15,
                         help="Repeat death-frame samples this many times (1 = no oversampling)")
+    parser.add_argument("--steps-per-epoch", type=int, default=0,
+                        help="Cap training steps per epoch (0 = full dataset)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -197,17 +200,23 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Split episodes into train/val by episode
+    # Split episodes into train/val by base episode (shifted variants follow their base)
     episodes_dir = Path(args.episodes_dir)
     all_episodes = sorted(ep for ep in episodes_dir.glob("*")
                           if (ep / "tokens.npy").exists())
+    # Identify base (non-shifted) episodes for splitting
+    shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
+    base_episodes = sorted(set(
+        shift_re.sub("", ep.name) for ep in all_episodes))
     rng = np.random.default_rng(args.seed)
-    indices = rng.permutation(len(all_episodes))
-    val_count = max(1, int(len(all_episodes) * args.val_ratio))
-    val_episodes = {all_episodes[i].name for i in indices[:val_count]}
+    indices = rng.permutation(len(base_episodes))
+    val_count = max(1, int(len(base_episodes) * args.val_ratio))
+    val_episodes = {base_episodes[i] for i in indices[:val_count]}
 
-    print(f"Total tokenized episodes: {len(all_episodes)}")
-    print(f"Val episodes: {val_count}, Train episodes: {len(all_episodes) - val_count}")
+    print(f"Total tokenized episodes: {len(all_episodes)} "
+          f"({len(base_episodes)} base, {len(all_episodes) - len(base_episodes)} shifted)")
+    print(f"Val base episodes: {val_count}, Train base episodes: "
+          f"{len(base_episodes) - val_count}")
 
     K = args.context_frames
     TPF = args.tokens_per_frame
@@ -224,7 +233,9 @@ def main():
 
         is_clear = "clear" in ep.name
 
-        is_val = ep.name in val_episodes
+        # Strip shift suffix (e.g. ep_0006_s+2_+0 -> ep_0006) for val check
+        base_name = re.sub(r"_s[+-]\d+_[+-]\d+$", "", ep.name)
+        is_val = base_name in val_episodes
         f_list = val_frames if is_val else train_frames
         a_list = val_actions if is_val else train_actions
 
@@ -285,8 +296,13 @@ def main():
     print(f"Context: {args.context_frames} frames, Sequence length: {model.seq_len}")
     print(f"Vocab: {args.vocab_size} visual + 2 status = {model.full_vocab_size}")
 
+    # Cap samples per epoch if --steps-per-epoch is set
+    if args.steps_per_epoch > 0:
+        num_samples = args.steps_per_epoch * args.batch_size
+    else:
+        num_samples = int(sum(train_weights))
     train_sampler = WeightedRandomSampler(
-        train_weights, num_samples=int(sum(train_weights)), replacement=True)
+        train_weights, num_samples=num_samples, replacement=True)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
                               sampler=train_sampler, num_workers=0, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
