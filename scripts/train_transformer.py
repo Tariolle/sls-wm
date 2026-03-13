@@ -46,8 +46,97 @@ def focal_cross_entropy(logits, targets, gamma=2.0, label_smoothing=0.0):
     return (((1 - pt) ** gamma) * ce).mean()
 
 
+def build_fsq_neighbor_table(levels):
+    """Precompute valid FSQ neighbors for each token index.
+
+    For each of the prod(levels) tokens, stores its valid neighbors
+    (±1 in each FSQ dimension, boundary-checked). Returns a padded tensor
+    and a count tensor for efficient random selection.
+
+    Args:
+        levels: list of ints, e.g. [8, 5, 5, 5].
+
+    Returns:
+        neighbor_table: (codebook_size, max_neighbors) long — padded neighbor indices.
+        neighbor_counts: (codebook_size,) long — number of valid neighbors per token.
+    """
+    import math
+    codebook_size = math.prod(levels)
+    n_dims = len(levels)
+
+    # Precompute divisors for mixed-radix decomposition
+    divisors = []
+    acc = 1
+    for L in reversed(levels):
+        divisors.append(acc)
+        acc *= L
+    divisors.reverse()
+
+    all_neighbors = []
+    for idx in range(codebook_size):
+        # Decompose index to coordinates
+        coords = []
+        remainder = idx
+        for d in range(n_dims):
+            coords.append(remainder // divisors[d])
+            remainder = remainder % divisors[d]
+
+        # Generate valid neighbors
+        neighbors = []
+        for d in range(n_dims):
+            for delta in [-1, +1]:
+                new_val = coords[d] + delta
+                if 0 <= new_val < levels[d]:
+                    new_coords = list(coords)
+                    new_coords[d] = new_val
+                    new_idx = sum(c * div for c, div in zip(new_coords, divisors))
+                    neighbors.append(new_idx)
+        all_neighbors.append(neighbors)
+
+    max_neighbors = max(len(n) for n in all_neighbors)
+    neighbor_table = torch.zeros(codebook_size, max_neighbors, dtype=torch.long)
+    neighbor_counts = torch.zeros(codebook_size, dtype=torch.long)
+
+    for idx, neighbors in enumerate(all_neighbors):
+        neighbor_counts[idx] = len(neighbors)
+        for j, n in enumerate(neighbors):
+            neighbor_table[idx, j] = n
+
+    return neighbor_table, neighbor_counts
+
+
+def apply_fsq_noise(tokens, neighbor_table, neighbor_counts, prob, device):
+    """Replace tokens with random FSQ neighbors at given probability.
+
+    Args:
+        tokens: (*, T) long — token indices (visual tokens only).
+        neighbor_table: (codebook_size, max_neighbors) long.
+        neighbor_counts: (codebook_size,) long.
+        prob: float — probability of replacing each token.
+        device: torch device.
+
+    Returns:
+        Perturbed tokens, same shape.
+    """
+    mask = torch.rand(tokens.shape, device=device) < prob
+    if not mask.any():
+        return tokens
+
+    flat = tokens[mask]  # (n_selected,)
+    counts = neighbor_counts[flat]  # (n_selected,)
+    # Random neighbor index for each selected token
+    rand_idx = (torch.rand(flat.shape, device=device) * counts.float()).long()
+    rand_idx = rand_idx.clamp(max=neighbor_table.shape[1] - 1)
+    replacements = neighbor_table[flat, rand_idx]
+
+    result = tokens.clone()
+    result[mask] = replacements.to(device)
+    return result
+
+
 def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
-                token_noise=0.0, label_smoothing=0.0, focal_gamma=2.0):
+                token_noise=0.0, fsq_noise=0.0, neighbor_table=None,
+                neighbor_counts=None, label_smoothing=0.0, focal_gamma=2.0):
     model.train()
     m = _unwrap(model)
     tpf = m.tokens_per_frame
@@ -65,13 +154,19 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
 
         target = frame_tokens[:, -1]  # (B, 65)
 
-        # Scheduled sampling: corrupt context visual tokens (not status tokens)
-        if token_noise > 0:
+        # Noise augmentation on context visual tokens (not status tokens)
+        if token_noise > 0 or fsq_noise > 0:
             ctx = frame_tokens[:, :-1].clone()
             visual = ctx[:, :, :tpf]
-            mask = torch.rand_like(visual, dtype=torch.float) < token_noise
-            random_tokens = torch.randint(0, vs, visual.shape, device=device)
-            visual = torch.where(mask, random_tokens, visual)
+            # Random token noise: replace with any token uniformly
+            if token_noise > 0:
+                mask = torch.rand_like(visual, dtype=torch.float) < token_noise
+                random_tokens = torch.randint(0, vs, visual.shape, device=device)
+                visual = torch.where(mask, random_tokens, visual)
+            # FSQ neighbor noise: replace with ±1 neighbor in one FSQ dim
+            if fsq_noise > 0 and neighbor_table is not None:
+                visual = apply_fsq_noise(
+                    visual, neighbor_table, neighbor_counts, fsq_noise, device)
             ctx[:, :, :tpf] = visual
             frame_tokens = torch.cat([ctx, frame_tokens[:, -1:]], dim=1)
 
@@ -180,8 +275,12 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--patience", type=int, default=30)
     parser.add_argument("--cpc-weight", type=float, default=0.1)
-    parser.add_argument("--token-noise", type=float, default=0.10,
-                        help="Scheduled sampling noise rate")
+    parser.add_argument("--token-noise", type=float, default=0.05,
+                        help="Random token replacement noise rate")
+    parser.add_argument("--fsq-noise", type=float, default=0.05,
+                        help="FSQ neighbor substitution noise rate")
+    parser.add_argument("--fsq-levels", type=int, nargs="+", default=[8, 5, 5, 5],
+                        help="FSQ quantization levels (must match tokenizer)")
     parser.add_argument("--label-smoothing", type=float, default=0.1,
                         help="Label smoothing for cross-entropy loss")
     parser.add_argument("--focal-gamma", type=float, default=2.0,
@@ -345,6 +444,16 @@ def main():
     else:
         print("Skipping torch.compile (not supported on Windows)")
 
+    # Build FSQ neighbor lookup table for structured noise
+    if args.fsq_noise > 0:
+        neighbor_table, neighbor_counts = build_fsq_neighbor_table(args.fsq_levels)
+        neighbor_table = neighbor_table.to(device)
+        neighbor_counts = neighbor_counts.to(device)
+        print(f"FSQ neighbor noise: {args.fsq_noise:.0%} "
+              f"(avg {neighbor_counts.float().mean():.1f} neighbors/token)")
+    else:
+        neighbor_table, neighbor_counts = None, None
+
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=1e-5,
         last_epoch=start_epoch - 2 if start_epoch > 1 else -1)
@@ -382,6 +491,8 @@ def main():
             train_loss, train_acc, train_death_acc, train_cpc = train_epoch(
                 model, train_loader, optimizer, scaler,
                 args.cpc_weight, device, token_noise=args.token_noise,
+                fsq_noise=args.fsq_noise,
+                neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
                 label_smoothing=args.label_smoothing,
                 focal_gamma=args.focal_gamma)
             val_loss, val_acc, val_death_acc, val_cpc = val_epoch(

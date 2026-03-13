@@ -48,7 +48,8 @@ python -u scripts/train_transformer.py \
     --dropout 0.1 \
     --weight-decay 0.01 \
     --cpc-weight 0.1 \
-    --token-noise 0.10 \
+    --token-noise 0.05 \
+    --fsq-noise 0.05 \
     --label-smoothing 0.1 \
     --focal-gamma 2.0 \
     --death-oversample 15 \
