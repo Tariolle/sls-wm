@@ -201,6 +201,8 @@ def main():
     parser.add_argument("--max-generations", type=int, default=200)
     parser.add_argument("--popsize", type=int, default=256)
     parser.add_argument("--sigma0", type=float, default=0.5)
+    parser.add_argument("--percentile-norm", action="store_true",
+                        help="Normalize fitness via running 5th/95th percentile (DreamerV3-style)")
     # Rollout
     parser.add_argument("--n-episodes", type=int, default=16)
     parser.add_argument("--max-dream-steps", type=int, default=20)
@@ -280,6 +282,11 @@ def main():
     best_fitness_ever = -float("inf")
     best_params = None
 
+    # Percentile normalization state (DreamerV3-style EMA of 5th/95th percentile)
+    perc_ema_low = None
+    perc_ema_high = None
+    perc_decay = 0.99
+
     print(f"CMA-ES: popsize={args.popsize}, sigma0={args.sigma0}, "
           f"n_params={n_params}, n_episodes={args.n_episodes}")
     print(f"Dream rollout: max_steps={args.max_dream_steps}, "
@@ -303,6 +310,18 @@ def main():
                 max_steps=args.max_dream_steps,
                 death_threshold=args.death_threshold,
                 device=device, rng=rng, hidden_dim=hidden_dim)
+
+        # Percentile normalization: stabilize CMA-ES across varying episode difficulty
+        if args.percentile_norm:
+            f_arr = np.array(fitnesses)
+            p5, p95 = np.percentile(f_arr, 5), np.percentile(f_arr, 95)
+            if perc_ema_low is None:
+                perc_ema_low, perc_ema_high = p5, p95
+            else:
+                perc_ema_low = perc_decay * perc_ema_low + (1 - perc_decay) * p5
+                perc_ema_high = perc_decay * perc_ema_high + (1 - perc_decay) * p95
+            scale = max(1.0, perc_ema_high - perc_ema_low)
+            fitnesses = ((f_arr - perc_ema_low) / scale).tolist()
 
         es.tell(candidates, fitnesses)
 
