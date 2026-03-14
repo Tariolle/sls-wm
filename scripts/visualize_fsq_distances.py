@@ -109,8 +109,9 @@ def main():
                 for dim, delta in deltas:
                     new_val = orig_coords[dim].item() + delta
                     half = levels[dim] // 2
-                    # Clamp to valid range instead of giving up
-                    new_val = max(-half, min(half, new_val))
+                    # Match FSQ valid range: odd L → [-half, half], even L → [-half, half-1]
+                    max_val = half if levels[dim] % 2 == 1 else half - 1
+                    new_val = max(-half, min(max_val, new_val))
                     z_mod[0, dim, pos_r, pos_c] = new_val
 
                 recon_mod = model.decoder(z_mod)[0, 0].cpu().numpy()

@@ -101,13 +101,22 @@ def main():
 
                 for name, deltas in perturbations.items():
                     z_mod = z_q.clone()
-                    valid = True
+                    clamped = False
 
                     for dim, delta in deltas:
                         new_val = orig_coords[dim].item() + delta
                         half = levels[dim] // 2
-                        new_val = max(-half, min(half, new_val))
-                        z_mod[0, dim, pos_r, pos_c] = new_val
+                        # Match FSQ valid range: odd L → [-half, half], even L → [-half, half-1]
+                        max_val = half if levels[dim] % 2 == 1 else half - 1
+                        min_val = -half
+                        clamped_val = max(min_val, min(max_val, new_val))
+                        if clamped_val != new_val:
+                            clamped = True
+                        z_mod[0, dim, pos_r, pos_c] = clamped_val
+
+                    # Skip samples where any dimension was clamped (no-op)
+                    if clamped:
+                        continue
 
                     recon_mod = model.decoder(z_mod)[0, 0].cpu().numpy()
                     pr, pc = pos_r * 8, pos_c * 8

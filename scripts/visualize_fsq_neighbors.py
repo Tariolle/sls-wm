@@ -109,7 +109,7 @@ def main():
                     # Check bounds
                     half = levels[d] // 2
                     min_val = -half
-                    max_val = half if levels[d] % 2 == 1 else half
+                    max_val = half if levels[d] % 2 == 1 else half - 1
 
                     if new_val < min_val or new_val > max_val:
                         axes[row, col].imshow(np.ones((64, 64)) * 0.5, cmap="gray",

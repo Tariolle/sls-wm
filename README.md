@@ -51,14 +51,14 @@ The system is composed of three distinct neural networks trained sequentially:
 
   | Perturbation | Mean Patch MSE | Ratio vs ±1 |
   |:---|:---:|:---:|
-  | ±1 single dim | 0.000069 | 1.0× |
-  | +1 two dims | 0.000162 | 2.35× |
-  | +2 single dim | 0.000320 | 4.64× |
-  | +1 three dims | 0.000279 | 4.04× |
-  | +1 all dims | 0.000426 | 6.17× |
-  | +2 two dims | 0.000834 | 12.1× |
+  | ±1 single dim | 0.000078 | 1.0× |
+  | +1 two dims | 0.000200 | 2.55× |
+  | +2 single dim | 0.000493 | 6.30× |
+  | +1 three dims | 0.000366 | 4.68× |
+  | +1 all dims | 0.000575 | 7.36× |
+  | +2 two dims | 0.001633 | 20.9× |
 
-  Key findings: (1) ±1 neighbors produce near-identical reconstructions (MSE ≈ 0.00007). (2) +2 in one dim is **1.98× worse** than +1 in two dims — concentrated perturbations hurt more than distributed ones, validating the squared distance formulation. (3) Dim 0 (8 levels) causes ~2× more visual change per step than dims 1–3 (5 levels), because the decoder allocates more visual information to the higher-capacity dimension — unweighted `sum(Δ²)` correctly reflects this.
+  Key findings: (1) ±1 neighbors produce near-identical reconstructions (MSE ≈ 0.00008). (2) +2 in one dim is **2.47× worse** than +1 in two dims — concentrated perturbations hurt more than distributed ones, validating the squared distance formulation. (3) The real damage curve is steeper than squared (6.3× vs theoretical 4×), so $\sigma$ is calibrated to 0.9 to match the empirical ratio. (4) Dim 0 (8 levels) causes ~2× more visual change per step than dims 1–3 (5 levels), because the decoder allocates more visual information to the higher-capacity dimension — unweighted `sum(Δ²)` correctly reflects this.
 * **Regularization:**
   * **Spatial shift augmentation:** Episodes are re-tokenized through the frozen FSQ-VAE at multiple pixel offsets ({-4,-2,0,2,4} × {-3,0,3} with edge padding), creating 15 tokenization variants per episode (~15× data multiplier). Horizontal shifts are physically equivalent to a different camera scroll position.
   * **Dual token noise:** Random token replacement (5%) acts as context-forcing dropout, while **FSQ neighbor substitution** (5%) replaces tokens with ±1 neighbors in the FSQ mixed-radix space. FSQ neighbors decode to visually near-identical patches but are distinct token indices — this forces the Transformer's embedding layer to learn that geometrically adjacent codes are semantically equivalent, injecting the codebook's topological structure as an inductive bias. The two noise types are complementary: random noise forces global robustness, neighbor noise smooths the embedding manifold.
