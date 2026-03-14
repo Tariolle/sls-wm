@@ -403,8 +403,6 @@ def main():
         if T < K + 1:
             continue
 
-        is_clear = "clear" in ep.name
-
         # Strip shift suffix (e.g. ep_0006_s+2_+0 -> ep_0006) for val check
         base_name = re.sub(r"_s[+-]\d+_[+-]\d+$", "", ep.name)
         is_val = base_name in val_episodes
@@ -418,7 +416,7 @@ def main():
             # Append status token to each frame
             # Target frame (index K in window): DEATH if last frame of death episode
             status = np.full((K + 1, 1), 0, dtype=np.int64)
-            is_death_frame = (not is_clear) and (i + K == T - 1)
+            is_death_frame = (i + K == T - 1)
             if is_death_frame:
                 status[K] = 1  # will be mapped to DEATH_TOKEN
             n_deaths += int(is_death_frame)
