@@ -28,18 +28,84 @@ def _unwrap(model):
     return model._orig_mod if hasattr(model, "_orig_mod") else model
 
 
-def focal_cross_entropy(logits, targets, gamma=2.0, label_smoothing=0.0):
-    """Focal loss: downweights easy (well-classified) tokens, upweights hard ones.
+def build_structured_smooth_targets(levels, full_vocab_size, sigma=1.0, smoothing=0.1):
+    """Precompute FSQ-structured soft target distributions.
 
-    FL(p_t) = -(1 - p_t)^gamma * log(p_t)
+    Visual tokens (0..prod(levels)-1): Gaussian kernel over squared FSQ
+    coordinate distance. Status tokens (ALIVE, DEATH): hard targets.
 
-    With gamma=0 this is standard cross-entropy. Higher gamma focuses more on
-    hard tokens (e.g. changing regions between frames).
+    Args:
+        levels: FSQ quantization levels, e.g. [8, 5, 5, 5].
+        full_vocab_size: Total vocab including status tokens (1002).
+        sigma: Gaussian kernel width. Controls how fast tolerance decays.
+        smoothing: Total probability mass redistributed from correct token.
+
+    Returns:
+        soft_targets: (full_vocab_size, full_vocab_size) float tensor.
+            Row i is the target distribution when the correct token is i.
+    """
+    import math
+    vocab_size = math.prod(levels)
+    n_dims = len(levels)
+
+    # Decompose all visual token indices to FSQ coordinates
+    divisors = []
+    acc = 1
+    for L in reversed(levels):
+        divisors.append(acc)
+        acc *= L
+    divisors.reverse()
+
+    coords = torch.zeros(vocab_size, n_dims)
+    for idx in range(vocab_size):
+        remainder = idx
+        for d in range(n_dims):
+            coords[idx, d] = remainder // divisors[d]
+            remainder = remainder % divisors[d]
+
+    # Pairwise squared Euclidean distance in FSQ coordinate space
+    diff = coords.unsqueeze(1) - coords.unsqueeze(0)  # (V, V, D)
+    sq_dist = (diff ** 2).sum(dim=-1)  # (V, V)
+
+    # Gaussian kernel weights (zero on diagonal — handled separately)
+    weights = torch.exp(-sq_dist / (2 * sigma ** 2))
+    weights.fill_diagonal_(0)
+
+    # Normalize each row to sum to 1, then scale by smoothing
+    row_sums = weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+    weights = weights / row_sums
+
+    # Build full vocab soft targets (visual + status tokens)
+    soft = torch.zeros(full_vocab_size, full_vocab_size)
+    # Visual tokens: structured smoothing
+    soft[:vocab_size, :vocab_size] = smoothing * weights
+    diag_idx = torch.arange(vocab_size)
+    soft[diag_idx, diag_idx] = 1 - smoothing
+    # Status tokens: hard targets (no smoothing — death prediction must be exact)
+    for i in range(vocab_size, full_vocab_size):
+        soft[i, i] = 1.0
+
+    return soft
+
+
+def focal_cross_entropy(logits, targets, gamma=2.0, soft_target_matrix=None,
+                        label_smoothing=0.0):
+    """Focal loss with optional FSQ-structured soft targets.
+
+    If soft_target_matrix is provided, uses structured label smoothing
+    (Gaussian kernel over FSQ distance). Otherwise falls back to uniform
+    label smoothing via F.cross_entropy.
 
     Reference: Lin et al., "Focal Loss for Dense Object Detection", ICCV 2017.
     """
-    ce = F.cross_entropy(logits, targets, reduction='none',
-                         label_smoothing=label_smoothing)
+    if soft_target_matrix is not None:
+        # Look up soft target distributions for each target token
+        soft_targets = soft_target_matrix[targets]  # (N, C)
+        log_probs = F.log_softmax(logits, dim=-1)
+        ce = -(soft_targets * log_probs).sum(dim=-1)  # (N,)
+    else:
+        ce = F.cross_entropy(logits, targets, reduction='none',
+                             label_smoothing=label_smoothing)
     if gamma == 0:
         return ce.mean()
     pt = torch.exp(-ce)
@@ -136,7 +202,8 @@ def apply_fsq_noise(tokens, neighbor_table, neighbor_counts, prob, device):
 
 def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
                 token_noise=0.0, fsq_noise=0.0, neighbor_table=None,
-                neighbor_counts=None, label_smoothing=0.0, focal_gamma=2.0):
+                neighbor_counts=None, label_smoothing=0.0, focal_gamma=2.0,
+                soft_target_matrix=None):
     model.train()
     m = _unwrap(model)
     tpf = m.tokens_per_frame
@@ -177,6 +244,7 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
                 logits[mask],      # (n_masked, vocab)
                 target[mask],      # (n_masked,)
                 gamma=focal_gamma,
+                soft_target_matrix=soft_target_matrix,
                 label_smoothing=label_smoothing,
             )
             loss = token_loss + cpc_weight * cpc_loss
@@ -208,7 +276,8 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
 
 
 @torch.no_grad()
-def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0):
+def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
+              soft_target_matrix=None):
     model.eval()
     m = _unwrap(model)
     tpf = m.tokens_per_frame
@@ -232,6 +301,7 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0):
             logits[mask],
             target[mask],
             gamma=focal_gamma,
+            soft_target_matrix=soft_target_matrix,
             label_smoothing=label_smoothing,
         )
 
@@ -282,7 +352,9 @@ def main():
     parser.add_argument("--fsq-levels", type=int, nargs="+", default=[8, 5, 5, 5],
                         help="FSQ quantization levels (must match tokenizer)")
     parser.add_argument("--label-smoothing", type=float, default=0.1,
-                        help="Label smoothing for cross-entropy loss")
+                        help="Label smoothing amount (used with --fsq-sigma for structured smoothing)")
+    parser.add_argument("--fsq-sigma", type=float, default=1.0,
+                        help="Gaussian kernel width for structured label smoothing (0 = uniform)")
     parser.add_argument("--focal-gamma", type=float, default=2.0,
                         help="Focal loss gamma (0 = standard CE)")
     parser.add_argument("--death-oversample", type=int, default=15,
@@ -454,6 +526,20 @@ def main():
     else:
         neighbor_table, neighbor_counts = None, None
 
+    # Build structured label smoothing matrix
+    if args.fsq_sigma > 0 and args.label_smoothing > 0:
+        soft_target_matrix = build_structured_smooth_targets(
+            args.fsq_levels, model.full_vocab_size,
+            sigma=args.fsq_sigma, smoothing=args.label_smoothing,
+        ).to(device)
+        # Check how concentrated the smoothing mass is
+        visual_row = soft_target_matrix[0, :model.vocab_size]
+        top5 = visual_row.topk(6).values  # includes self
+        print(f"Structured label smoothing: σ={args.fsq_sigma}, ε={args.label_smoothing}")
+        print(f"  Top-6 target probs for token 0: {top5.tolist()}")
+    else:
+        soft_target_matrix = None
+
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=1e-4,
         last_epoch=start_epoch - 2 if start_epoch > 1 else -1)
@@ -494,11 +580,13 @@ def main():
                 fsq_noise=args.fsq_noise,
                 neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
                 label_smoothing=args.label_smoothing,
-                focal_gamma=args.focal_gamma)
+                focal_gamma=args.focal_gamma,
+                soft_target_matrix=soft_target_matrix)
             val_loss, val_acc, val_death_acc, val_cpc = val_epoch(
                 model, val_loader, device,
                 label_smoothing=args.label_smoothing,
-                focal_gamma=args.focal_gamma)
+                focal_gamma=args.focal_gamma,
+                soft_target_matrix=soft_target_matrix)
             scheduler.step()
             dt = time.time() - t0
             lr = optimizer.param_groups[0]["lr"]
