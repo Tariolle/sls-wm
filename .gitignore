@@ -8,3 +8,18 @@ data/episodes/*/tokens.npy
 data/videos/
 eval_output/data/episodes/*_s[+-]*_[+-]*/
 data/episodes/*_s*/
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.nav
+*.out
+*.snm
+*.toc
+*.vrb
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+presentation/*.pdf

@@ -61,10 +61,6 @@ def main():
         return m
 
     model_best = load_model(args.checkpoint)
-    ckpt_dir = Path(args.checkpoint).parent
-    final_name = "fsq_final.pt" if args.model == "fsq" else "vqvae_final.pt"
-    final_path = ckpt_dir / final_name
-    model_final = load_model(str(final_path)) if final_path.exists() else None
 
     if args.data_dir is not None:
         data = np.load(args.data_dir)  # (N, 64, 64) uint8
@@ -88,43 +84,34 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(exist_ok=True)
 
-    originals, recons_best, recons_final = [], [], []
+    originals, recons = [], []
     with torch.no_grad():
         for i, idx in enumerate(indices):
             frame = data[idx].astype(np.float32) / 255.0
             img = torch.from_numpy(frame).unsqueeze(0).unsqueeze(0).to(device)
 
             orig_pil = tensor_to_image(img[0])
-            recon_best_pil = tensor_to_image(model_best(img)[0][0])
+            recon_pil = tensor_to_image(model_best(img)[0][0])
             originals.append(orig_pil)
-            recons_best.append(recon_best_pil)
-
-            if model_final:
-                recons_final.append(tensor_to_image(model_final(img)[0][0]))
+            recons.append(recon_pil)
 
             combined = Image.new("L", (orig_pil.width * 2, orig_pil.height))
             combined.paste(orig_pil, (0, 0))
-            combined.paste(recon_best_pil, (orig_pil.width, 0))
+            combined.paste(recon_pil, (orig_pil.width, 0))
             combined.save(out_dir / f"sample_{i:02d}.png")
 
     print(f"Saved {len(indices)} comparisons to {out_dir}/")
 
     import matplotlib.pyplot as plt
     n = len(originals)
-    rows = 3 if model_final else 2
-    fig, axes = plt.subplots(rows, n, figsize=(n * 2, rows * 2))
+    fig, axes = plt.subplots(2, n, figsize=(n * 2, 4))
     for i in range(n):
         axes[0, i].imshow(originals[i], cmap="gray")
         axes[0, i].axis("off")
-        axes[1, i].imshow(recons_best[i], cmap="gray")
+        axes[1, i].imshow(recons[i], cmap="gray")
         axes[1, i].axis("off")
-        if model_final:
-            axes[2, i].imshow(recons_final[i], cmap="gray")
-            axes[2, i].axis("off")
-    axes[0, 0].set_title("Original", fontsize=10)
-    axes[1, 0].set_title("Best", fontsize=10)
-    if model_final:
-        axes[2, 0].set_title("Final", fontsize=10)
+    axes[0, 0].set_title("Original", fontsize=30, pad=10)
+    axes[1, 0].set_title("Reconstruction", fontsize=30, pad=10)
     plt.tight_layout()
     plt.show()
 

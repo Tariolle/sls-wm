@@ -1,0 +1,650 @@
+\documentclass[aspectratio=169]{beamer}
+\usetheme{metropolis}
+
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage[normalem]{ulem} % for \sout (strikethrough)
+\usetikzlibrary{positioning, fit, arrows.meta, calc, decorations.pathreplacing}
+
+\graphicspath{{../docs/}{../}{./figures/}}
+
+\definecolor{insared}{HTML}{CC2B1E}
+\definecolor{vcolor}{HTML}{2E86AB}
+\definecolor{mcolor}{HTML}{E8871E}
+\definecolor{ccolor}{HTML}{7FB069}
+\setbeamercolor{progress bar}{fg=insared}
+\setbeamertemplate{frame footer}{}
+\metroset{block=fill}
+% Reduce frame title spacing to prevent overflow
+\addtobeamertemplate{frametitle}{}{\vspace*{-0.3em}}
+
+\title{DeepDash}
+\subtitle{World Models for Geometry Dash}
+\author{Florent Tariolle \& Maël Planchot}
+\institute{INSA Rouen Normandie \\ Representation Learning}
+\date{}
+
+% ============================================================
+\begin{document}
+
+% --- Title ---
+{%
+\setbeamertemplate{headline}{}
+\begin{frame}[noframenumbering,plain]
+  \begin{tikzpicture}[remember picture,overlay]
+    \node[anchor=north east,yshift=-0.4cm,xshift=-0.4cm] at (current page.north east) {\includegraphics[height=0.9cm]{school_logo.png}};
+  \end{tikzpicture}
+  \titlepage
+\end{frame}
+}
+
+% ==========================================================
+\section{Motivation}
+% ==========================================================
+
+\begin{frame}{Why World Models?}
+  \begin{itemize}
+    \item Model-free RL (DQN, PPO) requires \textbf{millions of environment interactions}
+    \item World Models (Ha \& Schmidhuber, 2018): learn a \textbf{compressed model of the environment}, then train a controller entirely \textbf{in imagination}
+    \item LeCun's JEPA framework (2022): world models as a path to sample-efficient intelligence
+    \item \textbf{Geometry Dash}: deterministic physics, binary action (jump/idle), precision timing. Ideal testbed for latent dynamics learning
+  \end{itemize}
+
+  \vspace{0.5em}
+  \textbf{Goal}: master Geometry Dash levels \emph{without ever playing the real game during training}
+\end{frame}
+
+% ==========================================================
+\section{Architecture Overview}
+% ==========================================================
+
+\begin{frame}{V $\to$ M $\to$ C: High-Level Pipeline}
+  \vspace{1em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw, rounded corners, minimum height=1.2cm, minimum width=2.2cm, align=center, font=\small, line width=0.8pt},
+    arr/.style={-{Stealth[length=3mm]}, thick},
+    lbl/.style={font=\scriptsize, align=center},
+  ]
+    \node[block, fill=vcolor!20, draw=vcolor] (V) {\textbf{V}\\\scriptsize FSQ-VAE};
+    \node[block, fill=mcolor!20, draw=mcolor, right=1.5cm of V] (M) {\textbf{M}\\\scriptsize Transformer};
+    \node[block, fill=ccolor!20, draw=ccolor, right=1.5cm of M] (C) {\textbf{C}\\\scriptsize Controller};
+
+    \node[left=1.2cm of V, lbl] (input) {$\mathbf{x}_t$\\{\tiny 64$\times$64$\times$1}};
+    \node[right=1.2cm of C, lbl] (output) {$a_t$};
+
+    \draw[arr] (input) -- (V);
+    \draw[arr] (V) -- node[above, lbl] {$\mathbf{z}_t$} node[below, lbl] {\tiny 8$\times$8} (M);
+    \draw[arr] (M) -- node[above, lbl] {$\mathbf{h}_t$} node[below, lbl] {\tiny 256} (C);
+    \draw[arr] (C) -- (output);
+
+    \draw[arr] (C.south) -- ++(0,-0.6) -| node[below, lbl, pos=0.25] {$a_t$} (M.south);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.5em}
+  \begin{center}
+    \small
+    $\mathbf{x}_t \in \mathbb{R}^{64 \times 64}$: grayscale Sobel frame \quad\quad
+    $\mathbf{z}_t \in \{0,\ldots,999\}^{64}$: discrete tokens \\[0.3em]
+    $\mathbf{h}_t \in \mathbb{R}^{256}$: hidden state \quad\quad
+    $a_t \in \{0, 1\}$: jump/idle
+  \end{center}
+\end{frame}
+
+% ==========================================================
+\section{Data Collection}
+% ==========================================================
+
+\begin{frame}{Data Collection}
+  \begin{center}
+    \begin{tabular}{cccc}
+      \includegraphics[width=0.2\textwidth]{preprocessing_1_original.png} &
+      \includegraphics[width=0.2\textwidth]{preprocessing_2_cropped.png} &
+      \includegraphics[width=0.2\textwidth]{preprocessing_3_sobel.png} &
+      \includegraphics[width=0.2\textwidth]{preprocessing_4_final.png} \\
+      {\scriptsize Raw 1080p} & {\scriptsize Square crop} & {\scriptsize Sobel edges} & {\scriptsize 64$\times$64}
+    \end{tabular}
+  \end{center}
+
+  \begin{itemize}
+    \item Live gameplay at \textbf{30 FPS}, death detection via process memory reading
+    \item Frames + actions recorded simultaneously, saved as \texttt{.npy} per episode
+    \item $\sim$3,600 episodes, $\sim$180K frames $\approx$ \textbf{1h40 of gameplay}
+  \end{itemize}
+\end{frame}
+
+% ==========================================================
+\section{Phase 1: V (FSQ-VAE)}
+% ==========================================================
+
+\begin{frame}{Vision Model: $\beta$-VAE $\to$ VQ-VAE $\to$ FSQ-VAE}
+  \begin{itemize}
+    \item \textbf{$\beta$-VAE}: Gaussian posterior $\Rightarrow$ always blurry. No spatial structure.
+    \item \textbf{VQ-VAE}: discrete, spatially localized tokens $\Rightarrow$ sharp. But codebook collapse, commitment cost tuning.
+    \item \textbf{FSQ-VAE} (Mentzer et al., 2023): round to $L$ fixed levels. No codebook, no auxiliary losses, 100\% utilization by construction.
+  \end{itemize}
+
+  \vspace{0.3em}
+  \begin{center}
+    Levels $[8,5,5,5]$ $\Rightarrow$ 1000 codes, $8\times8$ grid $=$ \textbf{64 tokens/frame}
+  \end{center}
+  % TODO: add before/after reconstruction comparison
+\end{frame}
+
+\begin{frame}{FSQ-VAE: Architecture}
+  \vspace{0.5em}
+  \begin{center}
+  \resizebox{0.9\textwidth}{!}{%
+  \begin{tikzpicture}[
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    lbl/.style={font=\scriptsize, align=center},
+  ]
+    % Encoder pyramid (height = spatial size, width constant)
+    \node[rectangle, draw=vcolor, fill=vcolor!8, minimum width=1cm, minimum height=3.2cm] (e0) at (0,0) {};
+    \node[rectangle, draw=vcolor, fill=vcolor!12, minimum width=1cm, minimum height=2.4cm] (e1) at (1.5,0) {};
+    \node[rectangle, draw=vcolor, fill=vcolor!16, minimum width=1cm, minimum height=1.6cm] (e2) at (3,0) {};
+    \node[rectangle, draw=vcolor, fill=vcolor!20, minimum width=1cm, minimum height=0.8cm] (e3) at (4.5,0) {};
+
+    % FSQ bottleneck
+    \node[rectangle, draw=vcolor, fill=vcolor!40, minimum width=0.6cm, minimum height=0.5cm, line width=1.2pt] (fsq) at (6,0) {};
+
+    % Decoder pyramid
+    \node[rectangle, draw=vcolor, fill=vcolor!20, minimum width=1cm, minimum height=0.8cm] (d1) at (7.5,0) {};
+    \node[rectangle, draw=vcolor, fill=vcolor!16, minimum width=1cm, minimum height=1.6cm] (d2) at (9,0) {};
+    \node[rectangle, draw=vcolor, fill=vcolor!12, minimum width=1cm, minimum height=2.4cm] (d3) at (10.5,0) {};
+    \node[rectangle, draw=vcolor, fill=vcolor!8, minimum width=1cm, minimum height=3.2cm] (d4) at (12,0) {};
+
+    % Arrows
+    \draw[arr] (e0) -- (e1);
+    \draw[arr] (e1) -- (e2);
+    \draw[arr] (e2) -- (e3);
+    \draw[arr] (e3) -- (fsq);
+    \draw[arr] (fsq) -- (d1);
+    \draw[arr] (d1) -- (d2);
+    \draw[arr] (d2) -- (d3);
+    \draw[arr] (d3) -- (d4);
+
+    % Size labels below
+    \node[below=0.15cm of e0, lbl] {64$\times$64\\$\times$1};
+    \node[below=0.15cm of e1, lbl] {32$\times$32};
+    \node[below=0.15cm of e2, lbl] {16$\times$16};
+    \node[below=0.15cm of e3, lbl] {8$\times$8$\times$4};
+    \node[below=0.15cm of fsq, lbl] {\textbf{FSQ}\\$\mathbf{z}_t$};
+    \node[below=0.15cm of d1, lbl] {8$\times$8};
+    \node[below=0.15cm of d2, lbl] {16$\times$16};
+    \node[below=0.15cm of d3, lbl] {32$\times$32};
+    \node[below=0.15cm of d4, lbl] {64$\times$64\\$\times$1};
+
+    % Top labels
+    \node[above=0.15cm of e0, lbl] {$\mathbf{x}_t$};
+    \node[above=0.15cm of d4, lbl] {$\hat{\mathbf{x}}_t$};
+
+    % Layer type labels inside
+    \node[font=\tiny, rotate=90] at (e1) {Conv$\downarrow$2};
+    \node[font=\tiny, rotate=90] at (e2) {Conv$\downarrow$2};
+    \node[font=\tiny, rotate=90] at (e3) {Conv$\downarrow$2};
+    \node[font=\tiny, rotate=90] at (d1) {TConv$\uparrow$2};
+    \node[font=\tiny, rotate=90] at (d2) {TConv$\uparrow$2};
+    \node[font=\tiny, rotate=90] at (d3) {TConv$\uparrow$2};
+
+    % Encoder / Decoder braces
+    \node[above=0.6cm of e1.north east, lbl] {Encoder};
+    \node[above=0.6cm of d2.north west, lbl] {Decoder};
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+\end{frame}
+
+\begin{frame}{FSQ-VAE: Inside a Conv$\downarrow$2 Block}
+  \vspace{0.5em}
+  Each encoder level consists of:
+
+  \vspace{0.5em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw=vcolor, fill=vcolor!10, rounded corners, minimum height=1cm, minimum width=2.5cm, align=center, font=\small, line width=0.6pt},
+    res/.style={rectangle, draw=vcolor!70, fill=vcolor!5, rounded corners, minimum height=1cm, minimum width=2.5cm, align=center, font=\small, line width=0.6pt, dashed},
+    arr/.style={-{Stealth[length=3mm]}, thick},
+  ]
+    \node[block] (conv) {Conv2d 3$\times$3\\stride 2};
+    \node[block, right=0.8cm of conv] (bn1) {BatchNorm};
+    \node[block, right=0.8cm of bn1] (act1) {SiLU};
+    \node[res, right=1.2cm of act1] (rb1) {ResBlock 1};
+    \node[res, right=0.8cm of rb1] (rb2) {ResBlock 2};
+
+    \draw[arr] (conv) -- (bn1);
+    \draw[arr] (bn1) -- (act1);
+    \draw[arr] (act1) -- (rb1);
+    \draw[arr] (rb1) -- (rb2);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.5em}
+  Each \textbf{ResBlock}:
+  \vspace{0.3em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw=vcolor!70, fill=vcolor!5, rounded corners, minimum height=1cm, minimum width=2.2cm, align=center, font=\small, line width=0.6pt},
+    arr/.style={-{Stealth[length=3mm]}, thick},
+  ]
+    \node[block] (c1) {Conv 3$\times$3};
+    \node[block, right=0.6cm of c1] (bn1) {BN};
+    \node[block, right=0.6cm of bn1] (act1) {SiLU};
+    \node[block, right=0.6cm of act1] (c2) {Conv 3$\times$3};
+    \node[block, right=0.6cm of c2] (bn2) {BN};
+    \node[circle, draw=vcolor, fill=vcolor!15, inner sep=4pt, font=\normalsize, right=0.8cm of bn2] (add) {$+$};
+    \node[block, right=0.8cm of add] (act2) {SiLU};
+
+    \draw[arr] (c1) -- (bn1);
+    \draw[arr] (bn1) -- (act1);
+    \draw[arr] (act1) -- (c2);
+    \draw[arr] (c2) -- (bn2);
+    \draw[arr] (bn2) -- (add);
+    \draw[arr] (add) -- (act2);
+
+    % Skip connection: x
+    \node[left=0.6cm of c1, font=\small] (xin) {$\mathbf{x}$};
+    \draw[arr] (xin) -- (c1);
+    \draw[-{Stealth[length=3mm]}, vcolor!60, thick] (xin.north) -- ++(0,0.8) -| (add);
+
+    \node[font=\scriptsize, below=0.2cm of act1] {$f(\mathbf{x})$};
+    \node[font=\scriptsize, right=0.3cm of act2] {$\text{SiLU}(\mathbf{x} + f(\mathbf{x}))$};
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.3em}
+  \begin{center}
+    \small Channels: 32 $\to$ 64 $\to$ 128. Adding ResBlocks halved reconstruction error.
+  \end{center}
+\end{frame}
+
+\begin{frame}{FSQ-VAE: Training}
+  \begin{itemize}
+    \item $\sim$180K frames, batch 2048
+    \item GRWM regularization (temporal slowness + uniformity)
+    \item $\pm$4px random shift augmentation (edge padding)
+    \item Cosine LR schedule, 200 epochs
+    \item GPU: A100, total training time: $\sim$48 min
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{FSQ-VAE: Reconstructions}
+  \begin{center}
+    \includegraphics[width=\textwidth]{fsq_reconstructions.png}
+  \end{center}
+  \begin{center}
+    \small RMSE $\approx 0.025$ per pixel
+  \end{center}
+\end{frame}
+
+\begin{frame}{FSQ-VAE: Abstraction for Pipeline}
+  \vspace{1em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw, rounded corners, minimum height=1.4cm, minimum width=3cm, align=center, font=\normalsize, line width=0.8pt},
+    arr/.style={-{Stealth[length=3mm]}, thick},
+    lbl/.style={font=\small, align=center},
+  ]
+    \node[lbl] (in) {$\mathbf{x}_t$\\{\scriptsize 64$\times$64}};
+    \node[block, fill=vcolor!20, draw=vcolor, right=1.2cm of in] (enc) {\textbf{Encoder}\\{\scriptsize frozen}};
+    \node[block, fill=vcolor!35, draw=vcolor, right=1cm of enc, minimum width=2cm] (fsq) {\textbf{FSQ}};
+    \node[lbl, right=1.2cm of fsq] (out) {$\mathbf{z}_t$\\{\scriptsize 8$\times$8}};
+    \node[block, fill=gray!10, draw=gray!40, right=2.5cm of out, text=gray!50] (dec) {Decoder\\{\scriptsize viz only}};
+
+    \draw[arr] (in) -- (enc);
+    \draw[arr] (enc) -- (fsq);
+    \draw[arr] (fsq) -- (out);
+    \draw[-{Stealth[length=3mm]}, gray!40, dashed, thick] (out) -- (dec);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{1em}
+  \begin{itemize}
+    \item Encoder + FSQ frozen after training, used in the full pipeline
+    \item Decoder kept only for visualizing Transformer dream rollouts
+    \item 51$\times$ compression: $64 \times 64 \times 8 = 32{,}768$ bits $\to$ $64 \times \underbrace{\lceil\log_2 1000\rceil}_{10} = 640$ bits
+  \end{itemize}
+\end{frame}
+
+% ==========================================================
+\section{Phase 2: M (Transformer)}
+% ==========================================================
+
+\begin{frame}{Transformer World Model: Architecture}
+  \vspace{0.5em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw=mcolor, fill=mcolor!10, rounded corners, minimum height=0.9cm, align=center, font=\scriptsize, line width=0.6pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    lbl/.style={font=\tiny, align=center},
+  ]
+    \node[lbl] (in) {$\mathbf{z}_{t-K:t}$, $a_{t-K:t}$\\{\tiny 329 tokens}};
+    \node[block, minimum width=2cm, right=0.6cm of in] (emb) {Token + Action\\Embedding};
+    \node[block, minimum width=2cm, right=0.6cm of emb] (rope) {3D-RoPE\\{\tiny row, col, frame}};
+    \node[block, minimum width=2.5cm, right=0.6cm of rope, fill=mcolor!25] (blocks) {8$\times$ Transformer\\Block (256d, 8H)};
+    \node[block, minimum width=2cm, right=0.6cm of blocks] (head) {Prediction\\Head};
+    \node[lbl, right=0.6cm of head] (out1) {$\hat{\mathbf{z}}_{t+1}$, $\hat{d}_{t+1}$\\{\tiny 64 tokens + death}};
+
+    \node[block, minimum width=2cm, above=0.4cm of blocks, fill=mcolor!15] (cpc) {AC-CPC Loss};
+
+    \draw[arr] (in) -- (emb);
+    \draw[arr] (emb) -- (rope);
+    \draw[arr] (rope) -- node[below, lbl] {block-causal} (blocks);
+    \draw[arr] (blocks) -- (head);
+    \draw[arr] (blocks) -- (cpc);
+    \draw[arr] (head) -- (out1);
+
+    \node[below=0.4cm of blocks, lbl, font=\scriptsize] (ht) {$\mathbf{h}_t \in \mathbb{R}^{256}$};
+    \draw[arr, ccolor] (blocks.south) -- (ht);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.3em}
+  \begin{center}
+    \small
+    6.7M params \quad\quad
+    MaskGIT: $\sim$8 steps vs 65 autoregressive \quad\quad
+    Vocab: $|\mathcal{V}| = 1002$
+  \end{center}
+\end{frame}
+
+\begin{frame}{Training: Spatial Shift Augmentation}
+  \textbf{Problem}: 3,600 episodes is limited data for 6.7M params $\Rightarrow$ overfitting
+
+  \vspace{0.3em}
+  \textbf{Solution}: re-encode frames through frozen FSQ-VAE at pixel offsets
+
+  \begin{center}
+  \resizebox{0.85\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw=vcolor, fill=vcolor!15, rounded corners, minimum height=0.8cm, align=center, font=\scriptsize, line width=0.6pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    lbl/.style={font=\tiny, align=center},
+  ]
+    \node[block] (frame) {$\mathbf{x}_t$};
+    \node[block, right=0.8cm of frame] (shift) {Pixel shift\\$\{-4,-2,0,2,4\} \times \{-3,0,3\}$};
+    \node[block, right=0.8cm of shift] (enc) {V (frozen)};
+    \node[block, right=0.8cm of enc] (tok) {$\mathbf{z}'_t \neq \mathbf{z}_t$};
+
+    \draw[arr] (frame) -- (shift);
+    \draw[arr] (shift) -- (enc);
+    \draw[arr] (enc) -- (tok);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \begin{itemize}
+    \item 15 shift combinations $\times$ 3,582 episodes $=$ \textbf{53,730 augmented episodes}
+    \item Horizontal shifts $=$ different camera scroll positions (physically valid)
+    \item Edge padding (same as FSQ-VAE training)
+    \item Result: overfitting gap $13.5\text{pp} \to 3.5\text{pp}$, enabled $10\times$ higher LR
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Training: Dual Token Noise}
+  \vspace{0.5em}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    Two complementary noise types on context tokens:
+
+    \vspace{0.5em}
+    \textbf{1. Random replacement (5\%)}
+    \begin{itemize}
+      \item Any of 1000 tokens uniformly
+      \item Forces global robustness
+    \end{itemize}
+
+    \vspace{0.5em}
+    \textbf{2. FSQ neighbor substitution (5\%)} {\color{insared}\textit{(novel)}}
+    \begin{itemize}
+      \item $\pm1$ in one FSQ dimension
+      \item Visually near-identical patches
+      \item Forces embedding to learn codebook topology
+    \end{itemize}
+
+    \column{0.45\textwidth}
+    \vspace{-1.2em}
+    \begin{center}
+      \includegraphics[width=0.80\textwidth]{fsq_neighbors.png}
+    \end{center}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[t]{Novel: FSQ-Structured Label Smoothing}
+  \textbf{Problem}: standard label smoothing spreads probability \emph{uniformly}. A $\pm1$ neighbor (visually identical) gets the same target mass as a completely unrelated token.
+
+  \vspace{0.5em}
+  \textbf{Solution} {\color{insared}\textit{(novel)}}: Gaussian kernel over squared FSQ coordinate distance:
+  \[
+    w(a,b) = \exp\!\left(-\frac{d^2(a,b)}{2\sigma^2}\right), \quad d^2 = \sum_i (\Delta_i)^2, \quad \sigma = 0.9
+  \]
+
+  $\sigma$ calibrated from empirical MSE analysis (800 samples per perturbation):
+
+  \vspace{0.2em}
+  \begin{center}
+    \small
+    \begin{tabular}{lcc}
+      \toprule
+      Perturbation & Patch MSE & Ratio \\
+      \midrule
+      $\pm1$ single dim & 0.000078 & 1.0$\times$ \\
+      $+1$ two dims & 0.000200 & 2.55$\times$ \\
+      $+2$ single dim & 0.000493 & \textbf{6.30$\times$} \\
+      \bottomrule
+    \end{tabular}
+  \end{center}
+
+  \vspace{0.2em}\end{frame}
+
+\begin{frame}{Dream Rollout}
+  \vspace{0.5em}
+  \begin{center}
+  \resizebox{0.85\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw=mcolor, fill=mcolor!15, rounded corners, minimum height=0.9cm, align=center, font=\scriptsize, line width=0.6pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    lbl/.style={font=\tiny, align=center},
+  ]
+    \node[block, fill=vcolor!15, draw=vcolor] (ctx) {$\mathbf{z}_{t-K:t}$, $a_{t-K:t}$\\{\tiny real context}};
+    \node[block, right=1cm of ctx] (tfm) {\textbf{M}};
+    \node[block, right=1cm of tfm] (pred) {$\hat{\mathbf{z}}_{t+1}$};
+    \node[block, above=0.5cm of pred] (death) {$\hat{d}_{t+1}$};
+
+    \draw[arr] (ctx) -- (tfm);
+    \draw[arr] (tfm) -- (pred);
+    \draw[arr] (tfm) -- (death);
+
+    \draw[arr, mcolor] (pred.south) -- ++(0,-0.6) -| node[below, lbl, pos=0.5] {shift context window} (ctx.south);
+
+    \node[below=1.2cm of tfm, font=\scriptsize] (ht) {$\mathbf{h}_t \to$ \textbf{C}};
+    \draw[arr, ccolor] (tfm.south) -- ++(0,-0.3) -- (ht);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.5em}
+  \begin{itemize}
+    \item Warmup: $K=4$ real frames as ground truth context
+    \item Dream: autoregressive prediction using own outputs
+    \item $\mathbf{h}_t$ feeds the controller; rollout stops when $\hat{d}_{t+1} > 0.5$
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Transformer: Training Results}
+  \begin{columns}[T]
+    \column{0.5\textwidth}
+    \textbf{Best model} (200 epochs, LR $10^{-3} \to 10^{-4}$):
+    \begin{itemize}
+      \item Val accuracy: \textbf{32.85\%}
+      \item Death accuracy: 97.9\%
+      \item Overfitting gap: $\sim$3.5pp
+    \end{itemize}
+
+    \vspace{0.5em}
+    \textbf{Key insight}: shift augmentation eliminated overfitting, enabling $10\times$ higher LR
+
+    % TODO: update with structured label smoothing results
+
+    \column{0.5\textwidth}
+    % TODO: add training curves plot
+    \textit{[Training curves: TODO]}
+
+    \vspace{1em}
+    % TODO: add rollout comparison (actual vs predicted frames)
+    \textit{[Rollout visualization: TODO]}
+  \end{columns}
+\end{frame}
+
+% ==========================================================
+\section{Phase 3: C (Controller)}
+% ==========================================================
+
+\begin{frame}{Controller: Architecture}
+  \[
+    \text{action} = \begin{cases} \text{jump} & \text{if } \sigma(\mathbf{W} \cdot \mathbf{h}_t + b) > 0.5 \\ \text{idle} & \text{otherwise} \end{cases}
+  \]
+
+  \textbf{257 parameters} ($\mathbf{W} \in \mathbb{R}^{256}, b \in \mathbb{R}$). Trained via \textbf{CMA-ES}.
+
+  \vspace{0.5em}
+  \textbf{Why CMA-ES?}
+  \begin{itemize}
+    \item 257 params: too few for SGD to be efficient
+    \item No differentiable reward (binary survival)
+    \item Derivative-free, handles non-smooth landscapes
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Controller: Training Protocol}
+  \begin{itemize}
+    \item Near-death context sampling: start 6--12 frames before death
+    \item Fitness $=$ frames survived in dream before death prediction
+    \item DreamerV3-style percentile normalization of fitness across episodes
+  \end{itemize}
+
+  % TODO: controller results
+  \textit{[Controller results: TODO]}
+\end{frame}
+
+% ==========================================================
+\section{Full Inference Pipeline}
+% ==========================================================
+
+\begin{frame}{Inference: Assembling the Pipeline}
+  At inference, the prediction head is pruned. Only $\mathbf{h}_t$ matters.
+
+  \vspace{0.5em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw, rounded corners, minimum height=1cm, align=center, font=\small, line width=0.8pt},
+    arr/.style={-{Stealth[length=3mm]}, thick},
+    lbl/.style={font=\scriptsize, align=center},
+    ghost/.style={rectangle, draw=gray!40, fill=gray!5, rounded corners, minimum height=0.8cm, align=center, font=\scriptsize, dashed},
+  ]
+    \node[block, fill=gray!10, draw=gray, minimum width=1.6cm] (pre) {Sobel\\$\downarrow$ 64$\times$64};
+    \node[block, fill=vcolor!20, draw=vcolor, right=0.6cm of pre, minimum width=1.6cm] (enc) {\textbf{V}};
+    \node[block, fill=mcolor!20, draw=mcolor, right=0.6cm of enc, minimum width=1.6cm] (tfm) {\textbf{M}};
+    \node[block, fill=ccolor!20, draw=ccolor, right=0.6cm of tfm, minimum width=1.6cm] (ctrl) {\textbf{C}};
+    \node[lbl, right=0.8cm of ctrl] (act) {$a_t$};
+
+    \node[ghost, above=0.4cm of tfm] (pred) {Pred. Head\\{\tiny pruned}};
+    \draw[gray!40, dashed] (tfm) -- (pred);
+
+    \draw[arr] (pre) -- node[above, lbl] {$\mathbf{x}_t$} (enc);
+    \draw[arr] (enc) -- node[above, lbl] {$\mathbf{z}_t$} (tfm);
+    \draw[arr] (tfm) -- node[above, lbl] {$\mathbf{h}_t$} (ctrl);
+    \draw[arr] (ctrl) -- (act);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.5em}
+  \begin{center}
+    \small
+    Screen capture at 30 FPS $\to$ Sobel $\to$ V $\to$ M $\to$ C $\to$ game input \\[0.3em]
+    Game stepped every 8 ticks at 240 TPS $=$ 30 decisions/sec
+  \end{center}
+\end{frame}
+
+\begin{frame}{End-to-End: Agent Playing Geometry Dash}
+  % TODO: screenshots/video of the agent playing
+  \begin{center}
+    \textit{[Deployment results: TODO]}
+  \end{center}
+\end{frame}
+
+% ==========================================================
+\section{Analysis}
+% ==========================================================
+
+\begin{frame}{What Worked}
+  \begin{itemize}
+    \item \textbf{FSQ-VAE}: sharp reconstructions, 100\% codebook utilization, no tuning headaches
+    \item \textbf{Sobel preprocessing}: filters visual noise, forces structural perception
+    \item \textbf{Shift augmentation}: eliminated overfitting ($13.5\text{pp} \to 3.5\text{pp}$ gap), enabled $10\times$ higher LR
+    \item \textbf{MaskGIT}: $\sim$8 decoding steps vs 65 autoregressive. Critical for real-time play
+    \item \textbf{Structured label smoothing}: empirically grounded via FSQ distance analysis
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{What Didn't Work (or Didn't Help)}
+  \begin{itemize}
+    \item \textbf{$\beta$-VAE}: fundamentally blurry. Wide range of hyperparameter search before switching to VQ/FSQ
+    \item \textbf{LR $10^{-3}$ without augmentation}: 13.5pp train/val gap at epoch 29, model memorizing
+    \item \textbf{FSQ neighbor substitution}: no measurable accuracy impact (same curves), but theoretically sound and free to keep
+    \item \textbf{First CMA-ES run}: $\sigma$ diverged to 19. Most sampled contexts were safe, zero fitness signal
+    \item \textbf{torch.compile on full model}: 23+ min compilation. Solved by compiling backbone only
+  \end{itemize}
+\end{frame}
+
+% ==========================================================
+\section{Limitations}
+% ==========================================================
+
+\begin{frame}{Limitations \& Future Work}
+  \begin{itemize}
+    \item \textbf{Accuracy ceiling at $\sim$33\%}: model plateaus regardless of regularization. May need more diverse gameplay data or architectural changes
+    \item \textbf{Dream/reality gap}: controller trained in imagination may fail on real game if predictions diverge
+    \item \textbf{No horizontal flip}: player always on left, camera always right. Cannot mirror
+    \item \textbf{Death prediction timing}: low probability during safe sections. Controller training requires near-death context sampling
+    \item \textbf{Token-level augmentation}: can't crop/resize once tokenized (tokens are patch-specific)
+    % TODO: update with actual failure modes from deployment
+  \end{itemize}
+\end{frame}
+
+% ==========================================================
+\section{References}
+% ==========================================================
+
+\begin{frame}[allowframebreaks]{References}
+  \small
+  \begin{itemize}
+    \item Ha, D. \& Schmidhuber, J. (2018). \textit{World Models}. arXiv:1803.10122
+    \item Mentzer, F. et al. (2023). \textit{Finite Scalar Quantization: VQ-VAE Made Simple}. arXiv:2309.15505
+    \item Micheli, V. et al. (2023). \textit{Transformers are Sample-Efficient World Models} (IRIS). arXiv:2209.00588
+    \item Chang, H. et al. (2022). \textit{MaskGIT: Masked Generative Image Transformer}. arXiv:2202.04200
+    \item Burchert, J. et al. (2025). \textit{TWISTER: Learning Transformer-based World Models with AC-CPC}. arXiv:2503.04416
+    \item LeCun, Y. (2022). \textit{A Path Towards Autonomous Machine Intelligence} (JEPA). OpenReview
+    \item Szegedy, C. et al. (2016). \textit{Rethinking the Inception Architecture for Computer Vision}. (Label smoothing)
+    \item Lin, T.-Y. et al. (2017). \textit{Focal Loss for Dense Object Detection}. ICCV
+  \end{itemize}
+\end{frame}
+
+\end{document}

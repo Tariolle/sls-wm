@@ -61,81 +61,53 @@ def main():
     # Encode all frames
     x = torch.from_numpy(frames).float().unsqueeze(1).to(device) / 255.0  # (N, 1, 64, 64)
 
-    # Layout: n_examples rows, (1 original + 1 recon + 2*n_dims neighbors) columns
-    n_cols = 2 + 2 * n_dims
-    fig, axes = plt.subplots(args.n_examples, n_cols,
-                             figsize=(n_cols * 1.5, args.n_examples * 1.5),
-                             squeeze=False)
+    # 6 perturbations in a 3x2 grid: original, -1 d0, +1 d0, +1 d1, +1 d2, +1 d3
+    perturbations = [
+        ("Original", None, None),
+        ("$-1$ dim 0", 0, -1),
+        ("$+1$ dim 0", 0, +1),
+        ("$+1$ dim 1", 1, +1),
+        ("$+1$ dim 2", 2, +1),
+        ("$+1$ dim 3", 3, +1),
+    ]
 
-    col_labels = ["Original", "Recon"]
-    for d in range(n_dims):
-        col_labels.append(f"d{d}-1")
-        col_labels.append(f"d{d}+1")
+    fig, axes = plt.subplots(3, 2, figsize=(6, 9), squeeze=False)
 
     with torch.no_grad():
-        for row in range(args.n_examples):
-            frame = x[row:row + 1]  # (1, 1, 64, 64)
+        frame = x[0:1]
+        z_e = model.encoder(frame)
+        z_q, indices = fsq(z_e)
 
-            # Encode to get z_q codes and indices
-            z_e = model.encoder(frame)  # (1, D, 8, 8)
-            z_q, indices = fsq(z_e)  # z_q: (1, D, 8, 8), indices: (1, 8, 8)
+        pos_r = rng.integers(1, 7)
+        pos_c = rng.integers(1, 7)
 
-            # Pick a random non-border position for clearer effect
-            pos_r = rng.integers(1, 7)
-            pos_c = rng.integers(1, 7)
-            token_id = indices[0, pos_r, pos_c].item()
+        recon_orig = model.decoder(z_q)[0, 0].cpu().numpy()
 
-            # Show original frame
-            axes[row, 0].imshow(frames[row], cmap="gray")
+        for i, (label, dim, delta) in enumerate(perturbations):
+            row, col = i // 2, i % 2
+            ax = axes[row, col]
+
+            if dim is None:
+                img = recon_orig
+            else:
+                z_mod = z_q.clone()
+                new_val = z_mod[0, dim, pos_r, pos_c].item() + delta
+                half = levels[dim] // 2
+                max_val = half if levels[dim] % 2 == 1 else half - 1
+                new_val = max(-half, min(max_val, new_val))
+                z_mod[0, dim, pos_r, pos_c] = new_val
+                img = model.decoder(z_mod)[0, 0].cpu().numpy()
+
+            ax.imshow(img, cmap="gray")
             rect = Rectangle((pos_c * 8, pos_r * 8), 8, 8,
                              linewidth=1, edgecolor='r', facecolor='none')
-            axes[row, 0].add_patch(rect)
-            axes[row, 0].set_ylabel(f"pos=({pos_r},{pos_c})\ntok={token_id}", fontsize=7)
+            ax.add_patch(rect)
+            ax.set_title(label, fontsize=24)
+            ax.set_xticks([])
+            ax.set_yticks([])
 
-            # Show reconstruction from original codes
-            recon = model.decoder(z_q)
-            axes[row, 1].imshow(recon[0, 0].cpu().numpy(), cmap="gray")
-            rect2 = Rectangle((pos_c * 8, pos_r * 8), 8, 8,
-                               linewidth=1, edgecolor='r', facecolor='none')
-            axes[row, 1].add_patch(rect2)
-
-            # Swap token at (pos_r, pos_c) with each neighbor
-            col = 2
-            for d in range(n_dims):
-                for delta in [-1, +1]:
-                    z_mod = z_q.clone()
-                    new_val = z_mod[0, d, pos_r, pos_c].item() + delta
-
-                    # Check bounds
-                    half = levels[d] // 2
-                    min_val = -half
-                    max_val = half if levels[d] % 2 == 1 else half - 1
-
-                    if new_val < min_val or new_val > max_val:
-                        axes[row, col].imshow(np.ones((64, 64)) * 0.5, cmap="gray",
-                                              vmin=0, vmax=1)
-                        axes[row, col].set_title("OOB", fontsize=6, color="red")
-                    else:
-                        z_mod[0, d, pos_r, pos_c] = new_val
-                        recon_mod = model.decoder(z_mod)
-                        img_mod = recon_mod[0, 0].cpu().numpy()
-                        axes[row, col].imshow(img_mod, cmap="gray")
-                        rect_n = Rectangle((pos_c * 8, pos_r * 8), 8, 8,
-                                           linewidth=1, edgecolor='r', facecolor='none')
-                        axes[row, col].add_patch(rect_n)
-                    col += 1
-
-    for col, label in enumerate(col_labels):
-        axes[0, col].set_title(label, fontsize=7)
-
-    for ax in axes.flat:
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-    fig.suptitle("FSQ Neighbor Substitution: ±1 in each dim at marked position", fontsize=10)
     plt.tight_layout()
-    plt.savefig(args.output, dpi=150)
-    print(f"Saved to {args.output}")
+    plt.show()
 
 
 if __name__ == "__main__":
