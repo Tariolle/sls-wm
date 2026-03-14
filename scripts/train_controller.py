@@ -29,9 +29,13 @@ def _unwrap(model):
 
 
 def load_episodes(episodes_dir, context_frames):
-    """Load all tokenized episodes with enough frames for context + 1 rollout step."""
+    """Load base (non-shifted) tokenized episodes with enough frames."""
+    import re
+    shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
     episodes = []
     for ep in sorted(Path(episodes_dir).glob("*")):
+        if shift_re.search(ep.name):
+            continue
         tp = ep / "tokens.npy"
         ap = ep / "actions.npy"
         if not tp.exists() or not ap.exists():
