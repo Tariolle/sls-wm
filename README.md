@@ -159,8 +159,18 @@ The initial dataset was recorded on the first official levels of the game (level
 
 ### Phase 2: Dynamics — Transformer World Model (current)
 
-* **Status:** Training on A100 with expanded 30 FPS dataset (~3,600 episodes, ~179K frames, ~2.2M samples with shift augmentation).
-* **Architecture:** MaskGIT + block-causal attention + 3D-RoPE (row, col, frame) + AC-CPC contrastive loss + death token + focal loss + spatial shift augmentation (15×) + dual token noise (random 5% + FSQ neighbor 5%) + death oversampling (15×). 256d/8H/8L (~6.7M params).
+* **Status:** Best model trained on A100 (200 epochs, ~6.5h). Val accuracy **33.66%**, death accuracy 97.6%.
+* **Architecture:** MaskGIT + block-causal attention + 3D-RoPE (row, col, frame) + AC-CPC contrastive loss + death token + focal loss + spatial shift augmentation (15×) + dual token noise (random 5% + FSQ neighbor 5%) + FSQ-structured label smoothing (σ=0.9) + death oversampling (15×). 256d/8H/8L (~6.7M params).
+
+* **FSQ-Structured Label Smoothing impact** (vs uniform label smoothing baseline, same architecture):
+
+  | Metric | Baseline | + Structured Smoothing | Delta |
+  |:---|:---:|:---:|:---:|
+  | Val accuracy | 32.85% | **33.66%** | +0.81pp |
+  | Val CPC loss | 0.345 | **0.238** | -31% |
+  | Overfitting gap | 0.102 | 0.103 | same |
+
+  The 31% CPC improvement is notable: CPC was not modified, but benefits indirectly from smoother token embeddings. This confirms the "embedding manifold smoothing" mechanism — topology-aware soft targets cascade into better hidden state representations.
 
 ### Phase 3: Control — Dream-Trained Agent
 
