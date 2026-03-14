@@ -183,6 +183,10 @@ def evaluate_population(model, episodes, candidates, n_episodes, context_frames,
 
     use_amp = device.type == "cuda"
 
+    # First K steps: controller's actions haven't entered the context yet.
+    # Only count survival after the controller's influence starts (step K+1).
+    warmup_steps = context_frames
+
     for step in range(max_steps):
         if not alive.any():
             break
@@ -194,7 +198,8 @@ def evaluate_population(model, episodes, candidates, n_episodes, context_frames,
         # Death check
         died = death_prob > death_threshold
         alive &= ~died
-        survival += alive.float()
+        if step >= warmup_steps:
+            survival += alive.float()
 
         # Controller action (batched for all candidates)
         logits = (h_t * W_all).sum(dim=1) + b_all
