@@ -6,4 +6,5 @@ data/train/
 data/val/
 data/episodes/*/tokens.npy
 data/videos/
-eval_output/
+eval_output/data/episodes/*_s[+-]*_[+-]*/
+data/episodes/*_s*/
