@@ -43,21 +43,36 @@ def load_episodes(episodes_dir, context_frames):
     return episodes
 
 
-def sample_contexts(episodes, n, context_frames, rng):
-    """Sample n random starting contexts from episodes.
+def sample_contexts(episodes, n, context_frames, rng, near_death_range=(6, 12)):
+    """Sample n contexts biased toward near-death windows.
+
+    Every episode ends with death at frame T-1. Contexts are sampled so the
+    death event falls within the dream rollout horizon, giving the controller
+    a meaningful survival signal.
+
+    Args:
+        near_death_range: (min, max) frames before death to start the context.
+            E.g. (6, 12) means context starts at T-12 to T-6.
 
     Returns:
         ctx_tokens: (n, K, TPF) int64
         ctx_actions: (n, K) int64
     """
     K = context_frames
+    lo, hi = near_death_range
     all_ctx_tokens = []
     all_ctx_actions = []
     for _ in range(n):
         ep_idx = rng.integers(len(episodes))
         tokens, actions = episodes[ep_idx]
         T = len(tokens)
-        start = rng.integers(0, T - K)
+        # Start context so death is reachable: T - hi to T - lo frames before end
+        earliest = max(0, T - hi - K)
+        latest = max(0, T - lo - K)
+        if latest <= earliest:
+            start = earliest
+        else:
+            start = rng.integers(earliest, latest + 1)
         all_ctx_tokens.append(tokens[start:start + K])
         all_ctx_actions.append(actions[start:start + K])
     return np.array(all_ctx_tokens), np.array(all_ctx_actions)
