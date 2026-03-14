@@ -22,7 +22,7 @@ def main():
     print(f"Device: {device}")
 
     model = WorldModel(
-        vocab_size=1000, embed_dim=128, n_heads=4, n_layers=6,
+        vocab_size=1000, embed_dim=256, n_heads=8, n_layers=8,
         context_frames=4, tokens_per_frame=64,
     ).to(device)
     state = torch.load("checkpoints/transformer_best.pt",
@@ -84,8 +84,8 @@ def main():
 
             inp = torch.cat([ctx_s, target_s], dim=1)
 
-            li, _ = model(inp, actions_idle)
-            lj, _ = model(inp, actions_jump)
+            li, _, _ = model(inp, actions_idle)
+            lj, _, _ = model(inp, actions_jump)
 
             preds_i = li[0, :64].argmax(dim=-1)
             preds_j = lj[0, :64].argmax(dim=-1)
