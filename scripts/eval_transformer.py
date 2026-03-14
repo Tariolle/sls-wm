@@ -57,11 +57,16 @@ def main():
     parser.add_argument("--context-frames", type=int, default=4)
     parser.add_argument("--vocab-size", type=int, default=1000)
     parser.add_argument("--tokens-per-frame", type=int, default=64)
-    parser.add_argument("--embed-dim", type=int, default=128)
-    parser.add_argument("--n-heads", type=int, default=4)
-    parser.add_argument("--n-layers", type=int, default=6)
+    parser.add_argument("--embed-dim", type=int, default=256)
+    parser.add_argument("--n-heads", type=int, default=8)
+    parser.add_argument("--n-layers", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--quick", action="store_true",
+                        help="Skip single-step accuracy, only do rollout visualization")
+    parser.add_argument("--val-ratio", type=float, default=0.1)
+    parser.add_argument("--all-episodes", action="store_true",
+                        help="Use all episodes (default: val only)")
     # Sampling
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="Sampling temperature for rollouts. 0 = greedy (default)")
@@ -109,19 +114,34 @@ def main():
     episodes_dir = Path(args.episodes_dir)
     K = args.context_frames
     min_frames = K + args.rollout_steps
+
+    import re
+    shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
+
+    all_eps = sorted(ep for ep in episodes_dir.glob("*")
+                     if (ep / "tokens.npy").exists() and (ep / "actions.npy").exists())
+
+    # Replicate train/val split from train_transformer.py (same seed + val_ratio)
+    base_episodes = sorted(set(shift_re.sub("", ep.name) for ep in all_eps))
+    split_rng = np.random.default_rng(args.seed)
+    indices = split_rng.permutation(len(base_episodes))
+    val_count = max(1, int(len(base_episodes) * args.val_ratio))
+    val_names = {base_episodes[i] for i in indices[:val_count]}
+
     candidates = []
-    for ep in sorted(episodes_dir.glob("*")):
-        tp = ep / "tokens.npy"
-        ap = ep / "actions.npy"
-        if not tp.exists() or not ap.exists():
+    for ep in all_eps:
+        tokens = np.load(ep / "tokens.npy")
+        if len(tokens) < min_frames:
             continue
-        tokens = np.load(tp)
-        if len(tokens) >= min_frames:
+        base_name = shift_re.sub("", ep.name)
+        if args.all_episodes or base_name in val_names:
             candidates.append(ep)
 
     if not candidates:
-        print(f"No episodes with >= {min_frames} frames found.")
+        print(f"No {'val ' if not args.all_episodes else ''}episodes with >= {min_frames} frames found.")
         return
+
+    print(f"{'Val' if not args.all_episodes else 'All'} episodes with >= {min_frames} frames: {len(candidates)}")
 
     rng = np.random.default_rng(args.seed)
     selected = rng.choice(candidates, size=min(args.num_samples, len(candidates)),
@@ -130,50 +150,53 @@ def main():
     print(f"Evaluating {len(selected)} episodes, {args.rollout_steps} rollout steps each")
 
     # --- Single-step accuracy ---
-    total_correct, total_tokens = 0, 0
-    batch_size = 256
-    with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=device.type == "cuda"):
-        for ep_idx, ep in enumerate(candidates):
-            print(f"  Single-step: episode {ep_idx + 1}/{len(candidates)} ({ep.name})",
-                  end="\r")
-            tokens = np.load(ep / "tokens.npy").astype(np.int64)
-            actions = np.load(ep / "actions.npy").astype(np.int64)
-            T = len(tokens)
-            if T < K + 1:
-                continue
+    if not args.quick:
+        total_correct, total_tokens = 0, 0
+        batch_size = 256
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=device.type == "cuda"):
+            for ep_idx, ep in enumerate(candidates):
+                print(f"  Single-step: episode {ep_idx + 1}/{len(candidates)} ({ep.name})",
+                      end="\r")
+                tokens = np.load(ep / "tokens.npy").astype(np.int64)
+                actions = np.load(ep / "actions.npy").astype(np.int64)
+                T = len(tokens)
+                if T < K + 1:
+                    continue
 
-            is_clear = "clear" in ep.name
+                is_clear = "clear" in ep.name
 
-            # Build windows with status tokens
-            _m = model._orig_mod if hasattr(model, "_orig_mod") else model
-            all_frames = []
-            all_actions = []
-            for i in range(T - K):
-                window = tokens[i:i + K + 1]  # (K+1, TPF)
-                # Append status column
-                status = np.full((K + 1, 1), _m.ALIVE_TOKEN, dtype=np.int64)
-                is_death = (not is_clear) and (i + K == T - 1)
-                if is_death:
-                    status[K] = _m.DEATH_TOKEN
-                frame_with_status = np.concatenate([window, status], axis=1)
-                all_frames.append(frame_with_status)
-                all_actions.append(actions[i:i + K])
+                # Build windows with status tokens
+                _m = model._orig_mod if hasattr(model, "_orig_mod") else model
+                all_frames = []
+                all_actions = []
+                for i in range(T - K):
+                    window = tokens[i:i + K + 1]  # (K+1, TPF)
+                    # Append status column
+                    status = np.full((K + 1, 1), _m.ALIVE_TOKEN, dtype=np.int64)
+                    is_death = (not is_clear) and (i + K == T - 1)
+                    if is_death:
+                        status[K] = _m.DEATH_TOKEN
+                    frame_with_status = np.concatenate([window, status], axis=1)
+                    all_frames.append(frame_with_status)
+                    all_actions.append(actions[i:i + K])
 
-            all_frames = np.array(all_frames)
-            all_actions = np.array(all_actions)
+                all_frames = np.array(all_frames)
+                all_actions = np.array(all_actions)
 
-            for b in range(0, len(all_frames), batch_size):
-                f_batch = torch.from_numpy(all_frames[b:b + batch_size]).to(device)
-                a_batch = torch.from_numpy(all_actions[b:b + batch_size]).to(device)
-                target = f_batch[:, -1, :TPF]  # visual tokens only
-                logits, _ = model(f_batch, a_batch)
-                preds = logits[:, :TPF].argmax(dim=-1)
-                total_correct += (preds == target).sum().item()
-                total_tokens += target.numel()
+                for b in range(0, len(all_frames), batch_size):
+                    f_batch = torch.from_numpy(all_frames[b:b + batch_size]).to(device)
+                    a_batch = torch.from_numpy(all_actions[b:b + batch_size]).to(device)
+                    target = f_batch[:, -1, :TPF]  # visual tokens only
+                    logits, _, _ = model(f_batch, a_batch)
+                    preds = logits[:, :TPF].argmax(dim=-1)
+                    total_correct += (preds == target).sum().item()
+                    total_tokens += target.numel()
 
-    print()
-    print(f"Single-step accuracy: {total_correct / total_tokens:.4f} "
-          f"({total_correct}/{total_tokens})")
+        print()
+        print(f"Single-step accuracy: {total_correct / total_tokens:.4f} "
+              f"({total_correct}/{total_tokens})")
+    else:
+        print("Skipping single-step accuracy (--quick mode)")
 
     # --- Multi-step rollout ---
     for ep in selected:
@@ -193,6 +216,8 @@ def main():
 
         predicted_frames = []
         actual_frames = []
+        death_probs = []
+        fed_actions = []
 
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=device.type == "cuda"):
             for step in range(args.rollout_steps):
@@ -220,6 +245,12 @@ def main():
                 actual_img = decode_tokens_to_image(tokenizer, tokens[t], grid_size, device)
                 predicted_frames.append(pred_img)
                 actual_frames.append(actual_img)
+                death_probs.append(dp)
+                fed_actions.append(int(actions[t - 1]))  # action that led to this frame
+
+                if dp > 0.5:
+                    print(f"  Death predicted at step {step+1} (p={dp:.3f}), stopping rollout.")
+                    break
 
                 # Shift context: drop oldest, add predicted with ALIVE status
                 new_frame = np.concatenate([
@@ -251,7 +282,10 @@ def main():
                 axes[0, i].set_ylabel("Actual", fontsize=10)
                 axes[1, i].set_ylabel("Predicted", fontsize=10)
                 axes[2, i].set_ylabel("Diff", fontsize=10)
-            axes[0, i].set_title(f"t+{i + 1}", fontsize=8)
+            dp_color = "red" if death_probs[i] > 0.5 else "black"
+            act_label = "J" if fed_actions[i] == 1 else "_"
+            axes[0, i].set_title(f"t+{i+1} [{act_label}]\nd={death_probs[i]:.3f}",
+                                 fontsize=7, color=dp_color)
 
         plt.tight_layout()
         plt.show()
