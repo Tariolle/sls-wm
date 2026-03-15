@@ -289,18 +289,23 @@ def main():
     ctrl_template = Controller(hidden_dim, mlp_hidden=args.mlp_hidden)
     n_params = ctrl_template.n_params
     x0 = np.zeros(n_params)
-    es = cma.CMAEvolutionStrategy(x0, args.sigma0, {
+    cma_opts = {
         "popsize": args.popsize,
         "seed": args.seed,
         "maxiter": args.max_generations,
-        "verbose": -1,  # we do our own logging
+        "verbose": -1,
         "tolx": 1e-12,
         "tolfun": 1e-12,
         "tolstagnation": int(1e9),
         "tolflatfitness": int(1e9),
         "tolfunhist": 1e-12,
         "tolconditioncov": 1e30,
-    })
+    }
+    # Diagonal covariance for high-dimensional problems (> 1000 params)
+    if n_params > 1000:
+        cma_opts["CMA_diagonal"] = True
+        print(f"Using diagonal CMA-ES (n_params={n_params} > 1000)")
+    es = cma.CMAEvolutionStrategy(x0, args.sigma0, cma_opts)
 
     # CSV log
     ckpt_dir = Path(args.checkpoint_dir)
