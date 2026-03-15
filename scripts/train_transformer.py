@@ -414,9 +414,15 @@ def main():
     val_frames, val_actions = [], []
 
     n_deaths = 0
+    n_skipped = 0
     for ep in all_episodes:
-        tokens = np.load(ep / "tokens.npy")  # (T, TPF)
-        actions = np.load(ep / "actions.npy")  # (T,)
+        try:
+            tokens = np.load(ep / "tokens.npy")  # (T, TPF)
+            actions = np.load(ep / "actions.npy")  # (T,)
+        except (EOFError, ValueError):
+            n_skipped += 1
+            print(f"  Skipping corrupt episode: {ep.name}")
+            continue
         T = len(tokens)
         if T < K + 1:
             continue
@@ -447,6 +453,9 @@ def main():
             if not is_val:
                 train_weights.append(
                     float(args.death_oversample) if is_death_frame else 1.0)
+
+    if n_skipped:
+        print(f"Skipped {n_skipped} corrupt episodes")
 
     # Create model first to get token indices
     model = WorldModel(
