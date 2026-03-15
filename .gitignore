@@ -9,6 +9,7 @@ data/expert_episodes/*/tokens.npy
 data/videos/
 eval_output/data/death_episodes/*_s[+-]*_[+-]*/
 data/death_episodes/*_s*/
+data/expert_episodes/*_s*/
 
 # LaTeX build artifacts
 *.aux
