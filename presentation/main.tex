@@ -115,7 +115,8 @@
   \begin{itemize}
     \item Live gameplay at \textbf{30 FPS}, death detection via process memory reading
     \item Frames + actions recorded simultaneously, saved as \texttt{.npy} per episode
-    \item $\sim$3,600 episodes, $\sim$180K frames $\approx$ \textbf{1h40 of gameplay}
+    \item \textbf{Death episodes}: $\sim$3,600 episodes, $\sim$180K frames (intentional deaths at obstacles)
+    \item \textbf{Expert episodes}: $\sim$36 clean runs, $\sim$33K frames (no deaths, for BC + rebalancing world model)
   \end{itemize}
 \end{frame}
 
@@ -489,17 +490,20 @@
 \begin{frame}{Transformer: Training Results}
   \begin{columns}[T]
     \column{0.5\textwidth}
-    \textbf{Best model} (200 epochs, LR $10^{-3} \to 10^{-4}$):
+    \textbf{Previous best} (200 epochs, LR $10^{-3}$):
     \begin{itemize}
-      \item Val accuracy: \textbf{32.85\%}
-      \item Death accuracy: 97.9\%
+      \item Val accuracy: \textbf{33.66\%}
+      \item Death F1: $\sim$0.97
       \item Overfitting gap: $\sim$3.5pp
     \end{itemize}
 
     \vspace{0.5em}
-    \textbf{Key insight}: shift augmentation eliminated overfitting, enabling $10\times$ higher LR
-
-    % TODO: update with structured label smoothing results
+    \textbf{Retraining} (400 epochs, LR $2 \times 10^{-3}$):
+    \begin{itemize}
+      \item + expert episodes (33K frames)
+      \item Stratified train/val split
+      \item Auto-resume across SLURM jobs
+    \end{itemize}
 
     \column{0.5\textwidth}
     % TODO: add training curves plot
@@ -516,30 +520,56 @@
 % ==========================================================
 
 \begin{frame}{Controller: Architecture}
-  \[
-    \text{action} = \begin{cases} \text{jump} & \text{if } \sigma(\mathbf{W} \cdot \mathbf{h}_t + b) > 0.5 \\ \text{idle} & \text{otherwise} \end{cases}
-  \]
-
-  \textbf{257 parameters} ($\mathbf{W} \in \mathbb{R}^{256}, b \in \mathbb{R}$). Trained via \textbf{CMA-ES}.
+  \textbf{CNNPolicy} (40K params): CNN actor-critic on 8$\times$8 token grid
 
   \vspace{0.5em}
-  \textbf{Why CMA-ES?}
-  \begin{itemize}
-    \item 257 params: too few for SGD to be efficient
-    \item No differentiable reward (binary survival)
-    \item Derivative-free, handles non-smooth landscapes
-  \end{itemize}
+  \begin{center}
+  \resizebox{0.9\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw=ccolor, fill=ccolor!10, rounded corners, minimum height=0.9cm, align=center, font=\scriptsize, line width=0.6pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    lbl/.style={font=\tiny, align=center},
+  ]
+    \node[block] (emb) {Embed(1000, 16)\\{\tiny $\to$ (16, 8, 8)}};
+    \node[block, right=0.6cm of emb] (c1) {Conv 32\\MaxPool};
+    \node[block, right=0.6cm of c1] (c2) {Conv 64\\MaxPool};
+    \node[block, right=0.6cm of c2] (flat) {Flatten\\{\tiny 256d}};
+    \node[block, fill=mcolor!10, draw=mcolor, above=0.4cm of flat] (ht) {$\mathbf{h}_t$\\{\tiny 256d}};
+    \node[block, right=1cm of flat] (cat) {Concat\\{\tiny 512d}};
+    \node[block, right=0.6cm of cat] (heads) {Actor + Critic};
+
+    \draw[arr] (emb) -- (c1);
+    \draw[arr] (c1) -- (c2);
+    \draw[arr] (c2) -- (flat);
+    \draw[arr] (flat) -- (cat);
+    \draw[arr] (ht) -| (cat);
+    \draw[arr] (cat) -- (heads);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.5em}
+  Inputs: token grid $\mathbf{z}_t \in \{0,\ldots,999\}^{64}$ + hidden state $\mathbf{h}_t \in \mathbb{R}^{256}$
 \end{frame}
 
 \begin{frame}{Controller: Training Protocol}
+  \textbf{Stage 1: Behavioral Cloning} on expert gameplay
   \begin{itemize}
-    \item Near-death context sampling: start 6--12 frames before death
-    \item Fitness $=$ frames survived in dream before death prediction
-    \item DreamerV3-style percentile normalization of fitness across episodes
+    \item Feed expert episode contexts through world model $\to$ get $\mathbf{h}_t$
+    \item Train CNNPolicy to predict expert action with cross-entropy
+    \item Initializes a policy that knows \emph{when} to jump
   \end{itemize}
 
-  % TODO: controller results
-  \textit{[Controller results: TODO]}
+  \vspace{0.5em}
+  \textbf{Stage 2: PPO in Dream} to generalize
+  \begin{itemize}
+    \item Near-obstacle context sampling (within 25 frames of death)
+    \item Reward: $+1$ per step survived, rollout stops at death prediction
+    \item 512 episodes/iteration, 4 PPO epochs, GAE ($\gamma$=0.995, $\lambda$=0.95)
+  \end{itemize}
+
+  \vspace{0.5em}
+  \textbf{Test:} zero-shot deployment on \emph{unseen} levels
 \end{frame}
 
 % ==========================================================
@@ -609,7 +639,8 @@
     \item \textbf{$\beta$-VAE}: fundamentally blurry. Wide range of hyperparameter search before switching to VQ/FSQ
     \item \textbf{LR $10^{-3}$ without augmentation}: 13.5pp train/val gap at epoch 29, model memorizing
     \item \textbf{FSQ neighbor substitution}: no measurable accuracy impact (same curves), but theoretically sound and free to keep
-    \item \textbf{First CMA-ES run}: $\sigma$ diverged to 19. Most sampled contexts were safe, zero fitness signal
+    \item \textbf{Pure RL controller}: CMA-ES, REINFORCE, PPO all flatlined at $\sim$12 steps. World model too death-biased near obstacles, no learnable signal
+    \item \textbf{Death-only training data}: model predicted death too aggressively, some obstacles unbeatable in dream. Fixed by adding expert episodes
     \item \textbf{torch.compile on full model}: 23+ min compilation. Solved by compiling backbone only
   \end{itemize}
 \end{frame}
@@ -623,7 +654,7 @@
     \item \textbf{Accuracy ceiling at $\sim$33\%}: model plateaus regardless of regularization. May need more diverse gameplay data or architectural changes
     \item \textbf{Dream/reality gap}: controller trained in imagination may fail on real game if predictions diverge
     \item \textbf{No horizontal flip}: player always on left, camera always right. Cannot mirror
-    \item \textbf{Death prediction timing}: low probability during safe sections. Controller training requires near-death context sampling
+    \item \textbf{Death prediction bias}: world model trained on mostly-death data predicts death too aggressively. Mitigated by adding expert episodes
     \item \textbf{Token-level augmentation}: can't crop/resize once tokenized (tokens are patch-specific)
     % TODO: update with actual failure modes from deployment
   \end{itemize}
@@ -642,6 +673,7 @@
     \item Chang, H. et al. (2022). \textit{MaskGIT: Masked Generative Image Transformer}. arXiv:2202.04200
     \item Burchert, J. et al. (2025). \textit{TWISTER: Learning Transformer-based World Models with AC-CPC}. arXiv:2503.04416
     \item LeCun, Y. (2022). \textit{A Path Towards Autonomous Machine Intelligence} (JEPA). OpenReview
+    \item Alonso, E. et al. (2024). \textit{Diffusion for World Modeling} (DIAMOND). arXiv:2405.12399
     \item Szegedy, C. et al. (2016). \textit{Rethinking the Inception Architecture for Computer Vision}. (Label smoothing)
     \item Lin, T.-Y. et al. (2017). \textit{Focal Loss for Dense Object Detection}. ICCV
   \end{itemize}
