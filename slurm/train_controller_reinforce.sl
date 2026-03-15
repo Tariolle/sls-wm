@@ -18,15 +18,12 @@
 module purge
 module load aidl/pytorch/2.6.0-cuda12.6
 
-echo "=== Step 1: Tokenize episodes ==="
-python -u scripts/tokenize_episodes.py \
-    --model fsq \
-    --checkpoint checkpoints/fsq_best.pt \
-    --episodes-dir data/episodes \
-    --batch-size 512 \
-    --levels 8 5 5 5
+# Tokenization skipped — episodes already tokenized from prior runs.
+# To re-tokenize, run: python -u scripts/tokenize_episodes.py --model fsq \
+#   --checkpoint checkpoints/fsq_best.pt --episodes-dir data/episodes \
+#   --batch-size 512 --levels 8 5 5 5
 
-echo "=== Step 2: Train Controller (Actor-Critic) ==="
+echo "=== Train Controller (Actor-Critic) ==="
 python -u scripts/train_controller_reinforce.py \
     --transformer-checkpoint checkpoints/transformer_best.pt \
     --episodes-dir data/episodes \
