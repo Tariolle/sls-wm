@@ -141,7 +141,8 @@ def dream_rollout_batched(model, ctx_tokens_np, ctx_actions_np, W, b,
 
 
 def evaluate_population(model, episodes, candidates, n_episodes, context_frames,
-                        max_steps, death_threshold, device, rng, hidden_dim):
+                        max_steps, death_threshold, device, rng, hidden_dim,
+                        mlp_hidden=0):
     """Evaluate all CMA-ES candidates in batched dream rollouts.
 
     Batches ALL candidates × episodes into a single mega-batch per dream step.
@@ -172,14 +173,12 @@ def evaluate_population(model, episodes, candidates, n_episodes, context_frames,
     alive = torch.ones(B, dtype=torch.bool, device=device)
     survival = torch.zeros(B, dtype=torch.float32, device=device)
 
-    # Precompute all controller weights on device: (popsize, hidden_dim)
-    W_all = torch.zeros(B, hidden_dim, device=device)
-    b_all = torch.zeros(B, device=device)
-    for i, cand in enumerate(candidates):
-        start = i * n_episodes
-        end = start + n_episodes
-        W_all[start:end] = torch.from_numpy(cand[:hidden_dim].copy()).float().to(device)
-        b_all[start:end] = float(cand[hidden_dim])
+    # Build controller objects for each candidate
+    controllers = []
+    for cand in candidates:
+        ctrl = Controller(hidden_dim, mlp_hidden=mlp_hidden)
+        ctrl.set_params(cand)
+        controllers.append(ctrl)
 
     use_amp = device.type == "cuda"
 
@@ -201,9 +200,11 @@ def evaluate_population(model, episodes, candidates, n_episodes, context_frames,
         if step >= warmup_steps:
             survival += alive.float()
 
-        # Controller action (batched for all candidates)
-        logits = (h_t * W_all).sum(dim=1) + b_all
-        actions_new = (logits.sigmoid() > 0.5).long()
+        # Controller action (per candidate, batched across episodes)
+        actions_new = torch.zeros(B, dtype=torch.long, device=device)
+        for i, ctrl in enumerate(controllers):
+            s, e = i * n_episodes, (i + 1) * n_episodes
+            actions_new[s:e] = ctrl.act(h_t[s:e])
 
         # Shift context
         new_status = torch.full((B, 1), m.ALIVE_TOKEN, dtype=torch.long, device=device)
@@ -231,6 +232,8 @@ def main():
     parser.add_argument("--n-episodes", type=int, default=16)
     parser.add_argument("--max-dream-steps", type=int, default=20)
     parser.add_argument("--death-threshold", type=float, default=0.5)
+    parser.add_argument("--mlp-hidden", type=int, default=0,
+                        help="MLP hidden size (0 = linear controller)")
     parser.add_argument("--context-frames", type=int, default=4)
     # Model architecture (must match checkpoint)
     parser.add_argument("--vocab-size", type=int, default=1000)
@@ -283,7 +286,8 @@ def main():
 
     # Setup CMA-ES
     hidden_dim = args.embed_dim
-    n_params = hidden_dim + 1  # W + b
+    ctrl_template = Controller(hidden_dim, mlp_hidden=args.mlp_hidden)
+    n_params = ctrl_template.n_params
     x0 = np.zeros(n_params)
     es = cma.CMAEvolutionStrategy(x0, args.sigma0, {
         "popsize": args.popsize,
@@ -315,6 +319,8 @@ def main():
     perc_ema_high = None
     perc_decay = 0.99
 
+    ctrl_type = f"MLP {hidden_dim}→{args.mlp_hidden}→1" if args.mlp_hidden > 0 else "Linear"
+    print(f"Controller: {ctrl_type} ({n_params} params)")
     print(f"CMA-ES: popsize={args.popsize}, sigma0={args.sigma0}, "
           f"n_params={n_params}, n_episodes={args.n_episodes}")
     print(f"Dream rollout: max_steps={args.max_dream_steps}, "
@@ -337,7 +343,8 @@ def main():
                 context_frames=args.context_frames,
                 max_steps=args.max_dream_steps,
                 death_threshold=args.death_threshold,
-                device=device, rng=rng, hidden_dim=hidden_dim)
+                device=device, rng=rng, hidden_dim=hidden_dim,
+                mlp_hidden=args.mlp_hidden)
 
         # Percentile normalization: stabilize CMA-ES across varying episode difficulty
         if args.percentile_norm:
@@ -369,7 +376,7 @@ def main():
             best_fitness_ever = best_surv
             best_idx = np.argmax(survivals)
             best_params = candidates[best_idx].copy()
-            ctrl = Controller(hidden_dim)
+            ctrl = Controller(hidden_dim, mlp_hidden=args.mlp_hidden)
             ctrl.set_params(best_params)
             ctrl.save(ckpt_dir / "controller_best.npy")
 

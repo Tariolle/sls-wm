@@ -36,7 +36,8 @@ python -u scripts/train_controller.py \
     --transformer-checkpoint checkpoints/transformer_best.pt \
     --episodes-dir data/episodes \
     --max-generations 500 \
-    --popsize 32 \
+    --mlp-hidden 64 \
+    --popsize 64 \
     --sigma0 0.5 \
     --n-episodes 64 \
     --max-dream-steps 20 \
