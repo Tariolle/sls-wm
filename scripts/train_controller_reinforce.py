@@ -274,14 +274,14 @@ def main():
                         default="checkpoints/transformer_best.pt")
     parser.add_argument("--episodes-dir", default="data/episodes")
     # Actor-critic
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--gamma", type=float, default=0.995)
     parser.add_argument("--lam", type=float, default=0.95,
                         help="GAE lambda")
-    parser.add_argument("--entropy-coeff", type=float, default=0.1)
+    parser.add_argument("--entropy-coeff", type=float, default=0.01)
     parser.add_argument("--critic-coeff", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    parser.add_argument("--n-iterations", type=int, default=500)
+    parser.add_argument("--n-iterations", type=int, default=2000)
     # Rollout
     parser.add_argument("--n-episodes", type=int, default=64)
     parser.add_argument("--max-dream-steps", type=int, default=30)
@@ -361,15 +361,11 @@ def main():
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pre-sample fixed contexts for deterministic training and eval
-    # If controller can't overfit these, the dream signal doesn't exist
-    print(f"\nPre-sampling fixed contexts...")
-    fixed_train_tokens, fixed_train_actions = sample_contexts_uniform(
-        episodes, args.n_episodes, args.context_frames, rng)
+    # Fixed eval contexts for consistent tracking across iterations
+    print(f"\nPre-sampling fixed eval contexts...")
     fixed_eval_tokens, fixed_eval_actions = sample_contexts_uniform(
         episodes, args.n_episodes, args.context_frames, rng)
-    print(f"  Train: {args.n_episodes} fixed contexts")
-    print(f"  Eval:  {args.n_episodes} fixed contexts")
+    print(f"  Eval: {args.n_episodes} fixed contexts")
 
     log_path = ckpt_dir / "controller_reinforce_log.csv"
     log_file = open(log_path, "w", newline="")
@@ -386,14 +382,15 @@ def main():
           f"critic={args.critic_coeff}")
     print(f"Dream: n_episodes={args.n_episodes}, "
           f"max_steps={args.max_dream_steps}")
-    print(f"Sampling: FIXED contexts (overfit diagnostic)")
+    print(f"Sampling: random train, fixed eval")
     print(f"Normalization: percentile (5th/95th EMA)\n")
 
     for iteration in range(1, args.n_iterations + 1):
         t0 = time.time()
 
-        # Use fixed training contexts every iteration
-        ctx_tokens, ctx_actions = fixed_train_tokens, fixed_train_actions
+        # Random training contexts each iteration
+        ctx_tokens, ctx_actions = sample_contexts_uniform(
+            episodes, args.n_episodes, args.context_frames, rng)
 
         controller.train()
         log_probs, rewards, entropies, values, survival = dream_rollout(

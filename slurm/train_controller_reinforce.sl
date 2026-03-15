@@ -22,12 +22,12 @@ echo "=== Train Controller (CNN Actor-Critic) ==="
 python -u scripts/train_controller_reinforce.py \
     --transformer-checkpoint checkpoints/transformer_best.pt \
     --episodes-dir data/episodes \
-    --n-iterations 500 \
+    --n-iterations 2000 \
     --n-episodes 64 \
-    --lr 3e-4 \
-    --gamma 0.99 \
+    --lr 1e-4 \
+    --gamma 0.995 \
     --lam 0.95 \
-    --entropy-coeff 0.1 \
+    --entropy-coeff 0.01 \
     --critic-coeff 0.5 \
     --max-dream-steps 30 \
     --death-threshold 0.5 \
