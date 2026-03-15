@@ -1,7 +1,8 @@
 """Controllers for World Model agent.
 
 CMA-ES Controller: numpy-based, for evolutionary optimization.
-PolicyController: nn.Module, for Reinforce policy gradient training.
+PolicyController: nn.Module MLP, for Reinforce policy gradient training.
+TransformerPolicy: ViT encoder (DART-style), sees individual tokens with positions.
 """
 
 import numpy as np
@@ -111,3 +112,95 @@ class PolicyController(nn.Module):
     def act_deterministic(self, h_t):
         """Greedy action for evaluation."""
         return (self.forward(h_t) > 0.5).long()
+
+
+class TransformerPolicy(nn.Module):
+    """Transformer encoder policy (DART-style).
+
+    Processes individual observation tokens with learnable positional encoding,
+    enabling spatial attention for timing-critical decisions. h_t from the
+    world model is injected as a context token.
+
+    Input sequence: [CLS, obs_1, ..., obs_N, h_t_proj]
+    Output: CLS representation -> jump probability
+
+    Reference: DART (Agarwal et al., ICML 2024)
+    """
+
+    def __init__(self, wm_embed_dim=256, n_tokens=64, embed_dim=128,
+                 n_heads=4, n_layers=3, dropout=0.1):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.n_tokens = n_tokens
+        seq_len = n_tokens + 2  # CLS + tokens + h_t
+
+        # Project WM token embeddings to policy dim
+        self.token_proj = nn.Linear(wm_embed_dim, embed_dim)
+
+        # Project h_t to policy dim
+        self.h_proj = nn.Linear(wm_embed_dim, embed_dim)
+
+        # CLS token
+        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
+
+        # Learnable positional encoding
+        self.pos_embed = nn.Parameter(
+            torch.randn(1, seq_len, embed_dim) * 0.02)
+
+        # Transformer encoder (pre-norm for stability)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=n_heads,
+            dim_feedforward=embed_dim * 4, dropout=dropout,
+            activation='gelu', batch_first=True, norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=n_layers)
+
+        self.ln_f = nn.LayerNorm(embed_dim)
+
+        # Actor head (from CLS)
+        self.actor = nn.Linear(embed_dim, 1)
+        nn.init.uniform_(self.actor.weight, -0.01, 0.01)
+        nn.init.zeros_(self.actor.bias)
+
+    def _logits(self, token_embeds, h_t):
+        """Raw logits before sigmoid.
+
+        Args:
+            token_embeds: (B, N, wm_embed_dim) from world model's token_embed.
+            h_t: (B, wm_embed_dim) hidden state from world model.
+        """
+        B = token_embeds.shape[0]
+
+        tokens = self.token_proj(token_embeds)        # (B, N, D)
+        h = self.h_proj(h_t).unsqueeze(1)             # (B, 1, D)
+        cls = self.cls_token.expand(B, -1, -1)        # (B, 1, D)
+
+        x = torch.cat([cls, tokens, h], dim=1)        # (B, N+2, D)
+        x = x + self.pos_embed
+
+        x = self.encoder(x)
+        x = self.ln_f(x)
+
+        return self.actor(x[:, 0]).squeeze(-1)
+
+    def forward(self, token_embeds, h_t):
+        """Jump probability: (B,)."""
+        return self._logits(token_embeds, h_t).sigmoid()
+
+    def act(self, token_embeds, h_t):
+        """Sample action from Bernoulli policy.
+
+        Returns:
+            action: (B,) long {0=idle, 1=jump}
+            log_prob: (B,) log probability of sampled action
+            entropy: (B,) policy entropy
+        """
+        prob = self.forward(token_embeds, h_t)
+        dist = torch.distributions.Bernoulli(probs=prob)
+        action = dist.sample()
+        return action.long(), dist.log_prob(action), dist.entropy()
+
+    def act_deterministic(self, token_embeds, h_t):
+        """Greedy action for evaluation."""
+        return (self.forward(token_embeds, h_t) > 0.5).long()

@@ -5,8 +5,9 @@ Combined loss: alpha * BC_loss + (1-alpha) * RL_loss
 - RL loss: Reinforce with dense reward in dream rollouts (generalization)
 - alpha decays with cosine schedule from bc-weight-start to bc-weight-end
 
-BC data is pre-extracted once at startup by running the frozen Transformer
-on real episodes (trimming the last N death-approach frames).
+Uses a DART-style Transformer encoder policy that sees individual tokens
+with learnable positional encoding, enabling spatial attention for
+timing-critical decisions.
 
 Usage:
     python scripts/train_controller_reinforce.py
@@ -26,7 +27,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.world_model import WorldModel
-from deepdash.controller import PolicyController
+from deepdash.controller import TransformerPolicy
 
 # Reuse infrastructure from CMA-ES script
 from scripts.train_controller import load_episodes, sample_contexts
@@ -69,14 +70,14 @@ def extract_hidden_batch(model, frame_tokens, actions, device, use_amp=False):
 
 def extract_bc_data(model, episodes, context_frames, trim_tail, device,
                     batch_size=256):
-    """Pre-extract (h_t, z_t, action) tuples from real episodes for BC.
+    """Pre-extract (h_t, token_ids, action) tuples from real episodes for BC.
 
-    For each episode, trims the last `trim_tail` frames (death approach),
-    then slides a window of `context_frames` across the rest.
+    Stores raw token IDs (not embeddings) to save memory. Embeddings are
+    looked up on-the-fly during training.
 
     Returns:
         h_data: (N, embed_dim) float CPU tensor
-        z_data: (N, embed_dim) float CPU tensor
+        token_data: (N, tokens_per_frame) long CPU tensor
         labels: (N,) long CPU tensor (0=idle, 1=jump)
     """
     m = _unwrap(model)
@@ -85,7 +86,7 @@ def extract_bc_data(model, episodes, context_frames, trim_tail, device,
     # Collect all windows
     all_ctx = []
     all_act = []
-    all_next = []
+    all_next_tokens = []
     all_labels = []
 
     for tokens, actions in episodes:
@@ -96,27 +97,26 @@ def extract_bc_data(model, episodes, context_frames, trim_tail, device,
         for t in range(end - context_frames):
             all_ctx.append(tokens[t:t + context_frames])
             all_act.append(actions[t:t + context_frames])
-            all_next.append(tokens[t + context_frames])
+            all_next_tokens.append(tokens[t + context_frames])
             all_labels.append(actions[t + context_frames])
 
     n = len(all_labels)
     if n == 0:
-        return torch.empty(0, m.embed_dim), torch.empty(0, m.embed_dim), \
+        return torch.empty(0, m.embed_dim), \
+               torch.empty(0, m.tokens_per_frame, dtype=torch.long), \
                torch.empty(0, dtype=torch.long)
 
     ctx_np = np.array(all_ctx)
     act_np = np.array(all_act)
-    next_np = np.array(all_next)
+    next_tokens_np = np.array(all_next_tokens)
     labels_np = np.array(all_labels)
 
-    # Process in batches
+    # Process in batches to get h_t
     all_h = []
-    all_z = []
 
     for i in range(0, n, batch_size):
         b_ctx = ctx_np[i:i + batch_size]
         b_act = act_np[i:i + batch_size]
-        b_next = next_np[i:i + batch_size]
         B = len(b_ctx)
 
         # Add ALIVE status
@@ -125,23 +125,20 @@ def extract_bc_data(model, episodes, context_frames, trim_tail, device,
 
         ctx_t = torch.from_numpy(ctx_with_status).to(device)
         act_t = torch.from_numpy(b_act).to(device)
-        next_t = torch.from_numpy(b_next.astype(np.int64)).to(device)
 
         with torch.no_grad():
             h_t = extract_hidden_batch(model, ctx_t, act_t, device, use_amp)
-            z_t = m.token_embed(next_t).mean(dim=1).float()
 
         all_h.append(h_t.cpu())
-        all_z.append(z_t.cpu())
 
         if (i // batch_size + 1) % 50 == 0:
             print(f"  BC extraction: {i + B}/{n}...")
 
     h_data = torch.cat(all_h)
-    z_data = torch.cat(all_z)
+    token_data = torch.from_numpy(next_tokens_np.astype(np.int64))
     labels = torch.from_numpy(labels_np).long()
 
-    return h_data, z_data, labels
+    return h_data, token_data, labels
 
 
 def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
@@ -189,14 +186,12 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
         alive &= ~died
         survival += alive.float()
 
-        # Compute z_t: mean-pool token embeddings of predicted frame
+        # Get individual token embeddings (not mean-pooled)
         with torch.no_grad():
-            z_t = m.token_embed(pred_tokens).mean(dim=1)  # (B, embed_dim)
+            tok_embeds = m.token_embed(pred_tokens).float()  # (B, 64, 256)
 
         # Controller action (WITH gradients)
-        h_t_float = h_t.float()
-        ctrl_input = torch.cat([h_t_float, z_t.float()], dim=1)
-        action, log_prob, entropy = controller.act(ctrl_input)
+        action, log_prob, entropy = controller.act(tok_embeds, h_t.float())
 
         if step >= warmup_steps:
             alive_mask = alive.float().detach()
@@ -215,20 +210,7 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
 
 def compute_reinforce_loss(log_probs, rewards, entropies, gamma=0.99,
                            entropy_coeff=0.01):
-    """Compute Reinforce loss with discounted returns and baseline.
-
-    Args:
-        log_probs: list of T tensors, each (B,)
-        rewards: list of T tensors, each (B,)
-        entropies: list of T tensors, each (B,)
-        gamma: discount factor
-        entropy_coeff: weight for entropy bonus
-
-    Returns:
-        loss: scalar (differentiable through log_probs)
-        mean_return: float for logging
-        mean_entropy: float for logging
-    """
+    """Compute Reinforce loss with discounted returns and baseline."""
     T = len(rewards)
     if T == 0:
         return torch.tensor(0.0, requires_grad=True), 0.0, 0.0
@@ -237,7 +219,6 @@ def compute_reinforce_loss(log_probs, rewards, entropies, gamma=0.99,
     log_probs_t = torch.stack(log_probs)  # (T, B)
     entropies_t = torch.stack(entropies)  # (T, B)
 
-    # Discounted returns (backwards)
     B = rewards_t.shape[1]
     returns = torch.zeros_like(rewards_t)
     G = torch.zeros(B, device=rewards_t.device)
@@ -245,19 +226,14 @@ def compute_reinforce_loss(log_probs, rewards, entropies, gamma=0.99,
         G = rewards_t[t] + gamma * G
         returns[t] = G
 
-    # Baseline: per-step mean across batch
-    baseline = returns.mean(dim=1, keepdim=True)  # (T, 1)
+    baseline = returns.mean(dim=1, keepdim=True)
     advantages = returns - baseline
 
-    # Reinforce loss: -E[log_prob * advantage]
     policy_loss = -(log_probs_t * advantages.detach()).sum(dim=0).mean()
-
-    # Entropy bonus (maximize entropy = minimize negative entropy)
     entropy_loss = -entropy_coeff * entropies_t.sum(dim=0).mean()
 
-    loss = policy_loss + entropy_loss
-
-    return loss, returns.mean().item(), entropies_t.mean().item()
+    return policy_loss + entropy_loss, returns.mean().item(), \
+        entropies_t.mean().item()
 
 
 def evaluate_deterministic(model, controller, episodes, n_episodes,
@@ -292,9 +268,8 @@ def evaluate_deterministic(model, controller, episodes, n_episodes,
         survival += alive.float()
 
         with torch.no_grad():
-            z_t = m.token_embed(pred_tokens).mean(dim=1)
-        ctrl_input = torch.cat([h_t.float(), z_t.float()], dim=1)
-        action = controller.act_deterministic(ctrl_input)
+            tok_embeds = m.token_embed(pred_tokens).float()
+        action = controller.act_deterministic(tok_embeds, h_t.float())
 
         new_status = torch.full((B, 1), m.ALIVE_TOKEN, dtype=torch.long, device=device)
         new_frame = torch.cat([pred_tokens, new_status], dim=1).unsqueeze(1)
@@ -317,21 +292,21 @@ def main():
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--n-iterations", type=int, default=500)
     # Behavior cloning
-    parser.add_argument("--bc-weight-start", type=float, default=0.8,
-                        help="Initial alpha (BC weight in combined loss)")
-    parser.add_argument("--bc-weight-end", type=float, default=0.1,
-                        help="Final alpha after cosine decay")
+    parser.add_argument("--bc-weight-start", type=float, default=0.8)
+    parser.add_argument("--bc-weight-end", type=float, default=0.1)
     parser.add_argument("--bc-batch-size", type=int, default=256)
-    parser.add_argument("--bc-trim-tail", type=int, default=15,
-                        help="Frames to trim from end of each episode (death approach)")
+    parser.add_argument("--bc-trim-tail", type=int, default=15)
     # Rollout
     parser.add_argument("--n-episodes", type=int, default=64)
     parser.add_argument("--max-dream-steps", type=int, default=20)
     parser.add_argument("--death-threshold", type=float, default=0.5)
     parser.add_argument("--context-frames", type=int, default=4)
-    # Controller
-    parser.add_argument("--mlp-hidden", type=int, default=64)
-    # Model architecture (must match checkpoint)
+    # Policy architecture (Transformer encoder)
+    parser.add_argument("--policy-embed-dim", type=int, default=128)
+    parser.add_argument("--policy-n-heads", type=int, default=4)
+    parser.add_argument("--policy-n-layers", type=int, default=3)
+    parser.add_argument("--policy-dropout", type=float, default=0.1)
+    # World model architecture (must match checkpoint)
     parser.add_argument("--vocab-size", type=int, default=1000)
     parser.add_argument("--tokens-per-frame", type=int, default=64)
     parser.add_argument("--embed-dim", type=int, default=256)
@@ -382,9 +357,9 @@ def main():
         print("No tokenized episodes found.")
         return
 
-    # Pre-extract BC data from real episodes
+    # Pre-extract BC data (stores token IDs, not embeddings)
     print(f"\nExtracting BC data (trim_tail={args.bc_trim_tail})...")
-    bc_h, bc_z, bc_labels = extract_bc_data(
+    bc_h, bc_tokens, bc_labels = extract_bc_data(
         model, episodes, args.context_frames, args.bc_trim_tail, device)
     n_bc = len(bc_labels)
     n_jump = (bc_labels == 1).sum().item()
@@ -392,21 +367,26 @@ def main():
     print(f"BC data: {n_bc} samples ({n_jump} jump, {n_idle} idle, "
           f"jump ratio={n_jump / max(n_bc, 1):.1%})")
 
-    # Class weight for imbalanced BC data
     if n_jump > 0 and n_idle > 0:
         pos_weight = torch.tensor(n_idle / n_jump, device=device)
     else:
         pos_weight = torch.tensor(1.0, device=device)
     print(f"BC pos_weight: {pos_weight.item():.2f}")
 
-    # Create controller
-    # Input: h_t (embed_dim) + z_t (embed_dim, mean-pooled token embeddings)
-    controller = PolicyController(
-        hidden_dim=args.embed_dim, mlp_hidden=args.mlp_hidden,
-        extra_features=args.embed_dim).to(device)
+    # Create DART-style Transformer policy
+    m = _unwrap(model)
+    controller = TransformerPolicy(
+        wm_embed_dim=args.embed_dim,
+        n_tokens=args.tokens_per_frame,
+        embed_dim=args.policy_embed_dim,
+        n_heads=args.policy_n_heads,
+        n_layers=args.policy_n_layers,
+        dropout=args.policy_dropout,
+    ).to(device)
     n_params = sum(p.numel() for p in controller.parameters())
-    print(f"Controller: MLP ({args.embed_dim}+{args.embed_dim})"
-          f"→{args.mlp_hidden}→1 ({n_params} params, h_t+z_t input)")
+    print(f"Controller: TransformerPolicy {args.policy_n_layers}L/"
+          f"{args.policy_n_heads}H/{args.policy_embed_dim}d "
+          f"({n_params:,} params)")
 
     optimizer = torch.optim.Adam(controller.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -427,7 +407,7 @@ def main():
 
     print(f"\nBC+Reinforce: lr={args.lr}, gamma={args.gamma}, "
           f"entropy_coeff={args.entropy_coeff}")
-    print(f"BC: alpha={args.bc_weight_start}→{args.bc_weight_end} (cosine), "
+    print(f"BC: alpha={args.bc_weight_start}->{args.bc_weight_end} (cosine), "
           f"batch_size={args.bc_batch_size}")
     print(f"Dream: n_episodes={args.n_episodes}, "
           f"max_steps={args.max_dream_steps}")
@@ -436,7 +416,7 @@ def main():
     for iteration in range(1, args.n_iterations + 1):
         t0 = time.time()
 
-        # Cosine alpha schedule: bc_weight_start → bc_weight_end
+        # Cosine alpha schedule
         progress = (iteration - 1) / max(args.n_iterations - 1, 1)
         alpha = args.bc_weight_end + (args.bc_weight_start - args.bc_weight_end) \
             * 0.5 * (1 + math.cos(math.pi * progress))
@@ -445,11 +425,14 @@ def main():
         controller.train()
         idx = rng.integers(0, n_bc, size=args.bc_batch_size)
         bc_h_batch = bc_h[idx].to(device)
-        bc_z_batch = bc_z[idx].to(device)
+        bc_tok_batch = bc_tokens[idx].to(device)
         bc_a_batch = bc_labels[idx].to(device)
 
-        bc_input = torch.cat([bc_h_batch, bc_z_batch], dim=1)
-        bc_logits = controller.net(bc_input).squeeze(-1)  # raw logits
+        # Look up token embeddings from frozen WM
+        with torch.no_grad():
+            bc_tok_embeds = m.token_embed(bc_tok_batch).float()
+
+        bc_logits = controller._logits(bc_tok_embeds, bc_h_batch)
         bc_loss = F.binary_cross_entropy_with_logits(
             bc_logits, bc_a_batch.float(), pos_weight=pos_weight)
 
@@ -475,7 +458,6 @@ def main():
         # --- Combined loss ---
         total_loss = alpha * bc_loss + (1 - alpha) * rl_loss
 
-        # Optimize
         optimizer.zero_grad()
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(controller.parameters(),
@@ -487,7 +469,7 @@ def main():
         mean_surv = survival.mean().item()
         lr = optimizer.param_groups[0]["lr"]
 
-        # Periodic deterministic evaluation
+        # Periodic evaluation
         eval_surv = ""
         if iteration % args.eval_interval == 0:
             controller.eval()

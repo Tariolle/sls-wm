@@ -37,7 +37,10 @@ python -u scripts/train_controller_reinforce.py \
     --entropy-coeff 0.01 \
     --max-dream-steps 20 \
     --death-threshold 0.5 \
-    --mlp-hidden 64 \
+    --policy-embed-dim 128 \
+    --policy-n-heads 4 \
+    --policy-n-layers 3 \
+    --policy-dropout 0.1 \
     --bc-weight-start 0.8 \
     --bc-weight-end 0.1 \
     --bc-batch-size 256 \
