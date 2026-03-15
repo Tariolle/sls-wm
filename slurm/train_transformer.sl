@@ -45,13 +45,15 @@ python -u scripts/tokenize_episodes.py \
     --shifts -4 -2 0 2 4 \
     --shifts-v -3 0 3
 
-echo "=== Step 1b: Tokenize expert episodes ==="
+echo "=== Step 1b: Tokenize expert episodes (with shift augmentation) ==="
 python -u scripts/tokenize_episodes.py \
     --model fsq \
     --checkpoint checkpoints/fsq_best.pt \
     --episodes-dir data/expert_episodes \
     --batch-size 512 \
-    --levels 8 5 5 5
+    --levels 8 5 5 5 \
+    --shifts -4 -2 0 2 4 \
+    --shifts-v -3 0 3
 
 echo "=== Step 2: Train Transformer ($(date)) ==="
 python -u scripts/train_transformer.py \
