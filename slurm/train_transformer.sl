@@ -23,19 +23,28 @@
 module purge
 module load aidl/pytorch/2.6.0-cuda12.6
 
-echo "=== Step 1: Tokenize episodes (with shift augmentation) ==="
+echo "=== Step 1a: Tokenize death episodes (with shift augmentation) ==="
 python -u scripts/tokenize_episodes.py \
     --model fsq \
     --checkpoint checkpoints/fsq_best.pt \
-    --episodes-dir data/episodes \
+    --episodes-dir data/death_episodes \
     --batch-size 512 \
     --levels 8 5 5 5 \
     --shifts -4 -2 0 2 4 \
     --shifts-v -3 0 3
 
+echo "=== Step 1b: Tokenize expert episodes ==="
+python -u scripts/tokenize_episodes.py \
+    --model fsq \
+    --checkpoint checkpoints/fsq_best.pt \
+    --episodes-dir data/expert_episodes \
+    --batch-size 512 \
+    --levels 8 5 5 5
+
 echo "=== Step 2: Train Transformer ==="
 python -u scripts/train_transformer.py \
-    --episodes-dir data/episodes \
+    --episodes-dir data/death_episodes \
+    --expert-episodes-dir data/expert_episodes \
     --epochs 200 \
     --batch-size 512 \
     --lr 1e-3 \

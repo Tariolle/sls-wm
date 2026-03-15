@@ -326,7 +326,9 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
 
 def main():
     parser = argparse.ArgumentParser(description="Train Transformer world model")
-    parser.add_argument("--episodes-dir", default="data/episodes")
+    parser.add_argument("--episodes-dir", default="data/death_episodes")
+    parser.add_argument("--expert-episodes-dir", default="data/expert_episodes",
+                        help="Directory with expert episodes (no death on last frame)")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -376,6 +378,16 @@ def main():
     episodes_dir = Path(args.episodes_dir)
     all_episodes = sorted(ep for ep in episodes_dir.glob("*")
                           if (ep / "tokens.npy").exists())
+    death_episodes = set(ep.name for ep in all_episodes)
+
+    # Include expert episodes (no death on last frame)
+    expert_dir = Path(args.expert_episodes_dir)
+    if expert_dir.exists():
+        expert_eps = sorted(ep for ep in expert_dir.glob("*")
+                            if (ep / "tokens.npy").exists())
+        all_episodes.extend(expert_eps)
+        print(f"Expert episodes: {len(expert_eps)} episodes")
+
     # Identify base (non-shifted) episodes for splitting
     shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
     base_episodes = sorted(set(
@@ -414,9 +426,10 @@ def main():
             action_window = actions[i:i + K].astype(np.int64)
 
             # Append status token to each frame
-            # Target frame (index K in window): DEATH if last frame of death episode
+            # Target frame (index K in window): DEATH if last frame of a death episode
             status = np.full((K + 1, 1), 0, dtype=np.int64)
-            is_death_frame = (i + K == T - 1)
+            is_death_episode = ep.name in death_episodes
+            is_death_frame = is_death_episode and (i + K == T - 1)
             if is_death_frame:
                 status[K] = 1  # will be mapped to DEATH_TOKEN
             n_deaths += int(is_death_frame)
