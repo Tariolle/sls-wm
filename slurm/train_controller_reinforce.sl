@@ -10,7 +10,7 @@
 #SBATCH --time=08:00:00
 
 # Train controller via actor-critic Reinforce in dream rollouts.
-# DART-style Transformer encoder with critic for variance reduction.
+# DART-style ViT, uniform sampling, percentile normalization.
 #
 # Submit:  sbatch slurm/train_controller_reinforce.sl
 # Monitor: tail -f slurm/logs/train_controller_reinforce.out
@@ -31,13 +31,13 @@ python -u scripts/train_controller_reinforce.py \
     --transformer-checkpoint checkpoints/transformer_best.pt \
     --episodes-dir data/episodes \
     --n-iterations 500 \
-    --n-episodes 64 \
+    --n-episodes 128 \
     --lr 1e-4 \
     --gamma 0.99 \
     --lam 0.95 \
     --entropy-coeff 0.01 \
     --critic-coeff 0.5 \
-    --max-dream-steps 20 \
+    --max-dream-steps 22 \
     --death-threshold 0.5 \
     --policy-embed-dim 128 \
     --policy-n-heads 4 \

@@ -1,12 +1,13 @@
 """Train controller via actor-critic Reinforce in dream rollouts.
 
 DART-style Transformer encoder policy with actor + critic heads.
-The critic provides a learned value baseline for variance reduction,
-replacing the weak batch-mean baseline.
+Uniform context sampling (not near-death biased) with percentile
+return normalization (DreamerV3-style) so safe-context gradients
+don't drown out obstacle-encounter signal.
 
 Usage:
     python scripts/train_controller_reinforce.py
-    python scripts/train_controller_reinforce.py --n-iterations 500 --n-episodes 64
+    python scripts/train_controller_reinforce.py --n-iterations 500 --n-episodes 128
 """
 
 import argparse
@@ -22,12 +23,75 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.world_model import WorldModel
 from deepdash.controller import TransformerPolicy
 
-# Reuse infrastructure from CMA-ES script
-from scripts.train_controller import load_episodes, sample_contexts
+from scripts.train_controller import load_episodes
 
 
 def _unwrap(model):
     return model._orig_mod if hasattr(model, "_orig_mod") else model
+
+
+def sample_contexts_uniform(episodes, n, context_frames, rng):
+    """Sample n contexts uniformly from episodes (not near-death biased).
+
+    Returns:
+        ctx_tokens: (n, K, TPF) int64
+        ctx_actions: (n, K) int64
+    """
+    K = context_frames
+    all_ctx_tokens = []
+    all_ctx_actions = []
+    for _ in range(n):
+        ep_idx = rng.integers(len(episodes))
+        tokens, actions = episodes[ep_idx]
+        T = len(tokens)
+        latest = T - K
+        if latest <= 0:
+            start = 0
+        else:
+            start = rng.integers(0, latest)
+        all_ctx_tokens.append(tokens[start:start + K])
+        all_ctx_actions.append(actions[start:start + K])
+    return np.array(all_ctx_tokens), np.array(all_ctx_actions)
+
+
+class PercentileNormalizer:
+    """DreamerV3-style running percentile return normalization.
+
+    Tracks EMA of 5th and 95th percentile of returns. Normalizes
+    advantages to roughly [-1, 1] so gradient scale is consistent
+    across safe and dangerous contexts.
+    """
+
+    def __init__(self, decay=0.99, percentile_low=5, percentile_high=95):
+        self.decay = decay
+        self.pct_low = percentile_low
+        self.pct_high = percentile_high
+        self.low = 0.0
+        self.high = 0.0
+        self.initialized = False
+
+    def update_and_normalize(self, values):
+        """Update percentiles and normalize values.
+
+        Args:
+            values: (T, B) tensor
+        Returns:
+            normalized: (T, B) tensor
+        """
+        flat = values.detach().flatten().cpu().numpy()
+        p_low = float(np.percentile(flat, self.pct_low))
+        p_high = float(np.percentile(flat, self.pct_high))
+
+        if not self.initialized:
+            self.low = p_low
+            self.high = p_high
+            self.initialized = True
+        else:
+            self.low = self.decay * self.low + (1 - self.decay) * p_low
+            self.high = self.decay * self.high + (1 - self.decay) * p_high
+
+        scale = max(self.high - self.low, 1e-8)
+        return (values - self.low) / scale
 
 
 def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
@@ -63,22 +127,18 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
         if not alive.any():
             break
 
-        # Transformer forward (frozen)
         with torch.no_grad():
             with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
                 pred_tokens, death_prob, h_t = model.predict_next_frame(
                     ctx_t, ctx_a, temperature=0.0, return_hidden=True)
 
-        # Death check
         died = death_prob > death_threshold
         alive &= ~died
         survival += alive.float()
 
-        # Get individual token embeddings
         with torch.no_grad():
             tok_embeds = m.token_embed(pred_tokens).float()
 
-        # Controller action + value (WITH gradients)
         action, log_prob, entropy, value = controller.act(
             tok_embeds, h_t.float())
 
@@ -89,7 +149,6 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
             all_entropies.append(entropy * alive_mask)
             all_values.append(value * alive_mask)
 
-        # Shift context
         new_status = torch.full((B, 1), m.ALIVE_TOKEN, dtype=torch.long,
                                 device=device)
         new_frame = torch.cat([pred_tokens, new_status], dim=1).unsqueeze(1)
@@ -100,19 +159,9 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
 
 
 def compute_actor_critic_loss(log_probs, rewards, entropies, values,
-                              gamma=0.99, lam=0.95, entropy_coeff=0.01,
-                              critic_coeff=0.5):
-    """Compute actor-critic loss with GAE (Generalized Advantage Estimation).
-
-    Args:
-        log_probs: list of T tensors, each (B,)
-        rewards: list of T tensors, each (B,)
-        entropies: list of T tensors, each (B,)
-        values: list of T tensors, each (B,)
-        gamma: discount factor
-        lam: GAE lambda for bias-variance tradeoff
-        entropy_coeff: weight for entropy bonus
-        critic_coeff: weight for critic loss
+                              normalizer, gamma=0.99, lam=0.95,
+                              entropy_coeff=0.01, critic_coeff=0.5):
+    """Compute actor-critic loss with GAE and percentile normalization.
 
     Returns:
         loss: scalar
@@ -124,12 +173,12 @@ def compute_actor_critic_loss(log_probs, rewards, entropies, values,
     if T == 0:
         return torch.tensor(0.0, requires_grad=True), 0.0, 0.0, 0.0
 
-    rewards_t = torch.stack(rewards)      # (T, B)
-    log_probs_t = torch.stack(log_probs)  # (T, B)
-    entropies_t = torch.stack(entropies)  # (T, B)
-    values_t = torch.stack(values)        # (T, B)
+    rewards_t = torch.stack(rewards)
+    log_probs_t = torch.stack(log_probs)
+    entropies_t = torch.stack(entropies)
+    values_t = torch.stack(values)
 
-    # GAE: compute advantages using learned value baseline
+    # GAE
     B = rewards_t.shape[1]
     advantages = torch.zeros_like(rewards_t)
     gae = torch.zeros(B, device=rewards_t.device)
@@ -143,13 +192,15 @@ def compute_actor_critic_loss(log_probs, rewards, entropies, values,
         gae = delta + gamma * lam * gae
         advantages[t] = gae
 
-    # Returns for critic target
     returns = advantages + values_t.detach()
 
-    # Actor loss: -E[log_prob * advantage]
+    # Percentile normalization of advantages
+    advantages = normalizer.update_and_normalize(advantages)
+
+    # Actor loss
     actor_loss = -(log_probs_t * advantages.detach()).sum(dim=0).mean()
 
-    # Critic loss: MSE between values and returns
+    # Critic loss
     critic_loss = ((values_t - returns) ** 2).sum(dim=0).mean()
 
     # Entropy bonus
@@ -164,9 +215,9 @@ def compute_actor_critic_loss(log_probs, rewards, entropies, values,
 def evaluate_deterministic(model, controller, episodes, n_episodes,
                            context_frames, max_steps, death_threshold,
                            device, rng):
-    """Run deterministic evaluation (no sampling)."""
+    """Run deterministic evaluation with uniform sampling."""
     m = _unwrap(model)
-    ctx_tokens, ctx_actions = sample_contexts(
+    ctx_tokens, ctx_actions = sample_contexts_uniform(
         episodes, n_episodes, context_frames, rng)
 
     B = n_episodes
@@ -221,11 +272,11 @@ def main():
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--n-iterations", type=int, default=500)
     # Rollout
-    parser.add_argument("--n-episodes", type=int, default=64)
-    parser.add_argument("--max-dream-steps", type=int, default=20)
+    parser.add_argument("--n-episodes", type=int, default=128)
+    parser.add_argument("--max-dream-steps", type=int, default=22)
     parser.add_argument("--death-threshold", type=float, default=0.5)
     parser.add_argument("--context-frames", type=int, default=4)
-    # Policy architecture (Transformer encoder)
+    # Policy architecture
     parser.add_argument("--policy-embed-dim", type=int, default=128)
     parser.add_argument("--policy-n-heads", type=int, default=4)
     parser.add_argument("--policy-n-layers", type=int, default=3)
@@ -299,10 +350,11 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.n_iterations, eta_min=args.lr * 0.01)
 
+    normalizer = PercentileNormalizer()
+
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # CSV log
     log_path = ckpt_dir / "controller_reinforce_log.csv"
     log_file = open(log_path, "w", newline="")
     writer = csv.writer(log_file)
@@ -318,16 +370,16 @@ def main():
           f"critic={args.critic_coeff}")
     print(f"Dream: n_episodes={args.n_episodes}, "
           f"max_steps={args.max_dream_steps}")
-    print()
+    print(f"Sampling: uniform (not near-death)")
+    print(f"Normalization: percentile (5th/95th EMA)\n")
 
     for iteration in range(1, args.n_iterations + 1):
         t0 = time.time()
 
-        # Sample near-death contexts
-        ctx_tokens, ctx_actions = sample_contexts(
+        # Uniform context sampling
+        ctx_tokens, ctx_actions = sample_contexts_uniform(
             episodes, args.n_episodes, args.context_frames, rng)
 
-        # Dream rollout with gradients
         controller.train()
         log_probs, rewards, entropies, values, survival = dream_rollout(
             model, controller, ctx_tokens, ctx_actions,
@@ -340,10 +392,9 @@ def main():
             print(f"Iter {iteration}: all died during warmup, skipping")
             continue
 
-        # Actor-critic loss with GAE
         loss, mean_return, mean_entropy, mean_value = \
             compute_actor_critic_loss(
-                log_probs, rewards, entropies, values,
+                log_probs, rewards, entropies, values, normalizer,
                 gamma=args.gamma, lam=args.lam,
                 entropy_coeff=args.entropy_coeff,
                 critic_coeff=args.critic_coeff)
@@ -359,7 +410,6 @@ def main():
         mean_surv = survival.mean().item()
         lr = optimizer.param_groups[0]["lr"]
 
-        # Periodic evaluation
         eval_surv = ""
         if iteration % args.eval_interval == 0:
             controller.eval()
