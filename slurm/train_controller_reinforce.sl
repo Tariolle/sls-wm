@@ -22,7 +22,7 @@ module load aidl/pytorch/2.6.0-cuda12.6
 echo "=== Train Controller (PPO) ==="
 python -u scripts/train_controller_reinforce.py \
     --transformer-checkpoint checkpoints/transformer_best.pt \
-    --episodes-dir data/episodes \
+    --episodes-dir data/death_episodes \
     --n-iterations 2000 \
     --n-episodes 512 \
     --lr 1e-4 \

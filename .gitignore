@@ -4,10 +4,11 @@ __pycache__/
 data/frames/
 data/train/
 data/val/
-data/episodes/*/tokens.npy
+data/death_episodes/*/tokens.npy
+data/expert_episodes/*/tokens.npy
 data/videos/
-eval_output/data/episodes/*_s[+-]*_[+-]*/
-data/episodes/*_s*/
+eval_output/data/death_episodes/*_s[+-]*_[+-]*/
+data/death_episodes/*_s*/
 
 # LaTeX build artifacts
 *.aux

@@ -55,7 +55,7 @@ def _with_amp(fn):
 def main():
     parser = argparse.ArgumentParser(description="Benchmark inference latency")
     parser.add_argument("--checkpoint", default="checkpoints/transformer_best.pt")
-    parser.add_argument("--episodes-dir", default="data/episodes")
+    parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--device", default=None, help="Force device (cpu/cuda)")
     parser.add_argument("--n-runs", type=int, default=200)
     parser.add_argument("--warmup", type=int, default=20)

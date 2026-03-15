@@ -20,6 +20,6 @@ module load aidl/pytorch/2.6.0-cuda12.6
 python -u scripts/tokenize_episodes.py \
     --model fsq \
     --checkpoint checkpoints/fsq_best.pt \
-    --episodes-dir data/episodes \
+    --episodes-dir data/death_episodes \
     --batch-size 512 \
     --levels 8 5 5 5

@@ -64,7 +64,7 @@ def main():
         except Exception:
             pass
 
-    episodes = load_episodes("data/episodes", 4)
+    episodes = load_episodes("data/death_episodes", 4)
     print(f"Loaded {len(episodes)} episodes")
     rng = np.random.default_rng(42)
     n_tests = 100

@@ -14,7 +14,7 @@ Controls:
     F10 — quit (saves current episode if recording)
 
 Output:
-    data/episodes/ep_NNNN/
+    data/death_episodes/ep_NNNN/
         frames.npy     (T, 64, 64) uint8 — Sobel edge maps
         actions.npy    (T,) uint8 — 0=idle, 1=jump
         metadata.json  {fps_target, fps_actual, timestamp, num_frames}
@@ -147,7 +147,10 @@ def main():
     level_group.add_argument("--custom", action="store_true",
                              help="Auto-assign level = max existing level ID + 1 "
                                   "(for custom/community levels)")
-    parser.add_argument("--output-dir", default="data/episodes",
+    level_group.add_argument("--perfect-run", type=int, metavar="LEVEL_ID",
+                             help="Record a perfect run (no deaths) for given level. "
+                                  "Auto-deletes on death. Saved to data/expert_episodes/")
+    parser.add_argument("--output-dir", default="data/death_episodes",
                         help="Output directory for episodes")
     parser.add_argument("--respawn-delay", type=float, default=0.75,
                         help="Seconds to wait after respawn before recording "
@@ -157,8 +160,14 @@ def main():
                              "(remove win animation noise, default: 0.5)")
     args = parser.parse_args()
 
-    # Resolve level ID
-    if args.custom:
+    # Resolve level ID and output directory
+    perfect_run_mode = args.perfect_run is not None
+    if perfect_run_mode:
+        args.level = args.perfect_run
+        args.output_dir = "data/expert_episodes"
+        print(f"Perfect run mode: level {args.perfect_run} "
+              f"(recording deleted on death)")
+    elif args.custom:
         args.level = 0
         print("Custom level mode: using level ID 0")
 
@@ -178,7 +187,13 @@ def main():
 
     episodes_dir = Path(args.output_dir)
     episodes_dir.mkdir(parents=True, exist_ok=True)
-    episode_id = next_episode_id(episodes_dir, args.user)
+    if perfect_run_mode:
+        episode_id = args.perfect_run
+        part_counter = 1
+        ep_name = lambda: f"perfect_run_{episode_id}_{part_counter}"
+    else:
+        episode_id = next_episode_id(episodes_dir, args.user)
+        ep_name = lambda: f"ep_{episode_id:04d}"
 
     # DXGI hardware-accelerated capture
     cam = dxcam.create()
@@ -219,17 +234,38 @@ def main():
         if auto_mode:
             if state == STATE_RECORDING:
                 if is_dead:
-                    # Death detected — save episode, wait for respawn
-                    t_end = time.perf_counter()
-                    ep_dir = episodes_dir / f"ep_{episode_id:04d}"
-                    save_episode(ep_dir, frames, actions,
-                                 args.fps, t_episode_start, t_end,
-                                 args.level)
-                    episode_id += 1
-                    frames = []
-                    actions = []
-                    state = STATE_WAIT_RESPAWN
-                    print(f">> Death detected. Waiting for respawn...")
+                    if perfect_run_mode:
+                        # Perfect run — trim last 30 frames (death region), then save
+                        trim = min(30, len(frames))
+                        if trim:
+                            frames = frames[:-trim]
+                            actions = actions[:-trim]
+                        t_end = time.perf_counter()
+                        if frames:
+                            ep_dir = episodes_dir / ep_name()
+                            save_episode(ep_dir, frames, actions,
+                                         args.fps, t_episode_start, t_end,
+                                         args.level)
+                            print(f">> Death detected. Trimmed {trim} frames, "
+                                  f"saved {len(frames)}.")
+                            part_counter += 1
+                        else:
+                            print(f">> Death detected. Nothing to save after trim.")
+                        frames = []
+                        actions = []
+                        state = STATE_WAIT_RESPAWN
+                    else:
+                        # Death detected — save episode, wait for respawn
+                        t_end = time.perf_counter()
+                        ep_dir = episodes_dir / ep_name()
+                        save_episode(ep_dir, frames, actions,
+                                     args.fps, t_episode_start, t_end,
+                                     args.level)
+                        episode_id += 1
+                        frames = []
+                        actions = []
+                        state = STATE_WAIT_RESPAWN
+                        print(f">> Death detected. Waiting for respawn...")
 
             elif state == STATE_WAIT_RESPAWN:
                 if not is_dead and in_level:
@@ -249,7 +285,7 @@ def main():
                     actions = []
                     t_episode_start = time.perf_counter()
                     state = STATE_RECORDING
-                    print(f">> Recording ep_{episode_id:04d}...")
+                    print(f">> Recording {ep_name()}...")
 
         # --- Capture + preprocess ---
         img = cam.grab(region=region)
@@ -279,7 +315,7 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             if state == STATE_RECORDING:
                 cv2.putText(preview_bgr,
-                            f"ep_{episode_id:04d}  {len(frames)} frames",
+                            f"{ep_name()}  {len(frames)} frames",
                             (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                             (0, 0, 255), 1)
             cv2.imshow("DeepDash Recorder", preview_bgr)
@@ -298,7 +334,7 @@ def main():
                     t_episode_start = time.perf_counter()
                     state = STATE_RECORDING
                     print(f"\n>> Auto-record ON. Recording "
-                          f"ep_{episode_id:04d}...")
+                          f"{ep_name()}...")
                 elif in_level and is_dead:
                     state = STATE_WAIT_RESPAWN
                     print(f"\n>> Auto-record ON. Waiting for respawn...")
@@ -314,11 +350,14 @@ def main():
                         frames = frames[:-trim_frames]
                         actions = actions[:-trim_frames]
                     t_end = time.perf_counter() - args.trim_end
-                    ep_dir = episodes_dir / f"ep_{episode_id:04d}"
+                    ep_dir = episodes_dir / ep_name()
                     save_episode(ep_dir, frames, actions,
                                  args.fps, t_episode_start, t_end,
                                  args.level)
-                    episode_id += 1
+                    if perfect_run_mode:
+                        part_counter += 1
+                    else:
+                        episode_id += 1
                     print(f">> Stopped. Trimmed last {args.trim_end}s.")
                 else:
                     print(">> Stopped.")
@@ -331,22 +370,23 @@ def main():
         if keyboard.is_pressed("f6"):
             if state == STATE_RECORDING and frames:
                 t_end = time.perf_counter()
-                ep_dir = episodes_dir / f"ep_{episode_id:04d}"
+                ep_dir = episodes_dir / ep_name()
                 save_episode(ep_dir, frames, actions,
                              args.fps, t_episode_start, t_end)
-                episode_id += 1
+                if not perfect_run_mode:
+                    episode_id += 1
                 frames = []
                 actions = []
                 t_episode_start = time.perf_counter()
                 print(f"\n>> Manual split. Recording "
-                      f"ep_{episode_id:04d}...")
+                      f"{ep_name()}...")
             while keyboard.is_pressed("f6"):
                 time.sleep(0.01)
 
         if keyboard.is_pressed("f10"):
             if state == STATE_RECORDING and frames:
                 t_end = time.perf_counter()
-                ep_dir = episodes_dir / f"ep_{episode_id:04d}"
+                ep_dir = episodes_dir / ep_name()
                 save_episode(ep_dir, frames, actions,
                              args.fps, t_episode_start, t_end)
                 print(">> Saved final episode on exit.")

@@ -33,20 +33,45 @@ from deepdash.fsq import FSQVAE
 from deepdash.world_model import WorldModel
 
 
-def load_episodes(episodes_dir, context_frames):
-    shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
-    episodes = []
-    for ep in sorted(Path(episodes_dir).glob("*")):
-        if shift_re.search(ep.name):
-            continue
-        tp, ap = ep / "tokens.npy", ep / "actions.npy"
-        if not tp.exists() or not ap.exists():
-            continue
-        tokens = np.load(tp).astype(np.int64)
-        actions = np.load(ap).astype(np.int64)
-        if len(tokens) >= context_frames + 1:
-            episodes.append((tokens, actions, ep.name))
-    return episodes
+class EpisodeLoader:
+    """Lazily loads episodes: keeps current + prefetched next ready."""
+
+    def __init__(self, episodes_dir, context_frames):
+        shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
+        self.context_frames = context_frames
+        self.dirs = []
+        for ep in sorted(Path(episodes_dir).glob("*")):
+            if shift_re.search(ep.name):
+                continue
+            if (ep / "tokens.npy").exists() and (ep / "actions.npy").exists():
+                self.dirs.append(ep)
+        self.rng = np.random.default_rng()
+        self._next = None
+
+    def __len__(self):
+        return len(self.dirs)
+
+    def _load(self, ep_dir):
+        tokens = np.load(ep_dir / "tokens.npy").astype(np.int64)
+        actions = np.load(ep_dir / "actions.npy").astype(np.int64)
+        return tokens, actions, ep_dir.name
+
+    def _pick(self):
+        """Load a random valid episode."""
+        order = self.rng.permutation(len(self.dirs))
+        for idx in order:
+            tokens, actions, name = self._load(self.dirs[idx])
+            if len(tokens) >= self.context_frames + 1:
+                return tokens, actions, name
+        return None
+
+    def get_next(self):
+        """Return prefetched episode and start loading another."""
+        if self._next is None:
+            self._next = self._pick()
+        current = self._next
+        self._next = self._pick()
+        return current
 
 
 def decode_tokens(vae, tokens_np, device):
@@ -62,7 +87,7 @@ def main():
     parser.add_argument("--vae-checkpoint", default="checkpoints/fsq_best.pt")
     parser.add_argument("--transformer-checkpoint",
                         default="checkpoints/transformer_best.pt")
-    parser.add_argument("--episodes-dir", default="data/episodes")
+    parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--context-frames", type=int, default=4)
     parser.add_argument("--fps", type=float, default=15)
     parser.add_argument("--scale", type=int, default=6,
@@ -105,10 +130,10 @@ def main():
     wm.eval()
     print("World model loaded")
 
-    # Load episodes
-    episodes = load_episodes(args.episodes_dir, args.context_frames)
-    print(f"Loaded {len(episodes)} episodes")
-    if not episodes:
+    # Episode loader (lazy: loads current + prefetches next)
+    loader = EpisodeLoader(args.episodes_dir, args.context_frames)
+    print(f"Found {len(loader)} episode directories")
+    if not loader.dirs:
         return
 
     # Pygame setup
@@ -124,8 +149,7 @@ def main():
     rng = np.random.default_rng()
 
     def new_episode():
-        idx = rng.integers(len(episodes))
-        tokens, actions, name = episodes[idx]
+        tokens, actions, name = loader.get_next()
         T = len(tokens)
         K = args.context_frames
         if args.start_pos == "beginning":
@@ -145,9 +169,9 @@ def main():
         last_frame = decode_tokens(vae, ctx_tok[-1], device)
 
         print(f"  Episode: {name}, start frame: {start}")
-        return ct, ca, last_frame, 0, idx
+        return ct, ca, last_frame, 0
 
-    ctx_t, ctx_a, frame_img, steps, ep_idx = new_episode()
+    ctx_t, ctx_a, frame_img, steps = new_episode()
     dead = False
     death_prob_val = 0.0
     action = 0
@@ -165,7 +189,7 @@ def main():
                 if event.key in (pygame.K_q, pygame.K_ESCAPE):
                     running = False
                 if event.key == pygame.K_r:
-                    ctx_t, ctx_a, frame_img, steps, ep_idx = new_episode()
+                    ctx_t, ctx_a, frame_img, steps = new_episode()
                     dead = False
                     death_prob_val = 0.0
 

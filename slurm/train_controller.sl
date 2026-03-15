@@ -27,14 +27,14 @@ echo "=== Step 1: Tokenize episodes ==="
 python -u scripts/tokenize_episodes.py \
     --model fsq \
     --checkpoint checkpoints/fsq_best.pt \
-    --episodes-dir data/episodes \
+    --episodes-dir data/death_episodes \
     --batch-size 512 \
     --levels 8 5 5 5
 
 echo "=== Step 2: Train CMA-ES Controller ==="
 python -u scripts/train_controller.py \
     --transformer-checkpoint checkpoints/transformer_best.pt \
-    --episodes-dir data/episodes \
+    --episodes-dir data/death_episodes \
     --max-generations 500 \
     --mlp-hidden 64 \
     --popsize 64 \

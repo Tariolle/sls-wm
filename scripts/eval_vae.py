@@ -30,7 +30,7 @@ def main():
     parser.add_argument("--model", choices=["vqvae", "fsq"], default="fsq")
     parser.add_argument("--data-dir", default=None,
                         help="Path to .npy file with frames (default: sample from episodes)")
-    parser.add_argument("--episodes-dir", default="data/episodes",
+    parser.add_argument("--episodes-dir", default="data/death_episodes",
                         help="Episode directory (used when --data-dir is not set)")
     parser.add_argument("--output-dir", default="eval_output")
     parser.add_argument("--num-samples", type=int, default=8)

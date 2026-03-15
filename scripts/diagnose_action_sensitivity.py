@@ -42,7 +42,7 @@ def main():
     print(f"  L2 distance:       {l2_dist:.4f}")
 
     # 2. Action distribution in dataset
-    episodes_dir = Path("data/episodes")
+    episodes_dir = Path("data/death_episodes")
     idle_count, jump_count = 0, 0
     for ep in sorted(episodes_dir.glob("*")):
         ap = ep / "actions.npy"

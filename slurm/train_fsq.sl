@@ -22,7 +22,7 @@ module purge
 module load aidl/pytorch/2.6.0-cuda12.6
 
 python -u scripts/train_fsq.py \
-    --episodes-dir data/episodes \
+    --episodes-dir data/death_episodes \
     --epochs 200 \
     --batch-size 2048 \
     --lr 1e-3 \

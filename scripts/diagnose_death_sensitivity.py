@@ -62,7 +62,7 @@ def main():
     # Load episodes
     import re
     shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
-    episodes_dir = Path("data/episodes")
+    episodes_dir = Path("data/death_episodes")
     episodes = []
     for ep in sorted(episodes_dir.glob("*")):
         if shift_re.search(ep.name):

@@ -342,7 +342,7 @@ def main():
         description="Train controller via PPO in dream rollouts")
     parser.add_argument("--transformer-checkpoint",
                         default="checkpoints/transformer_best.pt")
-    parser.add_argument("--episodes-dir", default="data/episodes")
+    parser.add_argument("--episodes-dir", default="data/death_episodes")
     # PPO
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--gamma", type=float, default=0.995)

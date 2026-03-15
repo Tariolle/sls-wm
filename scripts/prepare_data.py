@@ -1,11 +1,11 @@
 """Prepare training data: concatenate episodes, shuffle, split into train/val.
 
-Reads all frames.npy from data/episodes/*, concatenates into a single array,
+Reads all frames.npy from data/death_episodes/*, concatenates into a single array,
 shuffles, and splits into data/train.npy and data/val.npy.
 
 Usage:
     python scripts/prepare_data.py
-    python scripts/prepare_data.py --episodes-dir data/episodes --train-ratio 0.9
+    python scripts/prepare_data.py --episodes-dir data/death_episodes --train-ratio 0.9
 """
 
 import argparse
@@ -15,7 +15,7 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare train/val splits from episodes")
-    parser.add_argument("--episodes-dir", default="data/episodes",
+    parser.add_argument("--episodes-dir", default="data/death_episodes",
                         help="Directory containing ep_* folders")
     parser.add_argument("--output-dir", default="data",
                         help="Output directory for train.npy and val.npy")

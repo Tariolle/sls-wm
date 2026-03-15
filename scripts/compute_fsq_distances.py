@@ -26,7 +26,7 @@ from deepdash.fsq import FSQVAE
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", default="checkpoints/fsq_best.pt")
-    parser.add_argument("--episodes-dir", default="data/episodes")
+    parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5])
     parser.add_argument("--n-frames", type=int, default=200,
                         help="Number of random frames to sample")

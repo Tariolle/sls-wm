@@ -55,7 +55,7 @@ def _tokenize_frames(model, frames, batch_size, tokens_per_frame, device):
 
 def main():
     parser = argparse.ArgumentParser(description="Tokenize episodes with frozen tokenizer")
-    parser.add_argument("--episodes-dir", default="data/episodes")
+    parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--model", choices=["vqvae", "fsq"], default="fsq")
     parser.add_argument("--checkpoint", default=None,
                         help="Checkpoint path (default: checkpoints/{model}_best.pt)")
