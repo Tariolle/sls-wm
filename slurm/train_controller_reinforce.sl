@@ -9,7 +9,8 @@
 #SBATCH --mem 64G
 #SBATCH --time=08:00:00
 
-# Train controller via Reinforce policy gradients in dream rollouts.
+# Train controller via BC + Reinforce in dream rollouts.
+# BC provides timing signal from real episodes, RL refines in dreams.
 #
 # Submit:  sbatch slurm/train_controller_reinforce.sl
 # Monitor: tail -f slurm/logs/train_controller_reinforce.out
@@ -25,7 +26,7 @@ python -u scripts/tokenize_episodes.py \
     --batch-size 512 \
     --levels 8 5 5 5
 
-echo "=== Step 2: Train Controller (Reinforce) ==="
+echo "=== Step 2: Train Controller (BC + Reinforce) ==="
 python -u scripts/train_controller_reinforce.py \
     --transformer-checkpoint checkpoints/transformer_best.pt \
     --episodes-dir data/episodes \
@@ -37,6 +38,10 @@ python -u scripts/train_controller_reinforce.py \
     --max-dream-steps 20 \
     --death-threshold 0.5 \
     --mlp-hidden 64 \
+    --bc-weight-start 0.8 \
+    --bc-weight-end 0.1 \
+    --bc-batch-size 256 \
+    --bc-trim-tail 15 \
     --context-frames 4 \
     --vocab-size 1000 \
     --tokens-per-frame 64 \
