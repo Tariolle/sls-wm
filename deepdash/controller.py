@@ -1,13 +1,12 @@
-"""Controller for CMA-ES optimization.
+"""Controllers for World Model agent.
 
-Maps the Transformer's hidden state h_t to a binary action (jump/idle).
-
-Linear:  action = sigmoid(W @ h_t + b) > 0.5
-MLP:     action = sigmoid(W2 @ relu(W1 @ h_t + b1) + b2) > 0.5
+CMA-ES Controller: numpy-based, for evolutionary optimization.
+PolicyController: nn.Module, for Reinforce policy gradient training.
 """
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 
 class Controller:
@@ -70,3 +69,44 @@ class Controller:
         c = cls(hidden_dim, mlp_hidden)
         c.set_params(flat)
         return c
+
+
+class PolicyController(nn.Module):
+    """MLP policy for Reinforce training.
+
+    Maps h_t to a jump probability via LayerNorm → Linear → ReLU → Linear → sigmoid.
+    Stochastic action sampling for training, deterministic for evaluation.
+    """
+
+    def __init__(self, hidden_dim=256, mlp_hidden=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, mlp_hidden),
+            nn.ReLU(),
+            nn.Linear(mlp_hidden, 1),
+        )
+        # Small init on output layer for ~50/50 starting policy
+        nn.init.uniform_(self.net[-1].weight, -0.01, 0.01)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, h_t):
+        """h_t: (B, hidden_dim) → jump probability: (B,)"""
+        return self.net(h_t).squeeze(-1).sigmoid()
+
+    def act(self, h_t):
+        """Sample action from Bernoulli policy.
+
+        Returns:
+            action: (B,) long {0=idle, 1=jump}
+            log_prob: (B,) log probability of the sampled action
+            entropy: (B,) policy entropy
+        """
+        prob = self.forward(h_t)
+        dist = torch.distributions.Bernoulli(probs=prob)
+        action = dist.sample()
+        return action.long(), dist.log_prob(action), dist.entropy()
+
+    def act_deterministic(self, h_t):
+        """Greedy action for evaluation."""
+        return (self.forward(h_t) > 0.5).long()
