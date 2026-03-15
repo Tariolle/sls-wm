@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J "train_ctrl_rf"
+#SBATCH -J "train_ctrl_ppo"
 #SBATCH -o slurm/logs/train_controller_reinforce.out
 #SBATCH -e slurm/logs/train_controller_reinforce.err
 #SBATCH -p ar_a100
@@ -10,8 +10,8 @@
 #SBATCH --time=08:00:00
 #SBATCH --exclude=c23hpda2
 
-# Train controller via actor-critic Reinforce in dream rollouts.
-# CNN policy on 8x8 token grid, survival reward, high exploration.
+# Train controller via PPO in dream rollouts.
+# CNN policy, survival reward, clipped objective, auto entropy.
 #
 # Submit:  sbatch slurm/train_controller_reinforce.sl
 # Monitor: tail -f slurm/logs/train_controller_reinforce.out
@@ -19,7 +19,7 @@
 module purge
 module load aidl/pytorch/2.6.0-cuda12.6
 
-echo "=== Train Controller (CNN Actor-Critic) ==="
+echo "=== Train Controller (PPO) ==="
 python -u scripts/train_controller_reinforce.py \
     --transformer-checkpoint checkpoints/transformer_best.pt \
     --episodes-dir data/episodes \
@@ -28,9 +28,13 @@ python -u scripts/train_controller_reinforce.py \
     --lr 1e-4 \
     --gamma 0.995 \
     --lam 0.95 \
+    --clip-eps 0.2 \
+    --ppo-epochs 4 \
+    --minibatch-size 512 \
     --target-entropy 0.35 \
     --alpha-lr 3e-4 \
     --critic-coeff 0.5 \
+    --max-grad-norm 0.5 \
     --max-dream-steps 30 \
     --death-threshold 0.5 \
     --token-embed-dim 16 \
@@ -42,5 +46,6 @@ python -u scripts/train_controller_reinforce.py \
     --n-layers 8 \
     --dropout 0.1 \
     --checkpoint-dir checkpoints \
+    --n-eval-episodes 512 \
     --eval-interval 10 \
     --seed 42

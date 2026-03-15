@@ -1,23 +1,25 @@
-"""Train controller via actor-critic Reinforce in dream rollouts.
+"""Train controller via PPO in dream rollouts.
 
-DART-style Transformer encoder policy with actor + critic heads.
-Uniform context sampling (not near-death biased) with percentile
-return normalization (DreamerV3-style) so safe-context gradients
-don't drown out obstacle-encounter signal.
+CNN actor-critic policy on 8x8 token grid. PPO reuses dream rollout
+data for multiple gradient updates via clipped surrogate objective.
+Auto-tuned entropy (SAC-style), GAE advantages, survival reward.
 
 Usage:
     python scripts/train_controller_reinforce.py
-    python scripts/train_controller_reinforce.py --n-iterations 500 --n-episodes 128
+    python scripts/train_controller_reinforce.py --n-iterations 2000
 """
 
 import argparse
 import csv
+import math
+import re
 import sys
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.world_model import WorldModel
@@ -26,7 +28,6 @@ from deepdash.controller import CNNPolicy
 
 def load_episodes(episodes_dir, context_frames):
     """Load base (non-shifted) tokenized episodes with enough frames."""
-    import re
     shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
     episodes = []
     for ep in sorted(Path(episodes_dir).glob("*")):
@@ -48,12 +49,7 @@ def _unwrap(model):
 
 
 def sample_contexts_uniform(episodes, n, context_frames, rng):
-    """Sample n contexts uniformly from episodes (not near-death biased).
-
-    Returns:
-        ctx_tokens: (n, K, TPF) int64
-        ctx_actions: (n, K) int64
-    """
+    """Sample n contexts uniformly from episodes."""
     K = context_frames
     all_ctx_tokens = []
     all_ctx_actions = []
@@ -71,55 +67,15 @@ def sample_contexts_uniform(episodes, n, context_frames, rng):
     return np.array(all_ctx_tokens), np.array(all_ctx_actions)
 
 
-class PercentileNormalizer:
-    """DreamerV3-style running percentile return normalization.
-
-    Tracks EMA of 5th and 95th percentile of returns. Normalizes
-    advantages to roughly [-1, 1] so gradient scale is consistent
-    across safe and dangerous contexts.
-    """
-
-    def __init__(self, decay=0.99, percentile_low=5, percentile_high=95):
-        self.decay = decay
-        self.pct_low = percentile_low
-        self.pct_high = percentile_high
-        self.low = 0.0
-        self.high = 0.0
-        self.initialized = False
-
-    def update_and_normalize(self, values):
-        """Update percentiles and normalize values.
-
-        Args:
-            values: (T, B) tensor
-        Returns:
-            normalized: (T, B) tensor
-        """
-        flat = values.detach().flatten().cpu().numpy()
-        p_low = float(np.percentile(flat, self.pct_low))
-        p_high = float(np.percentile(flat, self.pct_high))
-
-        if not self.initialized:
-            self.low = p_low
-            self.high = p_high
-            self.initialized = True
-        else:
-            self.low = self.decay * self.low + (1 - self.decay) * p_low
-            self.high = self.decay * self.high + (1 - self.decay) * p_high
-
-        scale = max(self.high - self.low, 1e-8)
-        return (values - self.low) / scale
-
-
 def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
                   max_steps, death_threshold, device, warmup_steps):
-    """Run batched dream rollouts collecting actor-critic trajectories.
+    """Roll out dreams and cache data for PPO updates.
+
+    All controller forward passes are under no_grad. The cached data
+    is used for multiple PPO epochs afterwards.
 
     Returns:
-        log_probs: list of (B,) tensors per post-warmup step
-        rewards: list of (B,) tensors per post-warmup step (= -death_prob)
-        entropies: list of (B,) tensors per post-warmup step
-        values: list of (B,) tensors per post-warmup step (critic estimates)
+        rollout: dict with cached tensors for PPO
         survival: (B,) float total steps survived
     """
     m = _unwrap(model)
@@ -133,10 +89,14 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
     alive = torch.ones(B, dtype=torch.bool, device=device)
     survival = torch.zeros(B, dtype=torch.float32, device=device)
 
-    all_log_probs = []
-    all_rewards = []
-    all_entropies = []
-    all_values = []
+    # Cached data for PPO
+    all_token_ids = []   # (T, B, 64)
+    all_h_t = []         # (T, B, 256)
+    all_actions = []     # (T, B)
+    all_old_log_probs = []  # (T, B)
+    all_rewards = []     # (T, B)
+    all_values = []      # (T, B)
+    all_alive_masks = [] # (T, B)
 
     use_amp = device.type == "cuda"
 
@@ -153,17 +113,19 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
         alive &= ~died
         survival += alive.float()
 
-        # Pass raw token IDs (CNN has its own embedding)
-        action, log_prob, entropy, value = controller.act(
-            pred_tokens, h_t.float())
+        with torch.no_grad():
+            action, log_prob, _, value = controller.act(
+                pred_tokens, h_t.float())
 
         if step >= warmup_steps:
-            alive_mask = alive.float().detach()
-            all_log_probs.append(log_prob * alive_mask)
-            # Survival reward: +1 per step alive (not -death_prob)
+            alive_mask = alive.float()
+            all_token_ids.append(pred_tokens)
+            all_h_t.append(h_t.float())
+            all_actions.append(action)
+            all_old_log_probs.append(log_prob)
             all_rewards.append(alive_mask)
-            all_entropies.append(entropy * alive_mask)
-            all_values.append(value * alive_mask)
+            all_values.append(value)
+            all_alive_masks.append(alive_mask)
 
         new_status = torch.full((B, 1), m.ALIVE_TOKEN, dtype=torch.long,
                                 device=device)
@@ -171,70 +133,142 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
         ctx_t = torch.cat([ctx_t[:, 1:], new_frame], dim=1)
         ctx_a = torch.cat([ctx_a[:, 1:], action.unsqueeze(1)], dim=1)
 
-    return all_log_probs, all_rewards, all_entropies, all_values, survival
+    if not all_rewards:
+        return None, survival
+
+    rollout = {
+        'token_ids': torch.stack(all_token_ids),       # (T, B, 64)
+        'h_t': torch.stack(all_h_t),                   # (T, B, 256)
+        'actions': torch.stack(all_actions),            # (T, B)
+        'old_log_probs': torch.stack(all_old_log_probs),  # (T, B)
+        'rewards': torch.stack(all_rewards),            # (T, B)
+        'values': torch.stack(all_values),              # (T, B)
+        'alive_masks': torch.stack(all_alive_masks),    # (T, B)
+    }
+    return rollout, survival
 
 
-def compute_actor_critic_loss(log_probs, rewards, entropies, values,
-                              normalizer, log_alpha, target_entropy,
-                              gamma=0.995, lam=0.95, critic_coeff=0.5):
-    """Compute actor-critic loss with GAE, percentile normalization,
-    and auto-tuned entropy (SAC-style).
+def compute_gae(rewards, values, gamma, lam):
+    """Compute GAE advantages and returns.
 
+    Args:
+        rewards: (T, B)
+        values: (T, B)
     Returns:
-        policy_loss: scalar (actor + critic + entropy, for policy optimizer)
-        alpha_loss: scalar (for alpha optimizer)
-        mean_return: float
-        mean_entropy: float
-        mean_value: float
-        alpha: float
+        advantages: (T, B)
+        returns: (T, B)
     """
-    T = len(rewards)
-    if T == 0:
-        zero = torch.tensor(0.0, requires_grad=True)
-        return zero, zero, 0.0, 0.0, 0.0, 0.0
-
-    rewards_t = torch.stack(rewards)
-    log_probs_t = torch.stack(log_probs)
-    entropies_t = torch.stack(entropies)
-    values_t = torch.stack(values)
-
-    # GAE
-    B = rewards_t.shape[1]
-    advantages = torch.zeros_like(rewards_t)
-    gae = torch.zeros(B, device=rewards_t.device)
+    T, B = rewards.shape
+    advantages = torch.zeros_like(rewards)
+    gae = torch.zeros(B, device=rewards.device)
 
     for t in reversed(range(T)):
         if t == T - 1:
-            next_value = torch.zeros(B, device=rewards_t.device)
+            next_value = torch.zeros(B, device=rewards.device)
         else:
-            next_value = values_t[t + 1].detach()
-        delta = rewards_t[t] + gamma * next_value - values_t[t].detach()
+            next_value = values[t + 1]
+        delta = rewards[t] + gamma * next_value - values[t]
         gae = delta + gamma * lam * gae
         advantages[t] = gae
 
-    returns = advantages + values_t.detach()
+    returns = advantages + values
+    return advantages, returns
 
-    # Percentile normalization of advantages
-    advantages = normalizer.update_and_normalize(advantages)
 
-    # Actor loss
-    actor_loss = -(log_probs_t * advantages.detach()).sum(dim=0).mean()
+def ppo_update(controller, optimizer, rollout, advantages, returns,
+               log_alpha, alpha_optimizer, target_entropy,
+               clip_eps=0.2, critic_coeff=0.5, max_grad_norm=0.5,
+               n_epochs=4, minibatch_size=None):
+    """PPO clipped objective with multiple epochs on cached rollout data.
 
-    # Critic loss
-    critic_loss = ((values_t - returns) ** 2).sum(dim=0).mean()
+    Returns:
+        mean_loss, mean_entropy, mean_value, alpha_val
+    """
+    T, B = rollout['rewards'].shape
+    N = T * B  # total transitions
 
-    # Auto-tuned entropy
-    alpha = log_alpha.exp()
-    entropy_loss = -alpha.detach() * entropies_t.sum(dim=0).mean()
+    if minibatch_size is None:
+        minibatch_size = N  # full batch if not specified
 
-    policy_loss = actor_loss + critic_coeff * critic_loss + entropy_loss
+    # Flatten rollout for minibatch sampling
+    token_ids_flat = rollout['token_ids'].reshape(N, -1)     # (N, 64)
+    h_t_flat = rollout['h_t'].reshape(N, -1)                 # (N, 256)
+    actions_flat = rollout['actions'].reshape(N)              # (N,)
+    old_log_probs_flat = rollout['old_log_probs'].reshape(N)  # (N,)
+    advantages_flat = advantages.reshape(N)                   # (N,)
+    returns_flat = returns.reshape(N)                         # (N,)
+    alive_flat = rollout['alive_masks'].reshape(N)            # (N,)
 
-    # Alpha loss: increase alpha if entropy < target, decrease if above
-    mean_entropy = entropies_t.mean()
-    alpha_loss = alpha * (mean_entropy.detach() - target_entropy)
+    # Only train on alive transitions
+    alive_idx = alive_flat.nonzero(as_tuple=True)[0]
+    if len(alive_idx) == 0:
+        zero = torch.tensor(0.0)
+        return 0.0, 0.0, 0.0, log_alpha.exp().item()
 
-    return policy_loss, alpha_loss, returns.mean().item(), \
-        mean_entropy.item(), values_t.mean().item(), alpha.item()
+    total_loss = 0.0
+    total_entropy = 0.0
+    total_value = 0.0
+    n_updates = 0
+
+    for epoch in range(n_epochs):
+        # Shuffle alive indices
+        perm = alive_idx[torch.randperm(len(alive_idx), device=alive_idx.device)]
+
+        for start in range(0, len(perm), minibatch_size):
+            idx = perm[start:start + minibatch_size]
+
+            mb_token_ids = token_ids_flat[idx]
+            mb_h_t = h_t_flat[idx]
+            mb_actions = actions_flat[idx]
+            mb_old_log_probs = old_log_probs_flat[idx]
+            mb_advantages = advantages_flat[idx]
+            mb_returns = returns_flat[idx]
+
+            # Normalize advantages per minibatch
+            mb_advantages = (mb_advantages - mb_advantages.mean()) / \
+                (mb_advantages.std() + 1e-8)
+
+            # Forward pass with current policy
+            prob, value = controller(mb_token_ids, mb_h_t)
+            dist = torch.distributions.Bernoulli(probs=prob)
+            new_log_prob = dist.log_prob(mb_actions.float())
+            entropy = dist.entropy()
+
+            # Clipped surrogate objective
+            ratio = (new_log_prob - mb_old_log_probs).exp()
+            surr1 = ratio * mb_advantages
+            surr2 = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps) * mb_advantages
+            actor_loss = -torch.min(surr1, surr2).mean()
+
+            # Critic loss
+            critic_loss = F.mse_loss(value, mb_returns)
+
+            # Entropy bonus (auto-tuned)
+            alpha = log_alpha.exp()
+            entropy_loss = -alpha.detach() * entropy.mean()
+
+            loss = actor_loss + critic_coeff * critic_loss + entropy_loss
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(controller.parameters(),
+                                            max_grad_norm)
+            optimizer.step()
+
+            # Update alpha
+            alpha_loss = alpha * (entropy.mean().detach() - target_entropy)
+            alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            alpha_optimizer.step()
+
+            total_loss += loss.item()
+            total_entropy += entropy.mean().item()
+            total_value += value.mean().item()
+            n_updates += 1
+
+    n_updates = max(n_updates, 1)
+    return total_loss / n_updates, total_entropy / n_updates, \
+        total_value / n_updates, log_alpha.exp().item()
 
 
 def evaluate_fixed(model, controller, ctx_tokens_np, ctx_actions_np,
@@ -283,21 +317,22 @@ def evaluate_fixed(model, controller, ctx_tokens_np, ctx_actions_np,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train controller via actor-critic Reinforce")
+        description="Train controller via PPO in dream rollouts")
     parser.add_argument("--transformer-checkpoint",
                         default="checkpoints/transformer_best.pt")
     parser.add_argument("--episodes-dir", default="data/episodes")
-    # Actor-critic
+    # PPO
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--gamma", type=float, default=0.995)
     parser.add_argument("--lam", type=float, default=0.95,
                         help="GAE lambda")
-    parser.add_argument("--target-entropy", type=float, default=0.35,
-                        help="Target entropy for auto-tuning (max=0.693 for binary)")
-    parser.add_argument("--alpha-lr", type=float, default=3e-4,
-                        help="Learning rate for entropy coefficient alpha")
+    parser.add_argument("--clip-eps", type=float, default=0.2)
+    parser.add_argument("--ppo-epochs", type=int, default=4)
+    parser.add_argument("--minibatch-size", type=int, default=512)
+    parser.add_argument("--target-entropy", type=float, default=0.35)
+    parser.add_argument("--alpha-lr", type=float, default=3e-4)
     parser.add_argument("--critic-coeff", type=float, default=0.5)
-    parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument("--n-iterations", type=int, default=2000)
     # Rollout
     parser.add_argument("--n-episodes", type=int, default=64)
@@ -305,8 +340,7 @@ def main():
     parser.add_argument("--death-threshold", type=float, default=0.5)
     parser.add_argument("--context-frames", type=int, default=4)
     # Policy architecture (CNN)
-    parser.add_argument("--token-embed-dim", type=int, default=16,
-                        help="Per-token embedding dim for CNN input")
+    parser.add_argument("--token-embed-dim", type=int, default=16)
     # World model architecture (must match checkpoint)
     parser.add_argument("--vocab-size", type=int, default=1000)
     parser.add_argument("--tokens-per-frame", type=int, default=64)
@@ -370,7 +404,8 @@ def main():
     print(f"Controller: CNNPolicy embed={args.token_embed_dim} "
           f"({n_params:,} params, actor-critic)")
 
-    optimizer = torch.optim.Adam(controller.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(controller.parameters(), lr=args.lr,
+                                 eps=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.n_iterations, eta_min=args.lr * 0.01)
 
@@ -378,12 +413,10 @@ def main():
     log_alpha = torch.zeros(1, requires_grad=True, device=device)
     alpha_optimizer = torch.optim.Adam([log_alpha], lr=args.alpha_lr)
 
-    normalizer = PercentileNormalizer()
-
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # Fixed eval contexts for consistent tracking across iterations
+    # Fixed eval contexts
     print(f"\nPre-sampling fixed eval contexts...")
     fixed_eval_tokens, fixed_eval_actions = sample_contexts_uniform(
         episodes, args.n_eval_episodes, args.context_frames, rng)
@@ -398,58 +431,58 @@ def main():
 
     best_eval = -float("inf")
 
-    print(f"\nActor-Critic: lr={args.lr}, gamma={args.gamma}, "
-          f"lam={args.lam}")
-    print(f"Coefficients: critic={args.critic_coeff}, "
-          f"target_entropy={args.target_entropy} (auto-tuned)")
+    print(f"\nPPO: lr={args.lr}, gamma={args.gamma}, lam={args.lam}")
+    print(f"PPO: clip_eps={args.clip_eps}, epochs={args.ppo_epochs}, "
+          f"minibatch={args.minibatch_size}")
+    print(f"Entropy: target={args.target_entropy} (auto-tuned)")
     print(f"Dream: n_episodes={args.n_episodes}, "
           f"max_steps={args.max_dream_steps}")
-    print(f"Sampling: random train, fixed eval")
-    print(f"Normalization: percentile (5th/95th EMA)\n")
+    print(f"Sampling: random train, fixed eval ({args.n_eval_episodes})\n")
 
     for iteration in range(1, args.n_iterations + 1):
         t0 = time.time()
 
-        # Random training contexts each iteration
+        # Random training contexts
         ctx_tokens, ctx_actions = sample_contexts_uniform(
             episodes, args.n_episodes, args.context_frames, rng)
 
-        controller.train()
-        log_probs, rewards, entropies, values, survival = dream_rollout(
+        # Dream rollout (no gradients, cache data)
+        controller.eval()
+        rollout, survival = dream_rollout(
             model, controller, ctx_tokens, ctx_actions,
             max_steps=args.max_dream_steps,
             death_threshold=args.death_threshold,
             device=device,
             warmup_steps=args.context_frames)
 
-        if len(log_probs) == 0:
+        if rollout is None:
             print(f"Iter {iteration}: all died during warmup, skipping")
             continue
 
-        policy_loss, alpha_loss, mean_return, mean_entropy, mean_value, \
-            alpha_val = compute_actor_critic_loss(
-                log_probs, rewards, entropies, values, normalizer,
-                log_alpha, args.target_entropy,
-                gamma=args.gamma, lam=args.lam,
-                critic_coeff=args.critic_coeff)
+        # Compute GAE (once, reused across PPO epochs)
+        with torch.no_grad():
+            advantages, returns = compute_gae(
+                rollout['rewards'], rollout['values'],
+                args.gamma, args.lam)
 
-        # Update policy
-        optimizer.zero_grad()
-        policy_loss.backward()
-        torch.nn.utils.clip_grad_norm_(controller.parameters(),
-                                        args.max_grad_norm)
-        optimizer.step()
+        # PPO update (4 epochs on cached data)
+        controller.train()
+        mean_loss, mean_entropy, mean_value, alpha_val = ppo_update(
+            controller, optimizer, rollout, advantages, returns,
+            log_alpha, alpha_optimizer, args.target_entropy,
+            clip_eps=args.clip_eps, critic_coeff=args.critic_coeff,
+            max_grad_norm=args.max_grad_norm,
+            n_epochs=args.ppo_epochs,
+            minibatch_size=args.minibatch_size)
+
         scheduler.step()
-
-        # Update entropy coefficient
-        alpha_optimizer.zero_grad()
-        alpha_loss.backward()
-        alpha_optimizer.step()
 
         elapsed = time.time() - t0
         mean_surv = survival.mean().item()
+        mean_return = rollout['rewards'].sum(dim=0).mean().item()
         lr = optimizer.param_groups[0]["lr"]
 
+        # Periodic evaluation
         eval_surv = ""
         jump_ratio_str = ""
         if iteration % args.eval_interval == 0:
@@ -468,7 +501,7 @@ def main():
 
         writer.writerow([
             iteration, f"{mean_surv:.2f}", f"{mean_return:.4f}",
-            f"{policy_loss.item():.4f}", f"{mean_value:.4f}",
+            f"{mean_loss:.4f}", f"{mean_value:.4f}",
             f"{mean_entropy:.4f}", f"{alpha_val:.4f}", f"{lr:.1e}",
             eval_surv, jump_ratio_str, f"{elapsed:.1f}"])
         log_file.flush()
@@ -477,7 +510,7 @@ def main():
             if eval_surv else ""
         print(f"Iter {iteration:3d} | surv={mean_surv:5.1f} | "
               f"ret={mean_return:+.3f} | val={mean_value:+.3f} | "
-              f"loss={policy_loss.item():.3f} | ent={mean_entropy:.3f} | "
+              f"loss={mean_loss:.3f} | ent={mean_entropy:.3f} | "
               f"a={alpha_val:.3f} | lr={lr:.1e}{eval_str} | "
               f"{elapsed:.1f}s")
 
