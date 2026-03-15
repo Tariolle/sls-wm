@@ -115,14 +115,14 @@ class PolicyController(nn.Module):
 
 
 class TransformerPolicy(nn.Module):
-    """Transformer encoder policy (DART-style).
+    """Transformer encoder actor-critic policy (DART-style).
 
     Processes individual observation tokens with learnable positional encoding,
     enabling spatial attention for timing-critical decisions. h_t from the
     world model is injected as a context token.
 
     Input sequence: [CLS, obs_1, ..., obs_N, h_t_proj]
-    Output: CLS representation -> jump probability
+    Output: CLS representation -> actor (jump probability) + critic (value)
 
     Reference: DART (Agarwal et al., ICML 2024)
     """
@@ -163,12 +163,17 @@ class TransformerPolicy(nn.Module):
         nn.init.uniform_(self.actor.weight, -0.01, 0.01)
         nn.init.zeros_(self.actor.bias)
 
-    def _logits(self, token_embeds, h_t):
-        """Raw logits before sigmoid.
+        # Critic head (from CLS, separate)
+        self.critic = nn.Linear(embed_dim, 1)
+
+    def _encode(self, token_embeds, h_t):
+        """Shared encoder forward, returns CLS representation.
 
         Args:
             token_embeds: (B, N, wm_embed_dim) from world model's token_embed.
             h_t: (B, wm_embed_dim) hidden state from world model.
+        Returns:
+            cls_out: (B, embed_dim)
         """
         B = token_embeds.shape[0]
 
@@ -182,11 +187,19 @@ class TransformerPolicy(nn.Module):
         x = self.encoder(x)
         x = self.ln_f(x)
 
-        return self.actor(x[:, 0]).squeeze(-1)
+        return x[:, 0]
 
     def forward(self, token_embeds, h_t):
-        """Jump probability: (B,)."""
-        return self._logits(token_embeds, h_t).sigmoid()
+        """Jump probability and value estimate.
+
+        Returns:
+            prob: (B,) jump probability
+            value: (B,) state value estimate
+        """
+        cls_out = self._encode(token_embeds, h_t)
+        prob = self.actor(cls_out).squeeze(-1).sigmoid()
+        value = self.critic(cls_out).squeeze(-1)
+        return prob, value
 
     def act(self, token_embeds, h_t):
         """Sample action from Bernoulli policy.
@@ -195,12 +208,14 @@ class TransformerPolicy(nn.Module):
             action: (B,) long {0=idle, 1=jump}
             log_prob: (B,) log probability of sampled action
             entropy: (B,) policy entropy
+            value: (B,) critic value estimate
         """
-        prob = self.forward(token_embeds, h_t)
+        prob, value = self.forward(token_embeds, h_t)
         dist = torch.distributions.Bernoulli(probs=prob)
         action = dist.sample()
-        return action.long(), dist.log_prob(action), dist.entropy()
+        return action.long(), dist.log_prob(action), dist.entropy(), value
 
     def act_deterministic(self, token_embeds, h_t):
         """Greedy action for evaluation."""
-        return (self.forward(token_embeds, h_t) > 0.5).long()
+        prob, _ = self.forward(token_embeds, h_t)
+        return (prob > 0.5).long()

@@ -9,8 +9,8 @@
 #SBATCH --mem 64G
 #SBATCH --time=08:00:00
 
-# Train controller via BC + Reinforce in dream rollouts.
-# BC provides timing signal from real episodes, RL refines in dreams.
+# Train controller via actor-critic Reinforce in dream rollouts.
+# DART-style Transformer encoder with critic for variance reduction.
 #
 # Submit:  sbatch slurm/train_controller_reinforce.sl
 # Monitor: tail -f slurm/logs/train_controller_reinforce.out
@@ -26,25 +26,23 @@ python -u scripts/tokenize_episodes.py \
     --batch-size 512 \
     --levels 8 5 5 5
 
-echo "=== Step 2: Train Controller (BC + Reinforce) ==="
+echo "=== Step 2: Train Controller (Actor-Critic) ==="
 python -u scripts/train_controller_reinforce.py \
     --transformer-checkpoint checkpoints/transformer_best.pt \
     --episodes-dir data/episodes \
     --n-iterations 500 \
     --n-episodes 64 \
-    --lr 3e-4 \
+    --lr 1e-4 \
     --gamma 0.99 \
+    --lam 0.95 \
     --entropy-coeff 0.01 \
+    --critic-coeff 0.5 \
     --max-dream-steps 20 \
     --death-threshold 0.5 \
     --policy-embed-dim 128 \
     --policy-n-heads 4 \
     --policy-n-layers 3 \
     --policy-dropout 0.1 \
-    --bc-weight-start 0.8 \
-    --bc-weight-end 0.1 \
-    --bc-batch-size 256 \
-    --bc-trim-tail 15 \
     --context-frames 4 \
     --vocab-size 1000 \
     --tokens-per-frame 64 \
