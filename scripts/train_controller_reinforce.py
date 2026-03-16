@@ -114,6 +114,7 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
             with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
                 pred_tokens, death_prob, h_t = model.predict_next_frame(
                     ctx_t, ctx_a, temperature=0.0, return_hidden=True)
+            pred_tokens = pred_tokens.clamp(0, m.vocab_size - 1)
 
         died = death_prob > death_threshold
         alive &= ~died
@@ -297,6 +298,7 @@ def evaluate_fixed(model, controller, ctx_tokens_np, ctx_actions_np,
             with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
                 pred_tokens, death_prob, h_t = model.predict_next_frame(
                     ctx_t, ctx_a, temperature=0.0, return_hidden=True)
+            pred_tokens = pred_tokens.clamp(0, m.vocab_size - 1)
 
         died = death_prob > death_threshold
         alive &= ~died
