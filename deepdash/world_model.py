@@ -454,6 +454,10 @@ class WorldModel(nn.Module):
         h = self.ln_f(h)
         logits = self.head(h)  # (B, 65, vocab)
 
+        # Visual positions (0-63): mask out status tokens so they can't be sampled
+        logits[:, :TPF, self.ALIVE_TOKEN] = -float('inf')
+        logits[:, :TPF, self.DEATH_TOKEN] = -float('inf')
+
         predicted = self._sample_token(
             logits.reshape(-1, logits.size(-1)),
             temperature, top_k, top_p,
