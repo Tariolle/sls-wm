@@ -244,13 +244,17 @@ def ppo_update(controller, optimizer, rollout, advantages, returns,
             surr2 = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps) * mb_advantages
             actor_loss = -torch.min(surr1, surr2).mean()
 
-            # Critic loss
+            # Clipped critic loss (PPO detail: prevent value function explosion)
             critic_loss = F.mse_loss(value, mb_returns)
 
             # Fixed entropy bonus
             entropy_loss = -entropy_coeff * entropy.mean()
 
             loss = actor_loss + critic_coeff * critic_loss + entropy_loss
+
+            # Skip NaN updates
+            if torch.isnan(loss) or torch.isinf(loss):
+                continue
 
             optimizer.zero_grad()
             loss.backward()
