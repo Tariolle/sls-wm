@@ -68,6 +68,15 @@ class EpisodeLoader:
         self.rng = np.random.default_rng()
         self._next = None
 
+    def add_dir(self, episodes_dir):
+        """Add episodes from another directory."""
+        shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
+        for ep in sorted(Path(episodes_dir).glob("*")):
+            if shift_re.search(ep.name):
+                continue
+            if (ep / "tokens.npy").exists() and (ep / "actions.npy").exists():
+                self.dirs.append(ep)
+
     def __len__(self):
         return len(self.dirs)
 
@@ -109,6 +118,7 @@ def main():
     parser.add_argument("--transformer-checkpoint",
                         default="checkpoints/transformer_best.pt")
     parser.add_argument("--episodes-dir", default="data/death_episodes")
+    parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
     parser.add_argument("--context-frames", type=int, default=4)
     parser.add_argument("--fps", type=float, default=30)
     parser.add_argument("--scale", type=int, default=6,
@@ -157,6 +167,7 @@ def main():
     # Episode loader (lazy: loads current + prefetches next)
     loader = EpisodeLoader(args.episodes_dir, args.context_frames,
                             args.filter)
+    loader.add_dir(args.expert_episodes_dir)
     print(f"Found {len(loader)} episode directories (filter: {args.filter})")
     if not loader.dirs:
         return
