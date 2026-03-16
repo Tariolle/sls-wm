@@ -25,7 +25,7 @@ python -u scripts/train_controller_reinforce.py \
     --pretrained checkpoints/controller_bc_best.pt \
     --episodes-dir data/death_episodes \
     --expert-episodes-dir data/expert_episodes \
-    --n-iterations 2000 \
+    --n-iterations 9000 \
     --n-episodes 512 \
     --lr 1e-4 \
     --gamma 0.995 \
