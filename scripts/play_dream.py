@@ -127,8 +127,6 @@ def main():
     parser.add_argument("--n-layers", type=int, default=8)
     parser.add_argument("--tokens-per-frame", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--decode-steps", type=int, default=1,
-                        help="Decoding steps (1 = parallel, >1 = iterative)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -223,10 +221,7 @@ def main():
     death_prob_val = 0.0
     action = 0
     best_steps = 0
-    mgit_steps = args.decode_steps
-
-    print(f"\nControls: SPACE/UP=jump, R=retry, T=next episode, Q=quit")
-    print(f"LEFT/RIGHT = adjust decode steps (current: {mgit_steps})")
+    print(f"\nControls: SPACE=jump, R=retry, T=next episode, Q=quit")
     print(f"FPS: {args.fps}\n")
 
     running = True
@@ -244,12 +239,6 @@ def main():
                 if event.key == pygame.K_t:
                     ctx_t, ctx_a, frame_img, steps, ep_split = new_episode()
                     dead = False
-                if event.key == pygame.K_RIGHT:
-                    mgit_steps = min(mgit_steps + 1, 16)
-                    print(f"  decode steps: {mgit_steps}")
-                if event.key == pygame.K_LEFT:
-                    mgit_steps = max(mgit_steps - 1, 1)
-                    print(f"  decode steps: {mgit_steps}")
                     death_prob_val = 0.0
 
         if not running:
@@ -268,7 +257,7 @@ def main():
         line1 = font.render(
             f"{steps:3d}  {act_str:4s}  d:{death_prob_val:.2f}", True, dp_color)
         line2 = font.render(
-            f"best:{best_steps}  {ep_split}  mg:{mgit_steps}  {actual_fps:.0f}fps",
+            f"best:{best_steps}  {ep_split}  {actual_fps:.0f}fps",
             True, (180, 180, 180))
         hud_h = line1.get_height() + line2.get_height() + 6
         hud_w = max(line1.get_width(), line2.get_width()) + 10
@@ -299,8 +288,7 @@ def main():
         # World model prediction
         with torch.no_grad(), torch.cuda.amp.autocast(enabled=device.type == "cuda"):
             pred_tokens, death_prob = wm.predict_next_frame(
-                ctx_t, ctx_a, temperature=0.0,
-                maskgit_steps=mgit_steps)
+                ctx_t, ctx_a, temperature=0.0)
 
         death_prob_val = death_prob[0].item()
         pred_np = pred_tokens[0].cpu().numpy()

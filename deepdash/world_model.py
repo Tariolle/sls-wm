@@ -391,49 +391,29 @@ class WorldModel(nn.Module):
         probs = logits.softmax(dim=-1)
         return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-    @staticmethod
-    def _maskgit_schedule(T, n_tokens):
-        """Cosine schedule: how many tokens to unmask per step.
-
-        Args:
-            T: Number of decoding steps.
-            n_tokens: Total tokens to unmask across all steps.
-
-        Returns:
-            n_unmask: (T,) long — tokens to unmask at each step.
-        """
-        steps = torch.arange(T + 1, dtype=torch.float32)
-        mask_ratio = torch.cos(steps / T * math.pi * 0.5)
-        n_masked = (mask_ratio * n_tokens).long()
-        n_unmask = n_masked[:-1] - n_masked[1:]
-        # Ensure we unmask all tokens across T steps
-        n_unmask[-1] += n_masked[-1]
-        return n_unmask
-
     @torch.no_grad()
     def predict_next_frame(self, frame_tokens, actions,
                            temperature=0.0, top_k=0, top_p=0.0,
-                           return_hidden=False, maskgit_steps=1):
+                           return_hidden=False):
         """Predict next frame via parallel token decoding.
 
         Phase 1: Prefill context with KV cache.
-        Phase 2: Predict all target tokens in parallel (single step by default).
+        Phase 2: Predict all target tokens in parallel (single forward pass).
 
         Args:
-            frame_tokens: (B, K, tokens_per_frame+1) long — K context frames
+            frame_tokens: (B, K, tokens_per_frame+1) long -- K context frames
                           with status tokens.
-            actions: (B, K) long — actions for context frames.
+            actions: (B, K) long -- actions for context frames.
             temperature: Sampling temperature. 0 = greedy (default).
             top_k: Keep only top-k logits. 0 = disabled.
             top_p: Nucleus sampling threshold. 0 = disabled.
             return_hidden: If True, also return the hidden state h_t (embed_dim)
                           at the last context position (post layer-norm).
-            maskgit_steps: Number of iterative decoding steps (default 1 = parallel).
 
         Returns:
-            predicted: (B, tokens_per_frame) long — predicted visual tokens.
-            death_prob: (B,) float — probability of death.
-            h_t: (B, embed_dim) float — only if return_hidden=True.
+            predicted: (B, tokens_per_frame) long -- predicted visual tokens.
+            death_prob: (B,) float -- probability of death.
+            h_t: (B, embed_dim) float -- only if return_hidden=True.
         """
         B = frame_tokens.size(0)
         TPF = self.tokens_per_frame
@@ -462,58 +442,22 @@ class WorldModel(nn.Module):
         x = self.ln_f(x)
         h_t = x[:, -1] if return_hidden else None
 
-        # --- Phase 2: Parallel decode ---
-        schedule = self._maskgit_schedule(maskgit_steps, n_tokens)
-
-        predicted = torch.zeros(B, n_tokens, dtype=torch.long, device=device)
-        is_masked = torch.ones(B, n_tokens, dtype=torch.bool, device=device)
-
+        # --- Phase 2: Parallel decode (all tokens in one forward pass) ---
+        target_embed = self.mask_embed.expand(B, n_tokens, -1)
         target_rope_cos = self.rope_cos[ctx_len:ctx_len + n_tokens]
         target_rope_sin = self.rope_sin[ctx_len:ctx_len + n_tokens]
 
-        for step in range(maskgit_steps):
-            # Build target embeddings: mask_embed where masked, token_embed where unmasked
-            target_embed = torch.where(
-                is_masked.unsqueeze(-1),
-                self.mask_embed.expand(B, n_tokens, -1),
-                self.token_embed(predicted),
-            )
+        h = target_embed
+        for i, block in enumerate(self.blocks):
+            h, _ = block(h, None, target_rope_cos, target_rope_sin,
+                         past_kv=context_kvs[i], use_cache=False)
+        h = self.ln_f(h)
+        logits = self.head(h)  # (B, 65, vocab)
 
-            # Forward through blocks with cached context KVs
-            h = target_embed
-            for i, block in enumerate(self.blocks):
-                h, _ = block(h, None, target_rope_cos, target_rope_sin,
-                             past_kv=context_kvs[i], use_cache=False)
-            h = self.ln_f(h)
-            logits = self.head(h)  # (B, 65, vocab)
-
-            # Sample tokens + confidence at masked positions
-            probs = F.softmax(logits, dim=-1)
-            sampled = self._sample_token(
-                logits.reshape(-1, logits.size(-1)),
-                temperature, top_k, top_p,
-            ).reshape(B, n_tokens)
-            confidence = probs.gather(-1, sampled.unsqueeze(-1)).squeeze(-1)
-
-            # Update predictions at currently masked positions
-            predicted = torch.where(is_masked, sampled, predicted)
-            confidence = torch.where(is_masked, confidence,
-                                     torch.ones_like(confidence))
-
-            # Unmask highest-confidence tokens
-            n_to_unmask = schedule[step].item()
-            n_still_masked = is_masked.sum(dim=-1).min().item()
-            n_to_keep_masked = max(0, n_still_masked - n_to_unmask)
-
-            if n_to_keep_masked <= 0:
-                is_masked.fill_(False)
-            else:
-                # Among currently masked, keep lowest-confidence ones masked
-                conf_masked = confidence.clone()
-                conf_masked[~is_masked] = float('inf')
-                _, idx = conf_masked.topk(n_to_keep_masked, dim=-1, largest=False)
-                is_masked.fill_(False)
-                is_masked.scatter_(1, idx, True)
+        predicted = self._sample_token(
+            logits.reshape(-1, logits.size(-1)),
+            temperature, top_k, top_p,
+        ).reshape(B, n_tokens)
 
         # Death probability from status token (position 64)
         death_prob = F.softmax(logits[:, -1], dim=-1)[:, self.DEATH_TOKEN]
