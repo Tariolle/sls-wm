@@ -86,9 +86,10 @@ def sample_contexts_near_obstacle(episodes, n, context_frames, rng,
         ep_idx = rng.integers(len(episodes))
         tokens, actions = episodes[ep_idx]
         T = len(tokens)
-        # start in [T - max_frames_to_death, T - K]
-        earliest = max(0, T - max_frames_to_death)
-        latest = max(0, T - K)
+        # Death is at frame T-1. Context uses K frames, dream starts after.
+        # Place start so death is 1..max_frames_to_death steps into the dream.
+        earliest = max(0, T - K - max_frames_to_death)
+        latest = max(0, T - K - 1)
         if latest <= earliest:
             start = earliest
         else:
