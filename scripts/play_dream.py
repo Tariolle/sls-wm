@@ -33,18 +33,38 @@ from deepdash.fsq import FSQVAE
 from deepdash.world_model import WorldModel
 
 
+def compute_val_set(episodes_dir, val_ratio=0.1, seed=42):
+    """Replicate the stratified train/val split from train_transformer.py."""
+    shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
+    base_names = sorted(set(
+        shift_re.sub("", ep.name)
+        for ep in Path(episodes_dir).glob("*")
+        if (ep / "tokens.npy").exists()
+    ))
+    rng = np.random.default_rng(seed)
+    idx = rng.permutation(len(base_names))
+    val_count = max(1, int(len(base_names) * val_ratio))
+    return {base_names[i] for i in idx[:val_count]}
+
+
 class EpisodeLoader:
     """Lazily loads episodes: keeps current + prefetched next ready."""
 
-    def __init__(self, episodes_dir, context_frames):
+    def __init__(self, episodes_dir, context_frames, split_filter="all"):
         shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
         self.context_frames = context_frames
+        self.val_set = compute_val_set(episodes_dir)
         self.dirs = []
         for ep in sorted(Path(episodes_dir).glob("*")):
             if shift_re.search(ep.name):
                 continue
-            if (ep / "tokens.npy").exists() and (ep / "actions.npy").exists():
-                self.dirs.append(ep)
+            if not ((ep / "tokens.npy").exists() and (ep / "actions.npy").exists()):
+                continue
+            if split_filter == "val" and ep.name not in self.val_set:
+                continue
+            if split_filter == "train" and ep.name in self.val_set:
+                continue
+            self.dirs.append(ep)
         self.rng = np.random.default_rng()
         self._next = None
 
@@ -54,15 +74,16 @@ class EpisodeLoader:
     def _load(self, ep_dir):
         tokens = np.load(ep_dir / "tokens.npy").astype(np.int64)
         actions = np.load(ep_dir / "actions.npy").astype(np.int64)
-        return tokens, actions, ep_dir.name
+        split = "VAL" if ep_dir.name in self.val_set else "TRAIN"
+        return tokens, actions, ep_dir.name, split
 
     def _pick(self):
         """Load a random valid episode."""
         order = self.rng.permutation(len(self.dirs))
         for idx in order:
-            tokens, actions, name = self._load(self.dirs[idx])
+            tokens, actions, name, split = self._load(self.dirs[idx])
             if len(tokens) >= self.context_frames + 1:
-                return tokens, actions, name
+                return tokens, actions, name, split
         return None
 
     def get_next(self):
@@ -89,11 +110,15 @@ def main():
                         default="checkpoints/transformer_best.pt")
     parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--context-frames", type=int, default=4)
-    parser.add_argument("--fps", type=float, default=15)
+    parser.add_argument("--fps", type=float, default=30)
     parser.add_argument("--scale", type=int, default=6,
                         help="Display scale (6 = 384x384 window)")
-    parser.add_argument("--start-pos", choices=["random", "beginning"],
-                        default="random")
+    parser.add_argument("--start-pos", choices=["random", "beginning",
+                                                "near-obstacle"],
+                        default="near-obstacle")
+    parser.add_argument("--filter", choices=["all", "train", "val"],
+                        default="all",
+                        help="Filter episodes by train/val split")
     # Model architecture
     parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5])
     parser.add_argument("--vocab-size", type=int, default=1000)
@@ -131,8 +156,9 @@ def main():
     print("World model loaded")
 
     # Episode loader (lazy: loads current + prefetches next)
-    loader = EpisodeLoader(args.episodes_dir, args.context_frames)
-    print(f"Found {len(loader)} episode directories")
+    loader = EpisodeLoader(args.episodes_dir, args.context_frames,
+                            args.filter)
+    print(f"Found {len(loader)} episode directories (filter: {args.filter})")
     if not loader.dirs:
         return
 
@@ -149,11 +175,16 @@ def main():
     rng = np.random.default_rng()
 
     def new_episode():
-        tokens, actions, name = loader.get_next()
+        tokens, actions, name, split = loader.get_next()
         T = len(tokens)
         K = args.context_frames
         if args.start_pos == "beginning":
             start = 0
+        elif args.start_pos == "near-obstacle":
+            # Match controller sampling: death (T-1) is 1..25 dream steps after context
+            earliest = max(0, T - K - 25)
+            latest = max(0, T - K - 1)
+            start = rng.integers(earliest, latest + 1) if latest > earliest else earliest
         else:
             start = rng.integers(0, max(1, T - K - 10))
 
@@ -168,10 +199,10 @@ def main():
         # Decode last context frame for initial display
         last_frame = decode_tokens(vae, ctx_tok[-1], device)
 
-        print(f"  Episode: {name}, start frame: {start}")
-        return ct, ca, last_frame, 0
+        print(f"  Episode: {name} [{split}], start frame: {start}")
+        return ct, ca, last_frame, 0, split
 
-    ctx_t, ctx_a, frame_img, steps = new_episode()
+    ctx_t, ctx_a, frame_img, steps, ep_split = new_episode()
     dead = False
     death_prob_val = 0.0
     action = 0
@@ -189,7 +220,7 @@ def main():
                 if event.key in (pygame.K_q, pygame.K_ESCAPE):
                     running = False
                 if event.key == pygame.K_r:
-                    ctx_t, ctx_a, frame_img, steps = new_episode()
+                    ctx_t, ctx_a, frame_img, steps, ep_split = new_episode()
                     dead = False
                     death_prob_val = 0.0
 
@@ -205,9 +236,10 @@ def main():
         # HUD
         act_str = "JUMP" if action else "idle"
         dp_color = (255, 80, 80) if death_prob_val > 0.3 else (80, 255, 80)
+        split_color = (255, 200, 50) if ep_split == "VAL" else (150, 150, 150)
         hud = font.render(
             f"step:{steps:3d}  {act_str:4s}  death:{death_prob_val:.2f}  "
-            f"best:{best_steps}", True, dp_color)
+            f"best:{best_steps}  [{ep_split}]", True, dp_color)
         # Dark background for readability
         hud_bg = pygame.Surface((hud.get_width() + 10, hud.get_height() + 4))
         hud_bg.set_alpha(180)
