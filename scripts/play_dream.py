@@ -113,9 +113,8 @@ def main():
     parser.add_argument("--fps", type=float, default=30)
     parser.add_argument("--scale", type=int, default=6,
                         help="Display scale (6 = 384x384 window)")
-    parser.add_argument("--start-pos", choices=["random", "beginning",
-                                                "near-obstacle"],
-                        default="near-obstacle")
+    parser.add_argument("--start-pos", choices=["uniform", "beginning"],
+                        default="uniform")
     parser.add_argument("--filter", choices=["all", "train", "val"],
                         default="all",
                         help="Filter episodes by train/val split")
@@ -184,12 +183,10 @@ def main():
         if start is None:
             if args.start_pos == "beginning":
                 start = 0
-            elif args.start_pos == "near-obstacle":
-                earliest = max(0, T - K - 25)
-                latest = T - K * 2
-                start = rng.integers(earliest, latest + 1) if latest > earliest else earliest
             else:
-                start = rng.integers(0, max(1, T - K - 10))
+                # Uniform, excluding last 2*K frames (matches controller training)
+                latest = T - K * 3
+                start = rng.integers(0, latest + 1) if latest > 0 else 0
 
         current_ep.update(tokens=tokens, actions=actions,
                           name=name, split=split, start=start)
