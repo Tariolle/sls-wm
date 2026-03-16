@@ -39,7 +39,7 @@ def load_episodes(episodes_dir, context_frames):
             continue
         tokens = np.load(tp).astype(np.int64)
         actions = np.load(ap).astype(np.int64)
-        if len(tokens) >= context_frames + 1:
+        if len(tokens) >= context_frames * 3:
             episodes.append((tokens, actions))
     return episodes
 
@@ -48,36 +48,14 @@ def _unwrap(model):
     return model._orig_mod if hasattr(model, "_orig_mod") else model
 
 
-def sample_contexts_uniform(episodes, n, context_frames, rng):
-    """Sample n contexts uniformly from episodes."""
-    K = context_frames
-    all_ctx_tokens = []
-    all_ctx_actions = []
-    for _ in range(n):
-        ep_idx = rng.integers(len(episodes))
-        tokens, actions = episodes[ep_idx]
-        T = len(tokens)
-        latest = T - K
-        if latest <= 0:
-            start = 0
-        else:
-            start = rng.integers(0, latest)
-        all_ctx_tokens.append(tokens[start:start + K])
-        all_ctx_actions.append(actions[start:start + K])
-    return np.array(all_ctx_tokens), np.array(all_ctx_actions)
+def sample_contexts(episodes, n, context_frames, rng):
+    """Sample n contexts uniformly, excluding last 2*K frames of each episode.
 
-
-def sample_contexts_near_obstacle(episodes, n, context_frames, rng,
-                                  max_frames_to_death=25):
-    """Sample contexts where death occurs within max_frames_to_death.
-
-    Every episode ends with death at frame T-1. Context is placed so
-    the obstacle/death event falls within the dream horizon, giving the
-    controller both safe approach frames and the critical timing window.
-
-    Args:
-        max_frames_to_death: death must be at most this many frames after
-            context start. E.g. 25 means context starts at T-25 to T-K.
+    The last 2*K frames are cut because:
+    - In death episodes: outcome is already determined (too late to react)
+    - In expert episodes: win animation noise
+    This gives the controller at least K dream frames of runway to influence
+    the outcome after context.
     """
     K = context_frames
     all_ctx_tokens = []
@@ -86,14 +64,10 @@ def sample_contexts_near_obstacle(episodes, n, context_frames, rng,
         ep_idx = rng.integers(len(episodes))
         tokens, actions = episodes[ep_idx]
         T = len(tokens)
-        # Death is at frame T-1. Context uses K frames, dream starts after.
-        # Place start so death is 1..max_frames_to_death steps into the dream.
-        earliest = max(0, T - K - max_frames_to_death)
-        latest = max(0, T - K - 1)
-        if latest <= earliest:
-            start = earliest
-        else:
-            start = rng.integers(earliest, latest + 1)
+        # Context starts at [0, T - 3*K], so after K context frames,
+        # there are at least 2*K frames of runway before episode end
+        latest = T - K * 3
+        start = rng.integers(0, latest + 1) if latest > 0 else 0
         all_ctx_tokens.append(tokens[start:start + K])
         all_ctx_actions.append(actions[start:start + K])
     return np.array(all_ctx_tokens), np.array(all_ctx_actions)
@@ -344,6 +318,7 @@ def main():
     parser.add_argument("--transformer-checkpoint",
                         default="checkpoints/transformer_best.pt")
     parser.add_argument("--episodes-dir", default="data/death_episodes")
+    parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
     # PPO
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--gamma", type=float, default=0.995)
@@ -358,8 +333,6 @@ def main():
     parser.add_argument("--n-iterations", type=int, default=2000)
     # Rollout
     parser.add_argument("--n-episodes", type=int, default=512)
-    parser.add_argument("--max-frames-to-death", type=int, default=25,
-                        help="Max frames between context start and death")
     parser.add_argument("--max-dream-steps", type=int, default=30)
     parser.add_argument("--death-threshold", type=float, default=0.5)
     parser.add_argument("--context-frames", type=int, default=4)
@@ -412,9 +385,12 @@ def main():
         except Exception as e:
             print(f"torch.compile not available: {e}")
 
-    # Load episodes
+    # Load episodes (death + expert)
     episodes = load_episodes(args.episodes_dir, args.context_frames)
-    print(f"Loaded {len(episodes)} tokenized episodes")
+    n_death = len(episodes)
+    expert_eps = load_episodes(args.expert_episodes_dir, args.context_frames)
+    episodes.extend(expert_eps)
+    print(f"Loaded {len(episodes)} episodes ({n_death} death, {len(expert_eps)} expert)")
     if not episodes:
         print("No tokenized episodes found.")
         return
@@ -443,12 +419,11 @@ def main():
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # Fixed eval contexts (near-obstacle, same as training distribution)
+    # Fixed eval contexts (uniform, same as training distribution)
     print(f"\nPre-sampling fixed eval contexts...")
-    fixed_eval_tokens, fixed_eval_actions = sample_contexts_near_obstacle(
-        episodes, args.n_eval_episodes, args.context_frames, rng,
-        max_frames_to_death=args.max_frames_to_death)
-    print(f"  Eval: {args.n_eval_episodes} fixed near-obstacle contexts")
+    fixed_eval_tokens, fixed_eval_actions = sample_contexts(
+        episodes, args.n_eval_episodes, args.context_frames, rng)
+    print(f"  Eval: {args.n_eval_episodes} fixed contexts")
 
     log_path = ckpt_dir / "controller_reinforce_log.csv"
     log_file = open(log_path, "w", newline="")
@@ -465,16 +440,15 @@ def main():
     print(f"Entropy: {args.entropy_coeff} (fixed)")
     print(f"Dream: n_episodes={args.n_episodes}, "
           f"max_steps={args.max_dream_steps}")
-    print(f"Sampling: near-obstacle (max {args.max_frames_to_death}f to death)")
+    print(f"Sampling: uniform (excluding last 2*K frames)")
     print(f"Eval: {args.n_eval_episodes} fixed contexts\n")
 
     for iteration in range(1, args.n_iterations + 1):
         t0 = time.time()
 
-        # Near-obstacle training contexts
-        ctx_tokens, ctx_actions = sample_contexts_near_obstacle(
-            episodes, args.n_episodes, args.context_frames, rng,
-            max_frames_to_death=args.max_frames_to_death)
+        # Uniform training contexts (excluding last 2*K frames)
+        ctx_tokens, ctx_actions = sample_contexts(
+            episodes, args.n_episodes, args.context_frames, rng)
 
         # Dream rollout (no gradients, cache data)
         controller.eval()

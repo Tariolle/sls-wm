@@ -11,7 +11,7 @@
 #SBATCH --exclude=c23hpda2
 
 # Train controller via PPO in dream rollouts.
-# CNN policy, survival reward, near-obstacle sampling, 512 episodes.
+# CNN policy, survival reward, uniform sampling, 512 episodes.
 #
 # Submit:  sbatch slurm/train_controller_reinforce.sl
 # Monitor: tail -f slurm/logs/train_controller_reinforce.out
@@ -24,6 +24,7 @@ python -u scripts/train_controller_reinforce.py \
     --transformer-checkpoint checkpoints/transformer_best.pt \
     --pretrained checkpoints/controller_bc_best.pt \
     --episodes-dir data/death_episodes \
+    --expert-episodes-dir data/expert_episodes \
     --n-iterations 2000 \
     --n-episodes 512 \
     --lr 1e-4 \
@@ -36,7 +37,6 @@ python -u scripts/train_controller_reinforce.py \
     --critic-coeff 0.5 \
     --max-grad-norm 0.5 \
     --max-dream-steps 30 \
-    --max-frames-to-death 25 \
     --death-threshold 0.5 \
     --token-embed-dim 16 \
     --context-frames 4 \
