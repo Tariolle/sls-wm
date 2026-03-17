@@ -39,18 +39,10 @@ def tokenize_episode(vae, ep_dir, device, batch_size=64):
     return tokens
 
 
-def compute_val_set(episodes_dir, val_ratio=0.1, seed=42):
-    """Replicate the stratified train/val split from train_transformer.py."""
-    shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
-    base_names = sorted(set(
-        shift_re.sub("", ep.name)
-        for ep in Path(episodes_dir).glob("*")
-        if (ep / "actions.npy").exists()
-    ))
-    rng = np.random.default_rng(seed)
-    idx = rng.permutation(len(base_names))
-    val_count = max(1, int(len(base_names) * val_ratio))
-    return {base_names[i] for i in idx[:val_count]}
+def compute_val_set(death_dir, expert_dir="data/expert_episodes"):
+    """Get global val set (shared across all models)."""
+    from deepdash.data_split import get_val_episodes
+    return get_val_episodes(death_dir, expert_dir)
 
 
 def load_episodes(episodes_dir, context_frames, vae=None, device=None,

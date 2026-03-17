@@ -44,7 +44,7 @@ def load_episodes(episodes_dir, context_frames):
         tokens = np.load(tp).astype(np.int64)
         actions = np.load(ap).astype(np.int64)
         if len(tokens) >= K * 3:
-            episodes.append((tokens, actions))
+            episodes.append((tokens, actions, ep.name))
     return episodes
 
 
@@ -146,54 +146,41 @@ def main():
     print("World model loaded")
 
     # Load episodes (death + expert)
+    from deepdash.data_split import get_val_episodes, is_val_episode
     K = args.context_frames
-    death_eps = load_episodes(args.episodes_dir, K)
-    expert_eps = load_episodes(args.expert_episodes_dir, K)
-    print(f"Loaded {len(death_eps)} death + {len(expert_eps)} expert episodes")
-    if not death_eps and not expert_eps:
+    val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
+
+    all_eps = load_episodes(args.episodes_dir, K) + \
+              load_episodes(args.expert_episodes_dir, K)
+    print(f"Loaded {len(all_eps)} episodes")
+    if not all_eps:
         print("No episodes found!")
         return
 
-    # Extract BC samples: trim last 2*K frames from death episodes
-    # (outcome determined), trim last 2*K from expert (win animation)
-    death_ctx, death_act, death_tok, death_actions = \
-        extract_bc_samples(death_eps, K, trim_end=K * 2)
-    expert_ctx, expert_act, expert_tok, expert_actions = \
-        extract_bc_samples(expert_eps, K, trim_end=K * 2)
+    # Episode-level split (consistent with FSQ/Transformer)
+    train_eps = [(t, a) for t, a, name in all_eps if not is_val_episode(name, val_set)]
+    val_eps = [(t, a) for t, a, name in all_eps if is_val_episode(name, val_set)]
 
-    n_death = len(death_actions)
-    n_expert = len(expert_actions)
-    print(f"BC samples: {n_death} death + {n_expert} expert = {n_death + n_expert}")
+    # Extract BC samples: trim last 2*K frames (death: outcome determined, expert: win animation)
+    train_ctx, train_act, train_tok, train_actions = \
+        extract_bc_samples(train_eps, K, trim_end=K * 2)
+    val_ctx, val_act, val_tok, val_actions = \
+        extract_bc_samples(val_eps, K, trim_end=K * 2)
 
-    # Stratified train/val split (10% of each source)
-    rng = np.random.default_rng(args.seed)
-    death_perm = rng.permutation(n_death)
-    expert_perm = rng.permutation(n_expert)
-    val_death = max(1, int(n_death * args.val_ratio))
-    val_expert = max(1, int(n_expert * args.val_ratio))
-
-    death_val_idx = death_perm[:val_death]
-    death_train_idx = death_perm[val_death:]
-    expert_val_idx = expert_perm[:val_expert] + n_death  # offset
-    expert_train_idx = expert_perm[val_expert:] + n_death
-
-    # Concatenate all samples
-    ctx_tokens = np.concatenate([death_ctx, expert_ctx])
-    ctx_actions = np.concatenate([death_act, expert_act])
-    target_tokens = np.concatenate([death_tok, expert_tok])
-    target_actions = np.concatenate([death_actions, expert_actions])
+    # Concatenate for unified indexing
+    ctx_tokens = np.concatenate([train_ctx, val_ctx])
+    ctx_actions = np.concatenate([train_act, val_act])
+    target_tokens = np.concatenate([train_tok, val_tok])
+    target_actions = np.concatenate([train_actions, val_actions])
     N = len(target_actions)
 
-    train_idx = np.concatenate([death_train_idx, expert_train_idx])
-    val_idx = np.concatenate([death_val_idx, expert_val_idx])
+    train_idx = np.arange(len(train_actions))
+    val_idx = np.arange(len(train_actions), N)
 
+    print(f"BC samples: {len(train_idx)} train, {len(val_idx)} val, {N} total")
     print(f"Action distribution: "
           f"{target_actions.sum()}/{N} jumps "
           f"({target_actions.mean() * 100:.1f}%)")
-    print(f"Train: {len(train_idx)} (death: {len(death_train_idx)}, "
-          f"expert: {len(expert_train_idx)})")
-    print(f"Val: {len(val_idx)} (death: {len(death_val_idx)}, "
-          f"expert: {len(expert_val_idx)})")
 
     # Precompute h_t for all samples (one-time cost)
     print("Computing hidden states from world model...")

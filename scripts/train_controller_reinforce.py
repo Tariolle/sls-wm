@@ -40,7 +40,7 @@ def load_episodes(episodes_dir, context_frames):
         tokens = np.load(tp).astype(np.int64)
         actions = np.load(ap).astype(np.int64)
         if len(tokens) >= context_frames * 3:
-            episodes.append((tokens, actions))
+            episodes.append((tokens, actions, ep.name))
     return episodes
 
 
@@ -391,12 +391,20 @@ def main():
         except Exception as e:
             print(f"torch.compile not available: {e}")
 
-    # Load episodes (death + expert)
-    episodes = load_episodes(args.episodes_dir, args.context_frames)
-    n_death = len(episodes)
-    expert_eps = load_episodes(args.expert_episodes_dir, args.context_frames)
-    episodes.extend(expert_eps)
-    print(f"Loaded {len(episodes)} episodes ({n_death} death, {len(expert_eps)} expert)")
+    # Load episodes (death + expert) with global split
+    from deepdash.data_split import get_val_episodes, is_val_episode
+    val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
+
+    all_eps = load_episodes(args.episodes_dir, args.context_frames) + \
+              load_episodes(args.expert_episodes_dir, args.context_frames)
+    # Train on all episodes, eval on val only
+    train_episodes = [(t, a) for t, a, name in all_eps
+                      if not is_val_episode(name, val_set)]
+    val_episodes = [(t, a) for t, a, name in all_eps
+                    if is_val_episode(name, val_set)]
+    episodes = [(t, a) for t, a, name in all_eps]  # all for training rollouts
+    print(f"Loaded {len(episodes)} episodes "
+          f"({len(train_episodes)} train, {len(val_episodes)} val)")
     if not episodes:
         print("No tokenized episodes found.")
         return
@@ -439,11 +447,12 @@ def main():
         print(f"Resumed from iteration {ckpt['iteration']} "
               f"(best_eval={best_eval:.2f})")
 
-    # Fixed eval contexts (uniform, same as training distribution)
-    print(f"\nPre-sampling fixed eval contexts...")
+    # Fixed eval contexts (from val episodes only)
+    print(f"\nPre-sampling fixed eval contexts (val episodes)...")
+    eval_source = val_episodes if val_episodes else episodes
     fixed_eval_tokens, fixed_eval_actions = sample_contexts(
-        episodes, args.n_eval_episodes, args.context_frames, rng)
-    print(f"  Eval: {args.n_eval_episodes} fixed contexts")
+        eval_source, args.n_eval_episodes, args.context_frames, rng)
+    print(f"  Eval: {args.n_eval_episodes} fixed contexts from {len(eval_source)} val episodes")
 
     log_path = ckpt_dir / "controller_reinforce_log.csv"
     if args.resume and log_path.exists() and start_iteration > 1:

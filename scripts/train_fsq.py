@@ -126,6 +126,7 @@ def val_epoch(model, loader, amp_dtype=None):
 def main():
     parser = argparse.ArgumentParser(description="Train FSQ-VAE on Geometry Dash frames")
     parser.add_argument("--episodes-dir", default="data/death_episodes")
+    parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=4e-3)
@@ -156,15 +157,21 @@ def main():
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
 
-    # Split episodes into train/val
-    episodes_dir = Path(args.episodes_dir)
-    all_episodes = sorted(ep for ep in episodes_dir.glob("*")
-                          if (ep / "frames.npy").exists())
-    rng = np.random.default_rng(args.seed)
-    indices = rng.permutation(len(all_episodes))
-    val_count = max(1, int(len(all_episodes) * args.val_ratio))
-    val_eps = [all_episodes[i] for i in indices[:val_count]]
-    train_eps = [all_episodes[i] for i in indices[val_count:]]
+    # Global episode-level split (shared across all models)
+    from deepdash.data_split import get_val_episodes, is_val_episode
+    val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
+
+    all_episodes = []
+    for ep_dir in [args.episodes_dir, args.expert_episodes_dir]:
+        p = Path(ep_dir)
+        if p.exists():
+            all_episodes.extend(
+                ep for ep in sorted(p.glob("*"))
+                if (ep / "frames.npy").exists()
+            )
+
+    train_eps = [ep for ep in all_episodes if not is_val_episode(ep.name, val_set)]
+    val_eps = [ep for ep in all_episodes if is_val_episode(ep.name, val_set)]
 
     print(f"Episodes: {len(all_episodes)} total, {len(train_eps)} train, {len(val_eps)} val")
 

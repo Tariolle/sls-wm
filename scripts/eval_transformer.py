@@ -121,12 +121,9 @@ def main():
     all_eps = sorted(ep for ep in episodes_dir.glob("*")
                      if (ep / "tokens.npy").exists() and (ep / "actions.npy").exists())
 
-    # Replicate train/val split from train_transformer.py (same seed + val_ratio)
-    base_episodes = sorted(set(shift_re.sub("", ep.name) for ep in all_eps))
-    split_rng = np.random.default_rng(args.seed)
-    indices = split_rng.permutation(len(base_episodes))
-    val_count = max(1, int(len(base_episodes) * args.val_ratio))
-    val_names = {base_episodes[i] for i in indices[:val_count]}
+    # Global split (shared across all models)
+    from deepdash.data_split import get_val_episodes
+    val_names = get_val_episodes(args.episodes_dir)
 
     candidates = []
     for ep in all_eps:

@@ -395,39 +395,24 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Split episodes into train/val by base episode (shifted variants follow their base)
+    # Global episode-level split (shared across all models)
+    from deepdash.data_split import get_val_episodes, is_val_episode
+    val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
+
     episodes_dir = Path(args.episodes_dir)
     all_episodes = sorted(ep for ep in episodes_dir.glob("*")
                           if (ep / "tokens.npy").exists())
     death_episodes = set(ep.name for ep in all_episodes)
 
-    # Include expert episodes (no death on last frame)
     expert_dir = Path(args.expert_episodes_dir)
     if expert_dir.exists():
         expert_eps = sorted(ep for ep in expert_dir.glob("*")
                             if (ep / "tokens.npy").exists())
         all_episodes.extend(expert_eps)
-        print(f"Expert episodes: {len(expert_eps)} episodes")
 
-    # Identify base (non-shifted) episodes for stratified train/val split
-    shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
-    base_death = sorted(set(
-        shift_re.sub("", ep.name) for ep in all_episodes if ep.name in death_episodes))
-    base_expert = sorted(set(
-        shift_re.sub("", ep.name) for ep in all_episodes if ep.name not in death_episodes))
-    rng = np.random.default_rng(args.seed)
-    death_idx = rng.permutation(len(base_death))
-    expert_idx = rng.permutation(len(base_expert))
-    val_death_count = max(1, int(len(base_death) * args.val_ratio))
-    val_expert_count = max(1, int(len(base_expert) * args.val_ratio))
-    val_episodes = ({base_death[i] for i in death_idx[:val_death_count]} |
-                    {base_expert[i] for i in expert_idx[:val_expert_count]})
-    base_episodes = base_death + base_expert
-
-    val_count = len(val_episodes)
-    print(f"Total tokenized episodes: {len(all_episodes)} "
-          f"({len(base_episodes)} base, {len(all_episodes) - len(base_episodes)} shifted)")
-    print(f"Val: {val_death_count} death + {val_expert_count} expert = {val_count} base episodes")
+    n_train = sum(1 for ep in all_episodes if not is_val_episode(ep.name, val_set))
+    n_val = sum(1 for ep in all_episodes if is_val_episode(ep.name, val_set))
+    print(f"Total tokenized episodes: {len(all_episodes)} ({n_train} train, {n_val} val)")
 
     K = args.context_frames
     TPF = args.tokens_per_frame
@@ -442,9 +427,7 @@ def main():
         if T < K + 1:
             continue
 
-        # Strip shift suffix (e.g. ep_0006_s+2_+0 -> ep_0006) for val check
-        base_name = re.sub(r"_s[+-]\d+_[+-]\d+$", "", ep.name)
-        is_val = base_name in val_episodes
+        is_val = is_val_episode(ep.name, val_set)
         f_list = val_frames if is_val else train_frames
         a_list = val_actions if is_val else train_actions
 
