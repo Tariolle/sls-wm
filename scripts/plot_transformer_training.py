@@ -28,8 +28,8 @@ def load_log(path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--log", default="checkpoints/transformer_log.csv")
-    parser.add_argument("--output", default=None,
-                        help="Save to file instead of showing")
+    parser.add_argument("--output", default="plots/transformer_training.png",
+                        help="Output path for plot")
     args = parser.parse_args()
 
     d = load_log(args.log)

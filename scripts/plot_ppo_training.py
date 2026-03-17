@@ -83,8 +83,8 @@ def eval_bc_baseline(args):
 def main():
     parser = argparse.ArgumentParser(description="Plot PPO training curves")
     parser.add_argument("--log", default="checkpoints/controller_ppo_log.csv")
-    parser.add_argument("--output", default=None,
-                        help="Save to file instead of showing (e.g. ppo_curves.png)")
+    parser.add_argument("--output", default="plots/controller_ppo.png",
+                        help="Output path for plot")
     parser.add_argument("--bc-checkpoint", default=None,
                         help="BC controller checkpoint to evaluate as baseline")
     # Model/eval args (only used with --bc-checkpoint)
