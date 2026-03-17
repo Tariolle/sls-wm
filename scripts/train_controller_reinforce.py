@@ -334,7 +334,7 @@ def main():
     parser.add_argument("--entropy-coeff", type=float, default=0.01)
     parser.add_argument("--critic-coeff", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
-    parser.add_argument("--n-iterations", type=int, default=2000)
+    parser.add_argument("--n-iterations", type=int, default=20000)
     # Rollout
     parser.add_argument("--n-episodes", type=int, default=512)
     parser.add_argument("--max-dream-steps", type=int, default=30)
@@ -352,6 +352,8 @@ def main():
     # Output / initialization
     parser.add_argument("--pretrained", type=str, default=None,
                         help="Path to BC-pretrained controller checkpoint")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from latest checkpoint and append to CSV log")
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     parser.add_argument("--n-eval-episodes", type=int, default=512)
     parser.add_argument("--eval-interval", type=int, default=10)
@@ -417,11 +419,25 @@ def main():
 
     optimizer = torch.optim.Adam(controller.parameters(), lr=args.lr,
                                  eps=1e-5)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.n_iterations, eta_min=args.lr * 0.01)
 
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resume: load latest checkpoint, optimizer state, and find start iteration
+    start_iteration = 1
+    best_eval = -float("inf")
+    resume_ckpt = ckpt_dir / "controller_reinforce_latest.pt"
+    if args.resume and resume_ckpt.exists():
+        ckpt = torch.load(resume_ckpt, map_location=device, weights_only=False)
+        controller.load_state_dict(ckpt["controller"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        start_iteration = ckpt["iteration"] + 1
+        best_eval = ckpt.get("best_eval", -float("inf"))
+        # Restore RNG state for reproducible continuation
+        rng = np.random.default_rng()
+        rng.bit_generator.state = ckpt["rng_state"]
+        print(f"Resumed from iteration {ckpt['iteration']} "
+              f"(best_eval={best_eval:.2f})")
 
     # Fixed eval contexts (uniform, same as training distribution)
     print(f"\nPre-sampling fixed eval contexts...")
@@ -430,15 +446,17 @@ def main():
     print(f"  Eval: {args.n_eval_episodes} fixed contexts")
 
     log_path = ckpt_dir / "controller_reinforce_log.csv"
-    log_file = open(log_path, "w", newline="")
-    writer = csv.writer(log_file)
-    writer.writerow(["iteration", "mean_survival", "mean_return",
-                     "loss", "mean_value", "entropy", "lr",
-                     "eval_survival", "jump_ratio", "time_s"])
+    if args.resume and log_path.exists() and start_iteration > 1:
+        log_file = open(log_path, "a", newline="")
+        writer = csv.writer(log_file)
+    else:
+        log_file = open(log_path, "w", newline="")
+        writer = csv.writer(log_file)
+        writer.writerow(["iteration", "mean_survival", "mean_return",
+                         "loss", "mean_value", "entropy", "lr",
+                         "eval_survival", "jump_ratio", "time_s"])
 
-    best_eval = -float("inf")
-
-    print(f"\nPPO: lr={args.lr}, gamma={args.gamma}, lam={args.lam}")
+    print(f"\nPPO: lr={args.lr} (constant), gamma={args.gamma}, lam={args.lam}")
     print(f"PPO: clip_eps={args.clip_eps}, epochs={args.ppo_epochs}, "
           f"minibatch={args.minibatch_size}")
     print(f"Entropy: {args.entropy_coeff} (fixed)")
@@ -447,7 +465,20 @@ def main():
     print(f"Sampling: uniform (excluding last 2*K frames)")
     print(f"Eval: {args.n_eval_episodes} fixed contexts\n")
 
-    for iteration in range(1, args.n_iterations + 1):
+    # Pre-training eval (BC baseline before any PPO updates)
+    if start_iteration == 1:
+        controller.eval()
+        with torch.no_grad():
+            bc_surv, bc_jr = evaluate_fixed(
+                model, controller, fixed_eval_tokens, fixed_eval_actions,
+                args.max_dream_steps, args.death_threshold, device)
+        writer.writerow([
+            0, "", "", "", "", "", f"{optimizer.param_groups[0]['lr']:.1e}",
+            f"{bc_surv:.2f}", f"{bc_jr:.2f}", "0.0"])
+        log_file.flush()
+        print(f"BC baseline eval: survival={bc_surv:.2f}, jump_ratio={bc_jr:.2f}\n")
+
+    for iteration in range(start_iteration, args.n_iterations + 1):
         t0 = time.time()
 
         # Uniform training contexts (excluding last 2*K frames)
@@ -483,8 +514,6 @@ def main():
             n_epochs=args.ppo_epochs,
             minibatch_size=args.minibatch_size)
 
-        scheduler.step()
-
         elapsed = time.time() - t0
         mean_surv = survival.mean().item()
         mean_return = rollout['rewards'].sum(dim=0).mean().item()
@@ -513,6 +542,16 @@ def main():
             f"{mean_entropy:.4f}", f"{lr:.1e}",
             eval_surv, jump_ratio_str, f"{elapsed:.1f}"])
         log_file.flush()
+
+        # Save latest checkpoint for resume
+        if iteration % args.eval_interval == 0:
+            torch.save({
+                "iteration": iteration,
+                "controller": controller.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "best_eval": best_eval,
+                "rng_state": rng.bit_generator.state,
+            }, ckpt_dir / "controller_reinforce_latest.pt")
 
         eval_str = f" | eval={eval_surv} jmp={jump_ratio_str}" \
             if eval_surv else ""
