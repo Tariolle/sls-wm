@@ -203,47 +203,23 @@
 \end{frame}
 
 \begin{frame}{FSQ-VAE: Inside a Conv$\downarrow$2 Block}
-  \vspace{0.5em}
-  Each encoder level consists of:
+  Each encoder level: \quad Conv2d 3$\times$3 stride 2 $\to$ BatchNorm $\to$ SiLU $\to$ ResBlock $\times$2
 
-  \vspace{0.5em}
-  \begin{center}
-  \resizebox{\textwidth}{!}{%
-  \begin{tikzpicture}[
-    block/.style={rectangle, draw=vcolor, fill=vcolor!10, rounded corners, minimum height=1cm, minimum width=2.5cm, align=center, font=\small, line width=0.6pt},
-    res/.style={rectangle, draw=vcolor!70, fill=vcolor!5, rounded corners, minimum height=1cm, minimum width=2.5cm, align=center, font=\small, line width=0.6pt, dashed},
-    arr/.style={-{Stealth[length=3mm]}, thick},
-  ]
-    \node[block] (conv) {Conv2d 3$\times$3\\stride 2};
-    \node[block, right=0.8cm of conv] (bn1) {BatchNorm};
-    \node[block, right=0.8cm of bn1] (act1) {SiLU};
-    \node[res, right=1.2cm of act1] (rb1) {ResBlock 1};
-    \node[res, right=0.8cm of rb1] (rb2) {ResBlock 2};
-
-    \draw[arr] (conv) -- (bn1);
-    \draw[arr] (bn1) -- (act1);
-    \draw[arr] (act1) -- (rb1);
-    \draw[arr] (rb1) -- (rb2);
-  \end{tikzpicture}%
-  }
-  \end{center}
-
-  \vspace{0.5em}
-  Each \textbf{ResBlock}:
   \vspace{0.3em}
+  Each \textbf{ResBlock}:
   \begin{center}
   \resizebox{\textwidth}{!}{%
   \begin{tikzpicture}[
-    block/.style={rectangle, draw=vcolor!70, fill=vcolor!5, rounded corners, minimum height=1cm, minimum width=2.2cm, align=center, font=\small, line width=0.6pt},
-    arr/.style={-{Stealth[length=3mm]}, thick},
+    block/.style={rectangle, draw=vcolor!70, fill=vcolor!5, rounded corners, minimum height=0.8cm, minimum width=1.8cm, align=center, font=\small, line width=0.6pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
   ]
     \node[block] (c1) {Conv 3$\times$3};
-    \node[block, right=0.6cm of c1] (bn1) {BN};
-    \node[block, right=0.6cm of bn1] (act1) {SiLU};
-    \node[block, right=0.6cm of act1] (c2) {Conv 3$\times$3};
-    \node[block, right=0.6cm of c2] (bn2) {BN};
-    \node[circle, draw=vcolor, fill=vcolor!15, inner sep=4pt, font=\normalsize, right=0.8cm of bn2] (add) {$+$};
-    \node[block, right=0.8cm of add] (act2) {SiLU};
+    \node[block, right=0.5cm of c1] (bn1) {BN};
+    \node[block, right=0.5cm of bn1] (act1) {SiLU};
+    \node[block, right=0.5cm of act1] (c2) {Conv 3$\times$3};
+    \node[block, right=0.5cm of c2] (bn2) {BN};
+    \node[circle, draw=vcolor, fill=vcolor!15, inner sep=3pt, font=\normalsize, right=0.6cm of bn2] (add) {$+$};
+    \node[block, right=0.6cm of add] (act2) {SiLU};
 
     \draw[arr] (c1) -- (bn1);
     \draw[arr] (bn1) -- (act1);
@@ -252,21 +228,15 @@
     \draw[arr] (bn2) -- (add);
     \draw[arr] (add) -- (act2);
 
-    % Skip connection: x
-    \node[left=0.6cm of c1, font=\small] (xin) {$\mathbf{x}$};
+    \node[left=0.5cm of c1, font=\small] (xin) {$\mathbf{x}$};
     \draw[arr] (xin) -- (c1);
-    \draw[-{Stealth[length=3mm]}, vcolor!60, thick] (xin.north) -- ++(0,0.8) -| (add);
-
-    \node[font=\scriptsize, below=0.2cm of act1] {$f(\mathbf{x})$};
-    \node[font=\scriptsize, right=0.3cm of act2] {$\text{SiLU}(\mathbf{x} + f(\mathbf{x}))$};
+    \draw[-{Stealth[length=2.5mm]}, vcolor!60, thick] (xin.north) -- ++(0,0.6) -| (add);
   \end{tikzpicture}%
   }
   \end{center}
 
   \vspace{0.3em}
-  \begin{center}
-    \small Channels: 32 $\to$ 64 $\to$ 128. Adding ResBlocks halved reconstruction error.
-  \end{center}
+  \small Channels: 32 $\to$ 64 $\to$ 128. Adding ResBlocks halved reconstruction error.
 \end{frame}
 
 \begin{frame}{FSQ-VAE: Training}
@@ -334,7 +304,7 @@
   ]
     \node[lbl] (in) {$\mathbf{z}_{t-K:t}$, $a_{t-K:t}$\\{\tiny 329 tokens}};
     \node[block, minimum width=2cm, right=0.6cm of in] (emb) {Token + Action\\Embedding};
-    \node[block, minimum width=2cm, right=0.6cm of emb] (rope) {3D-RoPE\\{\tiny row, col, frame}};
+    \node[block, minimum width=2cm, right=0.6cm of emb] (rope) {3D-RoPE\\{\tiny row, col, frame}\\{\tiny block-causal}};
     \node[block, minimum width=2.5cm, right=0.6cm of rope, fill=mcolor!25] (blocks) {8$\times$ Transformer\\Block (256d, 8H)};
     \node[block, minimum width=2cm, right=0.6cm of blocks] (head) {Prediction\\Head};
     \node[lbl, right=0.6cm of head] (out1) {$\hat{\mathbf{z}}_{t+1}$, $\hat{d}_{t+1}$\\{\tiny 64 tokens + death}};
@@ -343,7 +313,7 @@
 
     \draw[arr] (in) -- (emb);
     \draw[arr] (emb) -- (rope);
-    \draw[arr] (rope) -- node[below, lbl] {block-causal} (blocks);
+    \draw[arr] (rope) -- (blocks);
     \draw[arr] (blocks) -- (head);
     \draw[arr] (blocks) -- (cpc);
     \draw[arr] (head) -- (out1);
