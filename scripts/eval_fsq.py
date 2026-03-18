@@ -32,6 +32,9 @@ def main():
                         help="Path to .npy file with frames (default: sample from episodes)")
     parser.add_argument("--episodes-dir", default="data/death_episodes",
                         help="Episode directory (used when --data-dir is not set)")
+    parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
+    parser.add_argument("--split", choices=["val", "train"], default="val",
+                        help="Which split to sample from (default: val)")
     parser.add_argument("--output-dir", default="eval_output")
     parser.add_argument("--num-samples", type=int, default=8)
     parser.add_argument("--num-embeddings", type=int, default=1024)
@@ -65,14 +68,24 @@ def main():
     if args.data_dir is not None:
         data = np.load(args.data_dir)  # (N, 64, 64) uint8
     else:
-        # Load frames from episodes
-        episodes_dir = Path(args.episodes_dir)
+        from deepdash.data_split import get_val_episodes, is_val_episode
+        val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
+        use_val = args.split == "val"
+
         all_frames = []
-        for ep in sorted(episodes_dir.glob("*")):
-            fp = ep / "frames.npy"
-            if fp.exists():
-                all_frames.append(np.load(fp))
+        for ep_dir in [args.episodes_dir, args.expert_episodes_dir]:
+            p = Path(ep_dir)
+            if not p.exists():
+                continue
+            for ep in sorted(p.glob("*")):
+                fp = ep / "frames.npy"
+                if not fp.exists():
+                    continue
+                is_val = is_val_episode(ep.name, val_set)
+                if is_val == use_val:
+                    all_frames.append(np.load(fp))
         data = np.concatenate(all_frames, axis=0)
+        print(f"Loaded {len(data)} frames from {args.split} split")
     if len(data) == 0:
         print("No frames found")
         return

@@ -23,3 +23,10 @@ python -u scripts/tokenize_episodes.py \
     --episodes-dir data/death_episodes \
     --batch-size 512 \
     --levels 8 5 5 5
+
+python -u scripts/tokenize_episodes.py \
+    --model fsq \
+    --checkpoint checkpoints/fsq_best.pt \
+    --episodes-dir data/expert_episodes \
+    --batch-size 512 \
+    --levels 8 5 5 5
