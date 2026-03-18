@@ -2,7 +2,7 @@
 
 ## V0 -- Ha & Schmidhuber Baseline (2026-03-03)
 
-Starting point: faithful reproduction of the World Models architecture (Ha & Schmidhuber, 2018).
+Starting point: the World Models architecture (Ha & Schmidhuber, 2018).
 
 | Component | Design |
 |-----------|--------|
@@ -20,7 +20,7 @@ Starting point: faithful reproduction of the World Models architecture (Ha & Sch
 
 ## V1 -- Current (2026-03-03 to 2026-03-17)
 
-Full architecture redesign. Every component replaced.
+Full architecture redesign, cherry-picking techniques from recent world model papers.
 
 | Component | V0 | V1 | Why |
 |-----------|----|----|-----|
@@ -30,13 +30,19 @@ Full architecture redesign. Every component replaced.
 | **Input** | 64x64 RGB | 64x64 Sobel grayscale, square crop | Noise filtering, UI removal |
 | **Decoding** | N/A (continuous) | Parallel single-step (all 65 tokens) | Real-time compatible |
 
-### V1 novel techniques
-- FSQ-structured label smoothing (Gaussian kernel over FSQ distance, sigma=0.9)
-- Dual token noise (random 5% + FSQ neighbor 5%)
-- Vertical-only shift augmentation (5x data multiplier)
-- Death token as 65th position (death prediction = token classification)
-- AC-CPC contrastive loss (from TWISTER)
-- 3D-RoPE (row, col, frame axes)
+### V1 sources
+- FSQ-VAE tokenizer (from **FSQ**, Mentzer et al. 2023)
+- Transformer world model on discrete tokens (from **IRIS**, Micheli et al. 2023)
+- Parallel single-step decoding (from **IRIS**, simplified by dropping MaskGIT iterative decoding)
+- AC-CPC contrastive loss (from **TWISTER**, Burchert et al. 2025)
+- 3D-RoPE (from **V-JEPA 2**, Bardes et al. 2025)
+- PPO controller training (from **PPO**, Schulman et al. 2017)
+
+### V1 techniques
+- FSQ-structured label smoothing (novel): Gaussian kernel over FSQ distance, sigma=0.9
+- Dual token noise (novel): random 5% + FSQ neighbor 5%
+- Vertical-only shift augmentation: 5x data multiplier
+- Death token as 65th position: death prediction = token classification
 
 ### V1 results
 - Transformer: 36.06% val acc, death F1 0.72
