@@ -55,14 +55,44 @@ def _force_topmost(window_title):
             0x0002 | 0x0001 | _SWP_NOACTIVATE)
 
 
-def preprocess_frame(rgb, crop_x, crop_y, crop_size, target_size):
-    """RGB screenshot -> 64x64 Sobel edge map (uint8)."""
+_SOBEL_X = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                        dtype=torch.float32).reshape(1, 1, 3, 3)
+_SOBEL_Y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                        dtype=torch.float32).reshape(1, 1, 3, 3)
+_sobel_device = None
+
+
+def _init_sobel_kernels(device):
+    global _SOBEL_X, _SOBEL_Y, _sobel_device
+    if _sobel_device != device:
+        _SOBEL_X = _SOBEL_X.to(device)
+        _SOBEL_Y = _SOBEL_Y.to(device)
+        _sobel_device = device
+
+
+def preprocess_frame(rgb, crop_x, crop_y, crop_size, target_size, device=None):
+    """RGB screenshot -> 64x64 Sobel edge map (uint8).
+
+    GPU Sobel (numerically identical to cv2.Sobel) + CPU INTER_AREA resize.
+    """
     cropped = rgb[crop_y:crop_y + crop_size, crop_x:crop_x + crop_size]
     gray = cv2.cvtColor(cropped, cv2.COLOR_RGB2GRAY)
-    sobel_x = cv2.Sobel(gray, cv2.CV_16S, 1, 0, ksize=3)
-    sobel_y = cv2.Sobel(gray, cv2.CV_16S, 0, 1, ksize=3)
-    edges = cv2.convertScaleAbs(cv2.magnitude(
-        sobel_x.astype(np.float32), sobel_y.astype(np.float32)))
+
+    if device is not None and device.type == "cuda":
+        _init_sobel_kernels(device)
+        gray_t = torch.from_numpy(gray).float().unsqueeze(0).unsqueeze(0).to(device)
+        padded = torch.nn.functional.pad(gray_t, (1, 1, 1, 1), mode='reflect')
+        sx = torch.nn.functional.conv2d(padded, _SOBEL_X)
+        sy = torch.nn.functional.conv2d(padded, _SOBEL_Y)
+        mag = torch.sqrt(sx ** 2 + sy ** 2)
+        edges = torch.clamp(torch.round(mag), 0, 255).to(torch.uint8)
+        edges = edges.squeeze().cpu().numpy()
+    else:
+        sobel_x = cv2.Sobel(gray, cv2.CV_16S, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_16S, 0, 1, ksize=3)
+        edges = cv2.convertScaleAbs(cv2.magnitude(
+            sobel_x.astype(np.float32), sobel_y.astype(np.float32)))
+
     return cv2.resize(edges, (target_size, target_size),
                       interpolation=cv2.INTER_AREA)
 
@@ -190,7 +220,7 @@ def main():
 
         # --- Sobel preprocess ---
         t1 = time.perf_counter()
-        edge_frame = preprocess_frame(img, crop_x, crop_y, crop_size, 64)
+        edge_frame = preprocess_frame(img, crop_x, crop_y, crop_size, 64, device)
         t_sobel = time.perf_counter() - t1
 
         if not active:
