@@ -102,7 +102,7 @@
 % ==========================================================
 
 \begin{frame}{Data Collection}
-  \vspace{1em}
+  \vspace{0.75em}
   \begin{center}
     \begin{tabular}{cccc}
       \includegraphics[width=0.2\textwidth]{preprocessing_1_original.png} &
@@ -192,7 +192,7 @@
     \node[dims, below=0.15cm of out] {1ch};
 
     % Labels
-    \node[above=0.3cm of c1, font=\scriptsize, vcolor] {Encoder};
+    \node[above=0.3cm of c2, font=\scriptsize, vcolor] {Encoder};
     \node[above=0.3cm of dc2, font=\scriptsize, vcolor] {Decoder};
   \end{tikzpicture}%
   }
@@ -540,6 +540,7 @@
 \end{frame}
 
 \begin{frame}{Controller: Training Protocol}
+  \vspace{0.5em}
   \textbf{Stage 1: Behavioral Cloning} (initialization)
   \begin{itemize}
     \item Death + expert episodes, class-weighted BCE (2.6$\times$ jump weight)
@@ -597,7 +598,7 @@
   \begin{center}
     \small
     Screen capture at 30 FPS $\to$ Sobel $\to$ V $\to$ M $\to$ C $\to$ game input \\[0.3em]
-    Game stepped every 8 ticks at 240 TPS $=$ 30 decisions/sec
+    Full pipeline must complete in $<$33ms to maintain 30 FPS real-time play
   \end{center}
 \end{frame}
 
@@ -647,9 +648,9 @@
     \item \textbf{$\beta$-VAE}: fundamentally blurry. Wide range of hyperparameter search before switching to VQ/FSQ
     \item \textbf{LR $10^{-3}$ without augmentation}: 13.5pp train/val gap at epoch 29, model memorizing
     \item \textbf{FSQ neighbor substitution}: no measurable accuracy impact (same curves), but theoretically sound and free to keep
-    \item \textbf{Pure RL controller}: CMA-ES, REINFORCE, PPO all flatlined at $\sim$12 steps. BC pretraining required
+    \item \textbf{Pure RL controller}: CMA-ES converged to $\sim$12 steps (local optimum). BC pretraining required
     \item \textbf{Death-only training data}: 15$\times$ death oversample caused memorization (44pp precision gap). Fixed: 5$\times$ + expert episodes
-    \item \textbf{MaskGIT iterative decoding}: degraded dream quality on 64-token grid. Parallel single-step works better (bidirectional attention sufficient)
+    \item \textbf{MaskGIT iterative decoding}: degraded dream quality on 64-token grid. Parallel single-step worked better (bidirectional attention sufficient)
     \item \textbf{torch.compile on full model}: 23+ min compilation. Solved by compiling backbone only
   \end{itemize}
 \end{frame}
