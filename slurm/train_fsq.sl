@@ -23,6 +23,7 @@ module load aidl/pytorch/2.6.0-cuda12.6
 
 python -u scripts/train_fsq.py \
     --episodes-dir data/death_episodes \
+    --expert-episodes-dir data/expert_episodes \
     --epochs 200 \
     --batch-size 2048 \
     --lr 1e-3 \
@@ -30,7 +31,6 @@ python -u scripts/train_fsq.py \
     --levels 8 5 5 5 \
     --alpha-slow 0.1 \
     --alpha-uniform 0.01 \
-    --val-ratio 0.1 \
     --seed 42 \
     --amp \
     --compile
