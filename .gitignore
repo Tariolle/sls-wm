@@ -7,7 +7,7 @@ data/val/
 data/death_episodes/*/tokens.npy
 data/expert_episodes/*/tokens.npy
 data/videos/
-eval_output/data/death_episodes/*_s[+-]*_[+-]*/
+eval_output/
 data/death_episodes/*_s*/
 data/expert_episodes/*_s*/
 slurm/logs/
