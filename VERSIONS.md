@@ -65,6 +65,12 @@ See [experiments/v1/](experiments/v1/) for full logs and hyperparameters.
 
 ### Changes from V1
 
+#### Vision (V) / FSQ-VAE
+| Change | Motivation |
+|--------|-----------|
+| **Retrain on global episode-level split** | V1 had no strict split for FSQ. Prevents frame leakage between FSQ training and downstream validation. |
+| **Add expert episodes to training data** | V1 trained on death episodes only (~179K frames). Adding expert episodes (~33K frames) gives the encoder clean successful gameplay. |
+
 #### Transformer (M)
 | Change | Motivation |
 |--------|-----------|
