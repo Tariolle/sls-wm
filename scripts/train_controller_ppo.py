@@ -73,7 +73,7 @@ def sample_contexts(episodes, n, context_frames, rng):
 
 
 def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
-                  max_steps, device, warmup_steps):
+                  max_steps, device, warmup_steps, jump_penalty=0.0):
     """Roll out dreams and cache data for PPO updates.
 
     Uses soft continuation gating: instead of hard death cutoff,
@@ -130,7 +130,10 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
             all_h_t.append(h_t.float())
             all_actions.append(action)
             all_old_log_probs.append(log_prob)
-            all_rewards.append(torch.ones(B, device=device))
+            reward = torch.ones(B, device=device)
+            if jump_penalty > 0:
+                reward -= jump_penalty * action.float()
+            all_rewards.append(reward)
             all_values.append(value)
             all_continuations.append(c_t)
 
@@ -377,6 +380,8 @@ def main():
     parser.add_argument("--n-episodes", type=int, default=512)
     parser.add_argument("--max-dream-steps", type=int, default=30)
     parser.add_argument("--death-threshold", type=float, default=0.5)
+    parser.add_argument("--jump-penalty", type=float, default=0.05,
+                        help="Per-jump reward penalty to discourage over-jumping")
     parser.add_argument("--context-frames", type=int, default=4)
     # Policy architecture (CNN)
     parser.add_argument("--token-embed-dim", type=int, default=16)
@@ -546,7 +551,8 @@ def main():
             model, controller, ctx_tokens, ctx_actions,
             max_steps=args.max_dream_steps,
             device=device,
-            warmup_steps=args.context_frames)
+            warmup_steps=args.context_frames,
+            jump_penalty=args.jump_penalty)
 
         if rollout is None:
             print(f"Iter {iteration}: all died during warmup, skipping")

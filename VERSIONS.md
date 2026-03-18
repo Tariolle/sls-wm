@@ -85,6 +85,7 @@ See [experiments/v1/](experiments/v1/) for full logs and hyperparameters.
 | **Percentile-based advantage normalization** | EMA of 5th-95th percentile range instead of mean/std. Prevents outlier returns from dominating. |
 | **EMA target critic** (decay 0.98) | Stabilizes value learning during imagination. |
 | **Symlog discrete value prediction** (255 bins, two-hot) | Scale-robust critic. Used by DreamerV3 and TWISTER. Low impact with +1/step reward but doesn't hurt. |
+| **Jump penalty** (0.05/jump) | V1 over-jumped: wrong-timed jumps delay death by 2-3 frames, creating a local optimum. Small penalty breaks the tie. |
 | **Constant LR for PPO** | V1 cosine schedule decayed too early, caused plateau before 9K iters. Switch to constant LR. |
 | **Longer PPO training** | V1 only ran 9K iters. Need 20K+ to evaluate properly. |
 
