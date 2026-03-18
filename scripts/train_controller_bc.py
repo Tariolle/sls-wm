@@ -128,6 +128,7 @@ def main():
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
+    rng = np.random.default_rng(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
