@@ -239,11 +239,10 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
             frame_tokens = torch.cat([ctx, frame_tokens[:, -1:]], dim=1)
 
         with torch.autocast(device.type, dtype=torch.float16, enabled=use_amp):
-            logits, cpc_loss, mask = model(frame_tokens, actions)
-            # Loss on masked tokens only
+            logits, cpc_loss = model(frame_tokens, actions)
             token_loss = focal_cross_entropy(
-                logits[mask],      # (n_masked, vocab)
-                target[mask],      # (n_masked,)
+                logits.reshape(-1, logits.size(-1)),  # (B*65, vocab)
+                target.reshape(-1),                    # (B*65,)
                 gamma=focal_gamma,
                 soft_target_matrix=soft_target_matrix,
                 label_smoothing=label_smoothing,
@@ -303,12 +302,11 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
         target = frame_tokens[:, -1]
 
         with torch.autocast(device.type, dtype=torch.float16, enabled=use_amp):
-            logits, cpc_loss, mask = model(frame_tokens, actions, mask_ratio=1.0)
+            logits, cpc_loss = model(frame_tokens, actions)
 
-        # All tokens masked -> loss on all positions (same loss as training)
         token_loss = focal_cross_entropy(
-            logits[mask],
-            target[mask],
+            logits.reshape(-1, logits.size(-1)),
+            target.reshape(-1),
             gamma=focal_gamma,
             soft_target_matrix=soft_target_matrix,
             label_smoothing=label_smoothing,

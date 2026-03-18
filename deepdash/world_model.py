@@ -1,7 +1,7 @@
-"""Transformer world model V6 — masked prediction + block-causal + 3D-RoPE + death token + AC-CPC.
+"""Transformer world model — block-causal + 3D-RoPE + death token + AC-CPC.
 
-Predicts next-frame tokens given past frames + actions using
-masked token prediction (parallel decoding at inference).
+Predicts all next-frame tokens in parallel given past frames + actions.
+All target positions use a learnable query embedding (no ground truth leakage).
 Death is represented as a token (not a separate head) — the 65th position
 of each frame block predicts ALIVE or DEATH via the same cross-entropy loss.
 
@@ -10,7 +10,6 @@ Sequence format (K context frames, T tokens/frame):
 
 Block-causal attention: bidirectional within each frame/action block, causal across.
 Target frame is bidirectional within (all target tokens see each other).
-Training: random mask → predict masked tokens. Inference: iterative parallel decode.
 
 3D-RoPE: Each token gets (row, col, frame_idx) coordinates. Head dimensions are
 split into three bands with separate frequency bases — lower theta for spatial
@@ -19,13 +18,10 @@ Inspired by V-JEPA 2 (Bardes et al., 2025).
 
 References:
     - IRIS (Micheli et al., ICLR 2023): block-causal attention on VQ tokens
-    - Masked token prediction with parallel decoding
     - TWISTER (Burchert et al., ICLR 2025): AC-CPC contrastive loss
     - Su et al., 2021: RoFormer / Rotary Position Embeddings
     - Bardes et al., 2025: V-JEPA 2 — 3D factored RoPE
 """
-
-import math
 
 import torch
 import torch.nn as nn
@@ -294,24 +290,23 @@ class WorldModel(nn.Module):
 
         return total_loss / max(n_pairs, 1)
 
-    def forward(self, frame_tokens, actions, mask_ratio=None):
-        """Forward pass with masked token prediction.
+    def forward(self, frame_tokens, actions):
+        """Forward pass: predict all target tokens from context.
+
+        All target positions are replaced with mask_embed (no ground truth
+        leakage). This matches inference exactly.
 
         Args:
             frame_tokens: (B, K+1, tokens_per_frame+1) long — K context + 1 target.
                           Last column is the status token (ALIVE or DEATH).
             actions: (B, K) long — action for each context frame.
-            mask_ratio: float or None. If None, sampled from cosine schedule.
-                        Use 1.0 for validation (all tokens masked).
 
         Returns:
-            logits: (B, block_size, full_vocab_size) — predictions for target positions.
+            logits: (B, block_size, full_vocab_size) — predictions for all target positions.
             cpc_loss: scalar — AC-CPC contrastive loss.
-            mask: (B, block_size) bool — True at masked positions.
         """
         B = frame_tokens.size(0)
         K = self.context_frames
-        device = frame_tokens.device
 
         # Build interleaved context: [f0(65) a0 f1(65) a1 ... fK-1(65) aK-1]
         parts = []
@@ -320,27 +315,8 @@ class WorldModel(nn.Module):
             act = self.action_embed(actions[:, i])
             parts.append(act.unsqueeze(1))                        # (B, 1, D)
 
-        # Randomly mask target frame tokens
-        target_embed = self.token_embed(frame_tokens[:, K])  # (B, 65, D)
-        if mask_ratio is None:
-            # Cosine schedule: sample ratio, then threshold random noise
-            # Uses torch ops only (no .item()) so torch.compile traces one graph
-            r = torch.cos(torch.rand(1, device=device) * (math.pi * 0.5))
-        else:
-            r = torch.tensor(mask_ratio, device=device)
-
-        # Rank-based masking: each position gets a random score,
-        # mask the fraction r of positions (at least 1)
-        noise = torch.rand(self.block_size, device=device)
-        ranks = noise.argsort().argsort()  # rank 0 = lowest noise
-        n_mask = torch.clamp((r * self.block_size).long(), min=1)
-        mask = (ranks < n_mask).unsqueeze(0).expand(B, -1)
-
-        target_embed = torch.where(
-            mask.unsqueeze(-1),
-            self.mask_embed.expand(B, self.block_size, -1),
-            target_embed,
-        )
+        # All target positions use mask_embed (no peeking at ground truth)
+        target_embed = self.mask_embed.expand(B, self.block_size, -1)
 
         parts.append(target_embed)
         x = torch.cat(parts, dim=1)  # (B, seq_len, D)
@@ -355,7 +331,7 @@ class WorldModel(nn.Module):
 
         cpc_loss = self._compute_cpc_loss(x, actions)
 
-        return logits, cpc_loss, mask
+        return logits, cpc_loss
 
     @staticmethod
     def _sample_token(logits, temperature, top_k, top_p):
