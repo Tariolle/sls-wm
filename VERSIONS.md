@@ -82,6 +82,11 @@ See [experiments/v1/](experiments/v1/) for full logs and hyperparameters.
 | **Constant LR for PPO** | V1 cosine schedule decayed too early, caused plateau before 9K iters. Switch to constant LR. |
 | **Longer PPO training** | V1 only ran 9K iters. Need 20K+ to evaluate properly. |
 
+#### Ablations
+| Change | Motivation |
+|--------|-----------|
+| **Re-ablate FSQ neighbor substitution** | No measurable impact in V1, but may interact differently with masking removal + stronger AC-CPC. |
+
 ### V2 goals
 - Consistent train/inference behavior (no masking mismatch)
 - Stronger h_t representations via AC-CPC

@@ -25,8 +25,7 @@
 ## Novel Contributions
 
 - **FSQ-structured label smoothing**: Gaussian kernel over FSQ coordinate distance instead of uniform smoothing. +0.81pp val acc, -31% CPC loss.
-- **Real-time World Models deployment**: First known agent deployed on a real game via screen capture at 30 FPS (no game API).
-- **Parallel single-step decoding**: Bidirectional attention within frames makes iterative MaskGIT unnecessary on small token grids.
+- **Real-time World Models deployment**: Screen capture agent on a real game at 30 FPS (no game API).
 
 ## Pipeline
 
