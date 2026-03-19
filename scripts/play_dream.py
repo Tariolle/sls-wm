@@ -130,6 +130,8 @@ def main():
     parser.add_argument("--n-layers", type=int, default=8)
     parser.add_argument("--tokens-per-frame", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--max-steps", type=int, default=30,
+                        help="Max dream steps before auto-restart (0 = unlimited)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -298,10 +300,11 @@ def main():
         frame_img = decode_tokens(vae, pred_np, device)
         steps += 1
 
-        if death_prob_val > 0.5:
+        if death_prob_val > 0.5 or (args.max_steps > 0 and steps >= args.max_steps):
             dead = True
             best_steps = max(best_steps, steps)
-            print(f"  DEAD at step {steps} (death_prob={death_prob_val:.3f})")
+            reason = f"death_prob={death_prob_val:.3f}" if death_prob_val > 0.5 else "max steps"
+            print(f"  DEAD at step {steps} ({reason})")
         else:
             # Shift context
             act_t = torch.tensor([[action]], dtype=torch.long, device=device)
