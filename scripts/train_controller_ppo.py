@@ -499,10 +499,12 @@ def main():
               f"(best_eval={best_eval:.2f})")
 
     # Fixed eval contexts (from val episodes only)
+    # Use a dedicated RNG so eval contexts are identical across resumes
+    eval_rng = np.random.default_rng(args.seed)
     print(f"\nPre-sampling fixed eval contexts (val episodes)...")
     eval_source = val_episodes if val_episodes else episodes
     fixed_eval_tokens, fixed_eval_actions = sample_contexts(
-        eval_source, args.n_eval_episodes, args.context_frames, rng)
+        eval_source, args.n_eval_episodes, args.context_frames, eval_rng)
     print(f"  Eval: {args.n_eval_episodes} fixed contexts from {len(eval_source)} val episodes")
 
     log_path = ckpt_dir / "controller_ppo_log.csv"
