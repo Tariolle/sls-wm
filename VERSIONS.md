@@ -61,42 +61,73 @@ See [experiments/v1/](experiments/v1/) for full logs and hyperparameters.
 
 ---
 
-## V2 -- Planned
+## V2 -- Complete (2026-03-18 to 2026-03-20)
 
-### Changes from V1
+### Changes applied
 
 #### Vision (V) / FSQ-VAE
-| Change | Motivation |
-|--------|-----------|
-| **Retrain on global episode-level split** | V1 had no strict split for FSQ. Prevents frame leakage between FSQ training and downstream validation. |
-| **Add expert episodes to training data** | V1 trained on death episodes only (~179K frames). Adding expert episodes (~33K frames) gives the encoder clean successful gameplay. |
+- Retrained on global episode-level split + expert episodes. Val recon 2.49 (vs V1 2.57).
 
 #### Transformer (M)
-| Change | Motivation |
-|--------|-----------|
-| **Remove masking entirely** | Fix train/inference mismatch. Delete mask_embed, cosine schedule, partial masking code. Always predict all tokens. |
-| **Increase AC-CPC weight** (0.1 -> sweep 0.5, 1.0) | Richer h_t representations. Complementary with masking removal. |
-| **torch.compile full model** | Static graph now possible with masking removed. |
+- Removed masking entirely (all tokens predicted, no ground truth leakage)
+- AC-CPC weight 0.1 -> 0.5
+- torch.compile full model (static graph)
+- Val acc 34.2% (vs V1 36.1%), death F1 0.76 (vs V1 0.72), train/val gap halved (1.7% vs 3.7%)
 
 #### Controller (C) / PPO
-| Change | Motivation |
-|--------|-----------|
-| **Soft continuation gating** | Use existing death token probability as c_t = 1 - death_prob. Multiply into returns: R = r + gamma * c_t * V. Replaces hard threshold cutoff. |
-| **Percentile-based advantage normalization** | EMA of 5th-95th percentile range instead of mean/std. Prevents outlier returns from dominating. |
-| **EMA target critic** (decay 0.98) | Stabilizes value learning during imagination. |
-| **Symlog discrete value prediction** (255 bins, two-hot) | Scale-robust critic. Used by DreamerV3 and TWISTER. Low impact with +1/step reward but doesn't hurt. |
-| **Jump penalty** (0.05/jump) | V1 over-jumped: wrong-timed jumps delay death by 2-3 frames, creating a local optimum. Small penalty breaks the tie. |
-| **Constant LR for PPO** | V1 cosine schedule decayed too early, caused plateau before 9K iters. Switch to constant LR. |
-| **Longer PPO training** | V1 only ran 9K iters. Need 20K+ to evaluate properly. |
+- Jump penalty 0.2/jump, BC class weight 1.5x (was 2.6x)
+- Percentile-based advantage normalization (EMA 5th-95th)
+- EMA target critic (decay 0.98)
+- Constant LR, 15K iterations
+- BC val acc 83.6% (vs V1 78%), PPO best eval 24.68 (vs V1 23.04), jump ratio 0.27 (vs V1 0.43)
 
-#### Ablations
-| Change | Motivation |
-|--------|-----------|
-| **Re-ablate FSQ neighbor substitution** | No measurable impact in V1, but may interact differently with masking removal + stronger AC-CPC. |
+### V2 results
+- **Level 1 progress**: 12% (vs V1 10%)
+- Less random jumping, but timing still off by 1-2 frames
+- World model understands jump orbs/pads, controller ignores them (representation exists, PPO signal insufficient)
+- GPU Sobel in deployment: 7ms (was 10ms CPU)
 
-### V2 goals
-- Consistent train/inference behavior (no masking mismatch)
-- Stronger h_t representations via AC-CPC
-- Smooth dream termination via soft continuation gating
-- More stable PPO via percentile advantages + EMA critic
-- Better dream quality, higher survival on complex obstacle sequences
+### What worked
+- Masking removal: halved train/val gap, more honest metrics, no quality loss
+- Jump penalty (0.2) + lower BC weight (1.5x): jump ratio 0.43 -> 0.27, less over-jumping
+- Percentile advantage normalization + EMA critic: stable training, no NaN
+- Strict data split: proper train/val separation across all models
+- AC-CPC 0.5: death F1 improved (0.72 -> 0.76), dream quality visibly better
+
+### What didn't work
+- **Soft continuation gating**: agent exploited airtime (jump once, idle while airborne for full reward). Reverted to hard death cutoff.
+- **Symlog discrete value prediction**: skipped, +1/step reward doesn't need it
+- **Resume state loss**: percentile normalizer + EMA critic reset on resume caused artificial eval jump. Fixed by saving/restoring in checkpoint.
+- **Eval context RNG**: shared with training RNG, changed on resume. Fixed with dedicated eval RNG.
+- **FSQ neighbor substitution ablation**: not run, deprioritized
+
+### V2 known issues
+- **Jump timing**: main bottleneck. Off by 1-2 frames at 30 FPS.
+- **Dream/reality gap**: policy learned in dream doesn't fully transfer.
+- **Controller ignores game mechanics**: h_t encodes jump orbs/pads but PPO doesn't learn to use them.
+
+### V2 next experiments
+- **AC-CPC weight 1.0** (in progress)
+- **Longer rollouts** (30 -> 45 steps)
+- **PMPO** (Dreamer 4): use sign(advantage) instead of magnitude
+- **Multi-token prediction** (Dreamer 4): predict 8 actions ahead from h_t for better timing
+
+---
+
+## V3 -- Ideas
+
+Goal: maximize model quality while fitting within the 30 FPS inference window.
+
+#### Vision (V) / FSQ-VAE
+| Idea | Description |
+|------|-------------|
+| **Asymmetric encoder/decoder** | Lighter encoder (1 ResBlock/stage), heavier decoder (3 ResBlocks/stage). Faster deploy since only encoder runs at inference. |
+| **FSQ levels sweep** | Try [8,8,5,5]=1600 or [10,5,5,4]=1000 to redistribute capacity across dimensions. |
+| **Larger input grid** | 16x16 instead of 8x8 for finer spatial resolution. Better capture of small game mechanics (jump pads, orbs). |
+
+#### Transformer (M)
+| Idea | Description |
+|------|-------------|
+| **Scale up model** | Increase embedding dim (256 -> 384/512) and/or depth (8 -> 12 layers). Push model size to the edge of 30 FPS budget. |
+| **Distill to smaller model** | Train large, distill to deployment-sized model. Best of both worlds. |
+| **Separate space/time attention** (Dreamer 4) | 3 space-only + 1 temporal layer, repeated. Space layers skip KV cache from prior frames. More relevant at larger grid or longer context. |
