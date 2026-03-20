@@ -79,7 +79,7 @@ python -u scripts/train_transformer.py \
     --n-layers 8 \
     --dropout 0.1 \
     --weight-decay 0.01 \
-    --cpc-weight 0.5 \
+    --cpc-weight 1.0 \
     --token-noise 0.05 \
     --fsq-noise 0.05 \
     --label-smoothing 0.1 \
