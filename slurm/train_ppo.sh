@@ -38,7 +38,7 @@ python -u scripts/train_controller_ppo.py \
     --transformer-checkpoint checkpoints/transformer_best.pt \
     --pretrained checkpoints/controller_bc_best.pt \
     $RESUME_FLAG \
-    --n-iterations 15000 \
+    --n-iterations 5000 \
     --n-episodes 512 \
     --lr 1e-4 \
     --gamma 0.995 \

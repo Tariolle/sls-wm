@@ -414,7 +414,7 @@ def main():
     parser.add_argument("--entropy-coeff", type=float, default=0.01)
     parser.add_argument("--critic-coeff", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
-    parser.add_argument("--n-iterations", type=int, default=15000)
+    parser.add_argument("--n-iterations", type=int, default=5000)
     # Rollout
     parser.add_argument("--n-episodes", type=int, default=512)
     parser.add_argument("--max-dream-steps", type=int, default=30)
