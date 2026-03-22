@@ -248,18 +248,12 @@ class CNNPolicy(nn.Module):
         # Learnable token embedding (separate from world model's)
         self.token_embed = nn.Embedding(vocab_size, token_embed_dim)
 
-        # CNN on (token_embed_dim, grid_size, grid_size)
+        # CNN on (token_embed_dim, 8, 8)
         self.conv1 = nn.Conv2d(token_embed_dim, 32, 3, stride=1, padding=1)
         self.conv2 = nn.Conv2d(32, 64, 3, stride=1, padding=1)
 
-        # MaxPool until spatial dim <= 2
-        n_pools = 0
-        s = grid_size
-        while s > 2:
-            s //= 2
-            n_pools += 1
-        self.n_pools = n_pools
-        cnn_out = 64 * (grid_size // (2 ** n_pools)) ** 2
+        # After 2x MaxPool(2): 8->4->2, so 64*2*2 = 256
+        cnn_out = 64 * (grid_size // 4) ** 2  # 256
         head_input = cnn_out + h_dim  # 512
 
         # Actor-critic heads (zero-init like IRIS/DIAMOND)
@@ -291,12 +285,10 @@ class CNNPolicy(nn.Module):
         x = self.token_embed(token_ids)          # (B, 64, embed_dim)
         x = x.permute(0, 2, 1).reshape(B, -1, G, G)  # (B, embed_dim, 8, 8)
 
-        # CNN: conv1 + pool, conv2 + remaining pools
-        x = F.relu(F.max_pool2d(self.conv1(x), 2))
-        x = F.relu(self.conv2(x))
-        for _ in range(self.n_pools - 1):
-            x = F.max_pool2d(x, 2)
-        x = x.flatten(1)
+        # CNN
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))    # (B, 32, 4, 4)
+        x = F.relu(F.max_pool2d(self.conv2(x), 2))    # (B, 64, 2, 2)
+        x = x.flatten(1)                               # (B, 256)
 
         # Concat with temporal context
         return torch.cat([x, h_t], dim=1)               # (B, 512)
