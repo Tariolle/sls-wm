@@ -349,7 +349,7 @@ def main():
     parser.add_argument("--context-frames", type=int, default=4)
     parser.add_argument("--vocab-size", type=int, default=1000,
                         help="Tokenizer vocabulary size (1000 for FSQ, 1024 for VQ-VAE)")
-    parser.add_argument("--tokens-per-frame", type=int, default=256,
+    parser.add_argument("--tokens-per-frame", type=int, default=64,
                         help="Tokens per frame (64 for 8x8 FSQ, 36 for 6x6 VQ-VAE)")
     parser.add_argument("--embed-dim", type=int, default=256)
     parser.add_argument("--n-heads", type=int, default=8)

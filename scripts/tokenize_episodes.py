@@ -65,7 +65,6 @@ def main():
     parser.add_argument("--embedding-dim", type=int, default=8)
     # FSQ specific
     parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5])
-    parser.add_argument("--grid-size", type=int, default=16)
     # Shift augmentation
     parser.add_argument("--shifts", type=int, nargs="+", default=None,
                         help="Horizontal pixel shifts (e.g. -4 -2 0 2 4)")
@@ -82,8 +81,8 @@ def main():
 
     if args.model == "fsq":
         from deepdash.fsq import FSQVAE
-        model = FSQVAE(levels=args.levels, grid_size=args.grid_size).to(device)
-        tokens_per_frame = 256
+        model = FSQVAE(levels=args.levels).to(device)
+        tokens_per_frame = 64
     else:
         from deepdash.vqvae import VQVAE
         model = VQVAE(num_embeddings=args.num_embeddings,

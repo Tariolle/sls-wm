@@ -31,7 +31,7 @@ python -u scripts/train_controller_bc.py \
     --embed-dim 256 \
     --n-heads 8 \
     --n-layers 8 \
-    --tokens-per-frame 256 \
+    --tokens-per-frame 64 \
     --context-frames 4 \
     --dropout 0.1 \
     --checkpoint-dir checkpoints \
