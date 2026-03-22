@@ -113,14 +113,9 @@ See [experiments/v1/](experiments/v1/) for full logs and hyperparameters.
 
 ---
 
-## V3 -- Planned
+## V3 -- Ideas
 
 Goal: maximize model quality while fitting within the 30 FPS inference window.
-
-### First change
-- **16x16 input grid**: 256 tokens/frame instead of 64. Finer spatial resolution for jump pads, orbs, and precise obstacle boundaries. Benchmarked at 13.8ms (vs 13.4ms for 8x8). Requires full pipeline retrain.
-
-### Further ideas
 
 #### Vision (V) / FSQ-VAE
 | Idea | Description |
@@ -133,9 +128,19 @@ Goal: maximize model quality while fitting within the 30 FPS inference window.
 |------|-------------|
 | **Scale up model** | Increase embedding dim (256 -> 384/512) and/or depth (8 -> 12 layers). Push model size to the edge of 30 FPS budget. |
 | **Distill to smaller model** | Train large, distill to deployment-sized model. Best of both worlds. |
-| **Separate space/time attention** (Dreamer 4) | 3 space-only + 1 temporal layer, repeated. Space layers skip KV cache from prior frames. More relevant at larger grid. |
+| **Separate space/time attention** (Dreamer 4) | 3 space-only + 1 temporal layer, repeated. Space layers skip KV cache from prior frames. |
+| **More training data** | Record on more diverse levels and custom levels. |
+| **Lower death threshold** (0.5 -> 0.3) | Stricter dream deaths for more precise jump timing. |
+| **Context frames 4 -> 6** | More temporal context for obstacle distance estimation. |
 
 #### Controller (C) / PPO
 | Idea | Description |
 |------|-------------|
-| **Multi-token prediction** | Already implemented (8-step). Evaluate impact via ablation. |
+| **MTP ablation** | Already implemented (8-step). Evaluate impact by comparing with/without. |
+
+### Discarded ideas
+- ~~16x16 grid~~: 8x8 dream quality is sufficient, timing issue is dream/reality gap not spatial resolution
+- ~~PMPO~~: oscillated with binary action space
+- ~~Soft continuation gating~~: agent exploited airtime
+- ~~Symlog value prediction~~: unnecessary for +1/step reward
+- ~~KL penalty to BC prior~~: caps improvement ceiling
