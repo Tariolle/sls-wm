@@ -129,6 +129,7 @@ Goal: maximize model quality while fitting within the 30 FPS inference window.
 | **Scale up model** | Increase embedding dim (256 -> 384/512) and/or depth (8 -> 12 layers). Push model size to the edge of 30 FPS budget. |
 | **Distill to smaller model** | Train large, distill to deployment-sized model. Best of both worlds. |
 | **Separate space/time attention** (Dreamer 4) | 3 space-only + 1 temporal layer, repeated. Space layers skip KV cache from prior frames. |
+| **Multi-level feature extraction** (V-JEPA 2.1) | Concatenate h_t from multiple intermediate transformer layers. Gives controller access to different abstraction levels (spatial edges + temporal dynamics). |
 | **More training data** | Record on more diverse levels and custom levels. |
 | **Lower death threshold** (0.5 -> 0.3) | Stricter dream deaths for more precise jump timing. |
 | **Context frames 4 -> 6** | More temporal context for obstacle distance estimation. |
