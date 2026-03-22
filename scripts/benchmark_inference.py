@@ -71,7 +71,7 @@ def main():
 
     model = WorldModel(
         vocab_size=1000, embed_dim=256, n_heads=8, n_layers=8,
-        context_frames=4, tokens_per_frame=64,
+        context_frames=4, tokens_per_frame=256,
     ).to(device)
     state = torch.load(args.checkpoint, map_location=device, weights_only=True)
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}

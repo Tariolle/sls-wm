@@ -25,7 +25,7 @@ def load_tokenizer(args, device):
     if args.tokenizer == "fsq":
         from deepdash.fsq import FSQVAE
         model = FSQVAE(levels=args.levels).to(device)
-        grid_size = 8
+        grid_size = 16
     else:
         from deepdash.vqvae import VQVAE
         model = VQVAE(num_embeddings=args.num_embeddings,
@@ -56,7 +56,7 @@ def main():
     parser.add_argument("--rollout-steps", type=int, default=20)
     parser.add_argument("--context-frames", type=int, default=4)
     parser.add_argument("--vocab-size", type=int, default=1000)
-    parser.add_argument("--tokens-per-frame", type=int, default=64)
+    parser.add_argument("--tokens-per-frame", type=int, default=256)
     parser.add_argument("--embed-dim", type=int, default=256)
     parser.add_argument("--n-heads", type=int, default=8)
     parser.add_argument("--n-layers", type=int, default=8)

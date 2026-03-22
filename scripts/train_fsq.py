@@ -134,6 +134,8 @@ def main():
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5],
                         help="FSQ quantization levels per channel")
+    parser.add_argument("--grid-size", type=int, default=16,
+                        help="Spatial grid size (8 or 16)")
     parser.add_argument("--alpha-slow", type=float, default=0.1,
                         help="Weight for GRWM temporal slowness loss")
     parser.add_argument("--alpha-uniform", type=float, default=0.01,
@@ -184,7 +186,7 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
                             shuffle=False, num_workers=0, pin_memory=False)
 
-    model = FSQVAE(levels=args.levels).to(device)
+    model = FSQVAE(levels=args.levels, grid_size=args.grid_size).to(device)
     if args.resume:
         state = torch.load(args.resume, map_location=device, weights_only=True)
         state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}

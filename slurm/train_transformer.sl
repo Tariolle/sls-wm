@@ -73,7 +73,7 @@ python -u scripts/train_transformer.py \
     --lr 2e-3 \
     --context-frames 4 \
     --vocab-size 1000 \
-    --tokens-per-frame 64 \
+    --tokens-per-frame 256 \
     --embed-dim 256 \
     --n-heads 8 \
     --n-layers 8 \

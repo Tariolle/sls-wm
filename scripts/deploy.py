@@ -110,11 +110,12 @@ def main():
                         help="Jump probability threshold (higher = less jumping)")
     # Model architecture
     parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5])
+    parser.add_argument("--grid-size", type=int, default=16)
     parser.add_argument("--vocab-size", type=int, default=1000)
     parser.add_argument("--embed-dim", type=int, default=256)
     parser.add_argument("--n-heads", type=int, default=8)
     parser.add_argument("--n-layers", type=int, default=8)
-    parser.add_argument("--tokens-per-frame", type=int, default=64)
+    parser.add_argument("--tokens-per-frame", type=int, default=256)
     parser.add_argument("--context-frames", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
     args = parser.parse_args()
@@ -125,7 +126,7 @@ def main():
 
     # --- Load models ---
     print("Loading FSQ-VAE...")
-    vae = FSQVAE(levels=args.levels).to(device)
+    vae = FSQVAE(levels=args.levels, grid_size=args.grid_size).to(device)
     state = torch.load(args.vae_checkpoint, map_location=device,
                        weights_only=True)
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
@@ -234,8 +235,8 @@ def main():
         with torch.no_grad(), torch.amp.autocast("cuda", enabled=device.type == "cuda"):
             frame_t = torch.from_numpy(edge_frame.astype(np.float32) / 255.0)
             frame_t = frame_t.unsqueeze(0).unsqueeze(0).to(device)  # (1, 1, 64, 64)
-            tokens = vae.encode(frame_t)  # (1, 8, 8)
-            tokens_flat = tokens.reshape(64).cpu().numpy().astype(np.int64)
+            tokens = vae.encode(frame_t)  # (1, G, G)
+            tokens_flat = tokens.reshape(-1).cpu().numpy().astype(np.int64)
         t_fsq = time.perf_counter() - t1
 
         # --- Update context buffer ---

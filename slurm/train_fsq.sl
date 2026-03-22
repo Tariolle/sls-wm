@@ -29,6 +29,7 @@ python -u scripts/train_fsq.py \
     --lr 1e-3 \
     --checkpoint-dir checkpoints \
     --levels 8 5 5 5 \
+    --grid-size 16 \
     --alpha-slow 0.1 \
     --alpha-uniform 0.01 \
     --seed 42 \
