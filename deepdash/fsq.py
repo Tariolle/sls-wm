@@ -115,57 +115,60 @@ class ResBlock(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, img_channels=1, latent_dim=5):
+    def __init__(self, img_channels=1, latent_dim=5, n_downsample=3):
         super().__init__()
-        # Padded convs: 64 -> 32 -> 16 -> 8
-        self.conv1 = nn.Conv2d(img_channels, 32, 4, stride=2, padding=1)
-        self.res1 = nn.Sequential(ResBlock(32), ResBlock(32))
-        self.conv2 = nn.Conv2d(32, 64, 4, stride=2, padding=1)
-        self.res2 = nn.Sequential(ResBlock(64), ResBlock(64))
-        self.conv3 = nn.Conv2d(64, 128, 4, stride=2, padding=1)
-        self.res3 = nn.Sequential(ResBlock(128), ResBlock(128))
-        self.proj = nn.Conv2d(128, latent_dim, 1)
+        # n_downsample=3: 64->32->16->8, n_downsample=2: 64->32->16
+        channels = [32, 64, 128][:n_downsample]
+        layers = []
+        in_ch = img_channels
+        for ch in channels:
+            layers.append(nn.Conv2d(in_ch, ch, 4, stride=2, padding=1))
+            layers.append(nn.SiLU(inplace=True))
+            layers.append(ResBlock(ch))
+            layers.append(ResBlock(ch))
+            in_ch = ch
+        self.layers = nn.Sequential(*layers)
+        self.proj = nn.Conv2d(in_ch, latent_dim, 1)
 
     def forward(self, x):
-        x = F.silu(self.conv1(x))
-        x = self.res1(x)
-        x = F.silu(self.conv2(x))
-        x = self.res2(x)
-        x = F.silu(self.conv3(x))
-        x = self.res3(x)
-        return self.proj(x)  # (B, latent_dim, 8, 8)
+        return self.proj(self.layers(x))
 
 
 class Decoder(nn.Module):
-    def __init__(self, img_channels=1, latent_dim=5):
+    def __init__(self, img_channels=1, latent_dim=5, n_upsample=3):
         super().__init__()
-        self.proj = nn.Conv2d(latent_dim, 128, 1)
-        self.res1 = nn.Sequential(ResBlock(128), ResBlock(128))
-        # 8 -> 16 -> 32 -> 64
-        self.deconv1 = nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1)
-        self.res2 = nn.Sequential(ResBlock(64), ResBlock(64))
-        self.deconv2 = nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1)
-        self.res3 = nn.Sequential(ResBlock(32), ResBlock(32))
-        self.deconv3 = nn.ConvTranspose2d(32, img_channels, 4, stride=2, padding=1)
+        # Mirror encoder: n_upsample=3: 8->16->32->64, n_upsample=2: 16->32->64
+        channels = [128, 64, 32][-n_upsample:]
+        self.proj = nn.Conv2d(latent_dim, channels[0], 1)
+        self.proj_act = nn.SiLU(inplace=True)
+        self.res_first = nn.Sequential(ResBlock(channels[0]), ResBlock(channels[0]))
+        layers = []
+        for i in range(len(channels) - 1):
+            layers.append(nn.ConvTranspose2d(channels[i], channels[i + 1], 4, stride=2, padding=1))
+            layers.append(nn.SiLU(inplace=True))
+            layers.append(ResBlock(channels[i + 1]))
+            layers.append(ResBlock(channels[i + 1]))
+        self.layers = nn.Sequential(*layers)
+        self.final = nn.ConvTranspose2d(channels[-1], img_channels, 4, stride=2, padding=1)
 
     def forward(self, z_q):
-        x = F.silu(self.proj(z_q))
-        x = self.res1(x)
-        x = F.silu(self.deconv1(x))
-        x = self.res2(x)
-        x = F.silu(self.deconv2(x))
-        x = self.res3(x)
-        return torch.sigmoid(self.deconv3(x))
+        x = self.proj_act(self.proj(z_q))
+        x = self.res_first(x)
+        x = self.layers(x)
+        return torch.sigmoid(self.final(x))
 
 
 class FSQVAE(nn.Module):
-    def __init__(self, img_channels=1, levels=None):
+    def __init__(self, img_channels=1, levels=None, grid_size=8):
         super().__init__()
         levels = levels or DEFAULT_LEVELS
         latent_dim = len(levels)
-        self.encoder = Encoder(img_channels, latent_dim)
+        # 64 / grid_size = downsampling factor, log2 gives number of stride-2 convs
+        n_downsample = int(math.log2(64 // grid_size))
+        self.encoder = Encoder(img_channels, latent_dim, n_downsample)
         self.fsq = FSQQuantizer(levels)
-        self.decoder = Decoder(img_channels, latent_dim)
+        self.decoder = Decoder(img_channels, latent_dim, n_downsample)
+        self.grid_size = grid_size
 
     @property
     def codebook_size(self):
