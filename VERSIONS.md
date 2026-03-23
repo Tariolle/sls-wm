@@ -164,7 +164,6 @@ See [experiments/v1/](experiments/v1/) for full logs and hyperparameters.
 | **Separate space/time attention** (Dreamer 4) | 3 space-only + 1 temporal layer, repeated. Space layers skip KV cache from prior frames. |
 | **Multi-level feature extraction** (V-JEPA 2.1) | Concatenate h_t from multiple intermediate transformer layers. Gives controller access to different abstraction levels. |
 | **More training data** | Record on more diverse levels and custom levels. |
-| **Lower death threshold** (0.5 -> 0.3) | Stricter dream deaths for more precise jump timing. |
 | **Context frames 4 -> 6** | More temporal context for obstacle distance estimation. |
 | **Increase dropout** (0.1 -> 0.15) | Address V3 overfitting from larger model capacity. |
 
