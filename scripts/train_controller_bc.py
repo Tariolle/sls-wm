@@ -134,6 +134,12 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    import json
+    ckpt_dir = Path(args.checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    with open(ckpt_dir / "controller_bc_args.json", "w") as f:
+        json.dump(vars(args), f, indent=2)
+
     # Load world model (frozen, for h_t extraction only)
     wm = WorldModel(
         vocab_size=args.vocab_size, embed_dim=args.embed_dim,

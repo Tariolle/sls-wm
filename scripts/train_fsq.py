@@ -154,6 +154,12 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    import json
+    ckpt_dir = Path(args.checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    with open(ckpt_dir / "fsq_args.json", "w") as f:
+        json.dump(vars(args), f, indent=2)
+
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
 

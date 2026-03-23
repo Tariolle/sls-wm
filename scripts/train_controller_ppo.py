@@ -543,6 +543,11 @@ def main():
         print(f"Resumed from iteration {ckpt['iteration']} "
               f"(best_eval={best_eval:.2f})")
 
+    if start_iteration == 1:
+        import json
+        with open(ckpt_dir / "controller_ppo_args.json", "w") as f:
+            json.dump(vars(args), f, indent=2)
+
     # Fixed eval contexts (from val episodes only)
     # Use a dedicated RNG so eval contexts are identical across resumes
     eval_rng = np.random.default_rng(args.seed)

@@ -523,6 +523,11 @@ def main():
         else:
             print("No checkpoint found, starting fresh.")
 
+    if start_epoch == 1:
+        import json
+        with open(ckpt_dir / "transformer_args.json", "w") as f:
+            json.dump(vars(args), f, indent=2)
+
     # torch.compile full model (static graph since masking was removed)
     if sys.platform != "win32":
         try:

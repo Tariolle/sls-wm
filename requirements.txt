@@ -7,3 +7,4 @@ Pillow
 keyboard
 mss
 cma
+wandb
