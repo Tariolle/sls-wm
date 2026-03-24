@@ -24,7 +24,7 @@
 \title{DeepDash}
 \subtitle{World Models for Geometry Dash}
 \author{Florent Tariolle \& Maël Planchot}
-\institute{INSA Rouen Normandie \\ Representation Learning}
+\institute{Representation Learning}
 \date{}
 
 % ============================================================
@@ -91,10 +91,12 @@
   \vspace{0.5em}
   \begin{center}
     \small
-    $\mathbf{x}_t \in \mathbb{R}^{64 \times 64}$: grayscale Sobel frame \quad\quad
-    $\mathbf{z}_t \in \{0,\ldots,999\}^{64}$: discrete tokens \\[0.3em]
-    $\mathbf{h}_t \in \mathbb{R}^{384}$: hidden state \quad\quad
-    $a_t \in \{0, 1\}$: jump/idle
+    \begin{tabular}{c@{\hspace{3em}}c}
+      $\mathbf{x}_t \in \mathbb{R}^{64 \times 64}$: grayscale Sobel frame &
+      $\mathbf{z}_t \in \{0,\ldots,999\}^{64}$: discrete tokens \\[0.3em]
+      $\mathbf{h}_t \in \mathbb{R}^{384}$: hidden state &
+      $a_t \in \{0, 1\}$: jump/idle
+    \end{tabular}
   \end{center}
 \end{frame}
 
@@ -201,9 +203,33 @@
 \end{frame}
 
 \begin{frame}{FSQ-VAE: Inside an Encoder Block}
-  Each encoder level: \quad Conv2d 3$\times$3 stride 2 $\to$ BatchNorm $\to$ SiLU $\to$ ResBlock $\times$2
+  Each encoder level:
+  \begin{center}
+  \resizebox{0.8\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw=vcolor!70, fill=vcolor!5, rounded corners, minimum height=0.8cm, minimum width=1.6cm, align=center, font=\small, line width=0.6pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+  ]
+    \node[block] (conv) {Conv 3$\times$3\\stride 2};
+    \node[block, right=0.4cm of conv] (bn) {BN};
+    \node[block, right=0.4cm of bn] (act) {SiLU};
+    \node[block, right=0.4cm of act] (r1) {ResBlock};
+    \node[block, right=0.4cm of r1] (r2) {ResBlock};
 
-  \vspace{0.3em}
+    \draw[arr] (conv) -- (bn);
+    \draw[arr] (bn) -- (act);
+    \draw[arr] (act) -- (r1);
+    \draw[arr] (r1) -- (r2);
+
+    \node[left=0.4cm of conv, font=\small] (xin) {$\mathbf{x}$};
+    \node[right=0.4cm of r2, font=\small] (xout) {$\mathbf{x}'$};
+    \draw[arr] (xin) -- (conv);
+    \draw[arr] (r2) -- (xout);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.2em}
   Each \textbf{ResBlock}:
   \begin{center}
   \resizebox{\textwidth}{!}{%
@@ -233,8 +259,6 @@
   }
   \end{center}
 
-  \vspace{0.3em}
-  \small Channels: 32 $\to$ 64 $\to$ 128. Adding ResBlocks halved reconstruction error.
 \end{frame}
 
 \begin{frame}{FSQ-VAE: Training}
@@ -294,7 +318,8 @@
 \begin{frame}{Transformer World Model: Architecture}
   \vspace{0.5em}
   \begin{center}
-  \resizebox{\textwidth}{!}{%
+  \hspace*{-0.05\textwidth}%
+  \resizebox{1.1\textwidth}{!}{%
   \begin{tikzpicture}[
     block/.style={rectangle, draw=mcolor, fill=mcolor!10, rounded corners, minimum height=0.9cm, align=center, font=\scriptsize, line width=0.6pt},
     arr/.style={-{Stealth[length=2.5mm]}, thick},
@@ -422,7 +447,8 @@
 
 \begin{frame}{Dream Rollout}
   \begin{center}
-  \resizebox{\textwidth}{!}{%
+  \hspace*{-0.05\textwidth}%
+  \resizebox{1.1\textwidth}{!}{%
   \begin{tikzpicture}[
     block/.style={rectangle, draw, rounded corners, minimum height=0.9cm, minimum width=1.2cm, align=center, font=\scriptsize, line width=0.6pt},
     arr/.style={-{Stealth[length=2.5mm]}, thick},
