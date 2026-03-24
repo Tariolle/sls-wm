@@ -9,17 +9,17 @@
 | Component | Model | Params | Function |
 |-----------|-------|--------|----------|
 | **V** (Vision) | FSQ-VAE [8,5,5,5] | 1.9M (0.9M encoder) | 64x64 Sobel frame -> 8x8 discrete tokens (1000 codes) |
-| **M** (Memory) | Transformer 512d/8H/8L | 25.9M | Predicts next tokens + death, produces h_t |
-| **C** (Controller) | CNNPolicy + MTP | ~50K | Token grid + h_t -> jump/idle (+ 8-step action prediction) |
+| **M** (Memory) | Transformer 384d/8H/8L | 14.7M | Predicts next tokens + death, produces h_t |
+| **C** (Controller) | CNNPolicy + MTP | ~40K | Token grid + h_t -> jump/idle (+ 8-step action prediction) |
 
 ## Latest Results (V3)
 
 | Metric | V1 | V2 | V3 (current) |
 |--------|-----|-----|-------------|
-| Transformer params | 6.7M | 6.7M | 25.9M |
-| Val accuracy | 36.1% | 34.2% | 36.6% |
+| Transformer params | 6.7M | 6.7M | 14.7M |
+| Val accuracy | 36.1% | 34.2% | 35.6% |
 | Death F1 (val) | 0.72 | 0.73 | 0.78 |
-| BC val acc | 78% | 83.6% | 90% |
+| BC val acc | 78% | 83.6% | 87.1% |
 | Level 1 progress | 10% | 11% | 20% |
 | Inference | 27ms | 24ms | ~27ms |
 
@@ -42,9 +42,10 @@
 
 ## Data
 
-- **Death episodes**: ~3,600 episodes, ~179K frames (intentional deaths at obstacles)
-- **Expert episodes**: ~36 clean runs, ~33K frames (no deaths, for BC + world model rebalancing)
-- Global episode-level train/val split shared across all models (`deepdash/data_split.py`)
+- **Death episodes**: 4,229 episodes, ~218K frames across 16 levels (intentional deaths at obstacles)
+- **Expert episodes**: 36 clean runs, ~34K frames (no deaths, for BC + world model rebalancing)
+- **Total**: 4,265 episodes, ~252K frames
+- Global episode-level train/val split (seed 42, stratified) shared across all models (`deepdash/data_split.py`)
 
 ## Training Details
 
@@ -57,7 +58,7 @@
 - Focal loss + structured label smoothing (sigma=0.9) + dual token noise
 - Vertical-only shift augmentation (5x), death oversample 5x
 - No masking (all target tokens predicted, no ground truth leakage)
-- 512d embedding, 8 heads, 8 layers, dropout 0.15
+- 384d embedding, 8 heads, 8 layers, dropout 0.1
 - 200 epochs, LR 2e-3, batch 512
 
 ### Controller
@@ -66,7 +67,8 @@
 
 ### Deployment
 - Screen capture (dxcam) -> Sobel (7ms, GPU) -> FSQ encode (4ms) -> Transformer h_t (14ms) -> Controller (1ms) -> keyboard input
-- Sliding-window KV cache (4x prefill reduction)
+- GPU token ring buffer (no CPU round-trip), CUDA Graph for encode_context, pinned memory transfer
+- torch.compile on all platforms (PyTorch 2.11+)
 - 30 FPS real-time
 
 ## Version History
