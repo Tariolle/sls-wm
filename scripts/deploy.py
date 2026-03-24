@@ -169,14 +169,14 @@ def main():
             graph_ctx_a = torch.zeros(1, K, dtype=torch.long, device=device)
 
             # Warmup runs (CUDA needs to see the kernels before capture)
-            with torch.no_grad(), torch.amp.autocast("cuda"):
+            with torch.no_grad():
                 for _ in range(3):
                     wm.encode_context(graph_ctx_t, graph_ctx_a)
             torch.cuda.synchronize()
 
             encode_graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(encode_graph):
-                with torch.no_grad(), torch.amp.autocast("cuda"):
+                with torch.no_grad():
                     graph_h_t = wm.encode_context(graph_ctx_t, graph_ctx_a)
 
             use_cuda_graph = True
@@ -262,7 +262,7 @@ def main():
 
         # --- FSQ encode (stays on GPU) ---
         t1 = time.perf_counter()
-        with torch.no_grad(), torch.amp.autocast("cuda", enabled=device.type == "cuda"):
+        with torch.no_grad(), torch.no_grad():
             if pin_buf is not None:
                 pin_buf[0, 0] = torch.from_numpy(edge_frame.astype(np.float32) * (1.0 / 255.0))
                 frame_t = pin_buf.to(device, non_blocking=True)
@@ -301,7 +301,7 @@ def main():
             encode_graph.replay()
             h_t = graph_h_t
         else:
-            with torch.no_grad(), torch.amp.autocast("cuda", enabled=device.type == "cuda"):
+            with torch.no_grad(), torch.no_grad():
                 ctx_t = torch.cat([ctx_tokens, ctx_status], dim=1).unsqueeze(0)
                 ctx_a = ctx_actions.unsqueeze(0)
                 h_t = wm.encode_context(ctx_t, ctx_a)
