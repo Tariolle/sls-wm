@@ -28,7 +28,7 @@ python -u scripts/train_controller_bc.py \
     --weight-decay 1e-4 \
     --val-ratio 0.1 \
     --vocab-size 1000 \
-    --embed-dim 512 \
+    --embed-dim 384 \
     --n-heads 8 \
     --n-layers 8 \
     --tokens-per-frame 64 \

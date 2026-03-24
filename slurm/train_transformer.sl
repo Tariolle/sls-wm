@@ -74,10 +74,10 @@ python -u scripts/train_transformer.py \
     --context-frames 4 \
     --vocab-size 1000 \
     --tokens-per-frame 64 \
-    --embed-dim 512 \
+    --embed-dim 384 \
     --n-heads 8 \
     --n-layers 8 \
-    --dropout 0.15 \
+    --dropout 0.1 \
     --weight-decay 0.01 \
     --cpc-weight 1.0 \
     --token-noise 0.05 \

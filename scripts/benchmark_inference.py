@@ -72,7 +72,7 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name()}")
 
     model = WorldModel(
-        vocab_size=1000, embed_dim=512, n_heads=8, n_layers=8,
+        vocab_size=1000, embed_dim=384, n_heads=8, n_layers=8,
         context_frames=4, tokens_per_frame=64,
     ).to(device)
     state = torch.load(args.checkpoint, map_location=device, weights_only=True)

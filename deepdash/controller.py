@@ -240,7 +240,7 @@ class CNNPolicy(nn.Module):
     """
 
     def __init__(self, vocab_size=1000, grid_size=8, token_embed_dim=16,
-                 h_dim=512, mtp_steps=8):
+                 h_dim=384, mtp_steps=8):
         super().__init__()
         self.grid_size = grid_size
         self.mtp_steps = mtp_steps

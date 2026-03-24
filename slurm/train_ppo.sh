@@ -55,7 +55,7 @@ python -u scripts/train_controller_ppo.py \
     --context-frames 4 \
     --vocab-size 1000 \
     --tokens-per-frame 64 \
-    --embed-dim 512 \
+    --embed-dim 384 \
     --n-heads 8 \
     --n-layers 8 \
     --dropout 0.1 \

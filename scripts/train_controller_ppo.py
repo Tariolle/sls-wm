@@ -430,7 +430,7 @@ def main():
     # World model architecture (must match checkpoint)
     parser.add_argument("--vocab-size", type=int, default=1000)
     parser.add_argument("--tokens-per-frame", type=int, default=64)
-    parser.add_argument("--embed-dim", type=int, default=512)
+    parser.add_argument("--embed-dim", type=int, default=384)
     parser.add_argument("--n-heads", type=int, default=8)
     parser.add_argument("--n-layers", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.1)
