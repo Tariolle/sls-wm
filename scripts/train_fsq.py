@@ -61,6 +61,8 @@ def train_epoch(model, loader, optimizer, alpha_slow, alpha_uniform,
     model.train()
     total_recon, total_slow, total_uniform, n = 0, 0, 0, 0
     for ft, ft1 in loader:
+        ft = ft.cuda(non_blocking=True)
+        ft1 = ft1.cuda(non_blocking=True)
         with torch.amp.autocast("cuda", enabled=amp_dtype is not None, dtype=amp_dtype):
             recon_t, z_e_t, _ = model(ft)
             recon_t1, z_e_t1, _ = model(ft1)
@@ -89,6 +91,7 @@ def val_epoch(model, loader, amp_dtype=None):
     model.eval()
     total_recon, n = 0, 0
     for ft, ft1 in loader:
+        ft = ft.cuda(non_blocking=True)
         with torch.amp.autocast("cuda", enabled=amp_dtype is not None, dtype=amp_dtype):
             recon_t, _, _ = model(ft)
             recon_loss = fsqvae_loss(recon_t, ft)
