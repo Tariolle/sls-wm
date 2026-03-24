@@ -26,32 +26,31 @@ from deepdash.fsq import FSQVAE, fsqvae_loss, grwm_slowness, grwm_uniformity
 class FramePairDataset(Dataset):
     """Loads consecutive frame pairs from episodes for GRWM temporal slowness.
 
-    Each sample is (frame_t, frame_t+1). Split by episode, not by frame.
+    Each sample is (frame_t, frame_t+1). Uses memory-mapped numpy arrays
+    to avoid loading all frames into RAM at once.
     """
 
     def __init__(self, episode_dirs, device=None):
-        self.pairs = []
+        self.device = device
+        # Build index: (episode_path, frame_idx) for each pair
+        self.index = []
+        self.mmaps = {}
         for ep_dir in episode_dirs:
-            frames = np.load(ep_dir / "frames.npy")  # (T, 64, 64) uint8
+            fp = ep_dir / "frames.npy"
+            frames = np.load(fp, mmap_mode='r')
+            self.mmaps[str(fp)] = frames
             for i in range(len(frames) - 1):
-                self.pairs.append((frames[i], frames[i + 1]))
-
-        # Preload as tensors
-        t_data = np.array([p[0] for p in self.pairs])
-        t1_data = np.array([p[1] for p in self.pairs])
-        self.frames_t = torch.from_numpy(t_data).float().unsqueeze(1) / 255.0
-        self.frames_t1 = torch.from_numpy(t1_data).float().unsqueeze(1) / 255.0
-        self.pairs = None  # free numpy data
-
-        if device and device.type == "cuda":
-            self.frames_t = self.frames_t.to(device)
-            self.frames_t1 = self.frames_t1.to(device)
+                self.index.append((str(fp), i))
 
     def __len__(self):
-        return len(self.frames_t)
+        return len(self.index)
 
     def __getitem__(self, idx):
-        return self.frames_t[idx], self.frames_t1[idx]
+        fp, i = self.index[idx]
+        frames = self.mmaps[fp]
+        ft = torch.from_numpy(frames[i].copy()).float().unsqueeze(0) / 255.0
+        ft1 = torch.from_numpy(frames[i + 1].copy()).float().unsqueeze(0) / 255.0
+        return ft, ft1
 
 
 def train_epoch(model, loader, optimizer, alpha_slow, alpha_uniform,
