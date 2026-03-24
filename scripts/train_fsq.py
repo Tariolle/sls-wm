@@ -172,13 +172,35 @@ def main():
     from deepdash.data_split import get_val_episodes, is_val_episode
     val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
 
+    import re
+    import shutil
+    shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
+
+    # Clean stale tokenization artifacts so FSQ trains on base episodes only
+    for ep_dir in [args.episodes_dir, args.expert_episodes_dir]:
+        p = Path(ep_dir)
+        if not p.exists():
+            continue
+        for ep in p.glob("*"):
+            if not ep.is_dir():
+                continue
+            # Delete shift-augmented directories (created by tokenize script)
+            if shift_re.search(ep.name):
+                shutil.rmtree(ep)
+                continue
+            # Delete tokens.npy from base episodes (will be re-created after FSQ)
+            tok = ep / "tokens.npy"
+            if tok.exists():
+                tok.unlink()
+
     all_episodes = []
     for ep_dir in [args.episodes_dir, args.expert_episodes_dir]:
         p = Path(ep_dir)
         if p.exists():
             all_episodes.extend(
                 ep for ep in sorted(p.glob("*"))
-                if (ep / "frames.npy").exists()
+                if ep.is_dir() and (ep / "frames.npy").exists()
+                and not shift_re.search(ep.name)
             )
 
     train_eps = [ep for ep in all_episodes if not is_val_episode(ep.name, val_set)]
