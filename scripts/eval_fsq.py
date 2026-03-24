@@ -126,6 +126,10 @@ def main():
     axes[0, 0].set_title("Original", fontsize=30, pad=10)
     axes[1, 0].set_title("Reconstruction", fontsize=30, pad=10)
     plt.tight_layout()
+
+    grid_path = out_dir / "fsq_reconstructions.png"
+    plt.savefig(grid_path, dpi=150, bbox_inches="tight")
+    print(f"Saved grid to {grid_path}")
     plt.show()
 
 

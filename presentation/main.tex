@@ -302,7 +302,7 @@
     \node[lbl] (in) {$\mathbf{z}_{t-K:t}$, $a_{t-K:t}$\\{\tiny 329 tokens}};
     \node[block, minimum width=2cm, right=0.6cm of in] (emb) {Token + Action\\Embedding};
     \node[block, minimum width=2cm, right=0.6cm of emb] (rope) {3D-RoPE\\{\tiny row, col, frame}\\{\tiny block-causal}};
-    \node[block, minimum width=2.5cm, right=0.6cm of rope, fill=mcolor!25] (blocks) {8$\times$ Transformer\\Block (256d, 8H)};
+    \node[block, minimum width=2.5cm, right=0.6cm of rope, fill=mcolor!25] (blocks) {8$\times$ Transformer\\Block (384d, 8H)};
     \node[block, minimum width=2cm, right=0.6cm of blocks] (head) {Prediction\\Head};
     \node[lbl, right=0.6cm of head] (out1) {$\hat{\mathbf{z}}_{t+1}$, $\hat{d}_{t+1}$\\{\tiny 64 tokens + death}};
 
@@ -315,7 +315,7 @@
     \draw[arr] (blocks) -- (cpc);
     \draw[arr] (head) -- (out1);
 
-    \node[below=0.4cm of blocks, lbl, font=\scriptsize] (ht) {$\mathbf{h}_t \in \mathbb{R}^{256}$};
+    \node[below=0.4cm of blocks, lbl, font=\scriptsize] (ht) {$\mathbf{h}_t \in \mathbb{R}^{384}$};
     \draw[arr, ccolor] (blocks.south) -- (ht);
   \end{tikzpicture}%
   }
@@ -324,14 +324,14 @@
   \vspace{0.3em}
   \begin{center}
     \small
-    6.7M params \quad\quad
+    14.7M params \quad\quad
     Parallel decode: 1 step vs 65 autoregressive \quad\quad
     Vocab: $|\mathcal{V}| = 1002$
   \end{center}
 \end{frame}
 
 \begin{frame}{Training: Spatial Shift Augmentation}
-  \textbf{Problem}: 3,600 episodes is limited data for 6.7M params $\Rightarrow$ overfitting
+  \textbf{Problem}: 4,200+ episodes is limited data for 14.7M params $\Rightarrow$ overfitting
 
   \vspace{0.3em}
   \textbf{Solution}: re-encode frames through frozen FSQ-VAE at pixel offsets
@@ -477,28 +477,27 @@
 \end{frame}
 
 \begin{frame}{Transformer: Training Results}
-  \textbf{V1 Final} (200 epochs, LR $2 \times 10^{-3}$, 5$\times$ death oversample, vertical-only shifts):
+  Progression across versions (200 epochs each, same data split):
 
   \vspace{0.5em}
   \begin{center}
     \small
     \begin{tabular}{lccc}
       \toprule
-      Metric & Baseline & Overfitted (400ep) & \textbf{V1 Final} \\
+      Metric & V1 (256d) & V2 (256d) & \textbf{V3 (384d)} \\
       \midrule
-      Val accuracy & 33.66\% & 34.69\% & \textbf{36.06\%} \\
-      Val token loss & 2.383 & 2.327 & \textbf{2.255} \\
-      Death precision & -- & 48.4\% & \textbf{61.0\%} \\
-      Death F1 & -- & 63.5\% & \textbf{71.7\%} \\
-      Death P gap (train-val) & -- & 44pp & \textbf{28pp} \\
+      Val accuracy & 36.06\% & 34.22\% & \textbf{35.6\%} \\
+      Death F1 & 0.72 & 0.73 & \textbf{0.78} \\
+      Val CPC loss & -- & 0.203 & \textbf{0.166} \\
+      Train/val gap & 3.7\% & 1.6\% & 3.6\% \\
       \bottomrule
     \end{tabular}
   \end{center}
 
   \vspace{0.5em}
   \begin{itemize}
-    \item Key fix: death oversample $15\times \to 5\times$ (eliminated death pattern memorization)
-    \item Expert episodes (33K frames) teach model that obstacles are survivable
+    \item V2: removed masking (fixed train/inference mismatch), AC-CPC 1.0
+    \item V3: scaled 256d $\to$ 384d (14.7M params), better death prediction and CPC
   \end{itemize}
 \end{frame}
 
@@ -520,8 +519,8 @@
     \node[block] (emb) {Embed(1000, 16)\\{\tiny $\to$ (16, 8, 8)}};
     \node[block, right=0.6cm of emb] (c1) {Conv 32\\MaxPool};
     \node[block, right=0.6cm of c1] (c2) {Conv 64\\MaxPool};
-    \node[block, right=0.6cm of c2] (flat) {Flatten\\{\tiny 256d}};
-    \node[block, fill=mcolor!10, draw=mcolor, above=0.4cm of flat] (ht) {$\mathbf{h}_t$\\{\tiny 256d}};
+    \node[block, right=0.6cm of c2] (flat) {Flatten\\{\tiny 384d}};
+    \node[block, fill=mcolor!10, draw=mcolor, above=0.4cm of flat] (ht) {$\mathbf{h}_t$\\{\tiny 384d}};
     \node[block, right=1cm of flat] (cat) {Concat\\{\tiny 512d}};
     \node[block, right=0.6cm of cat] (heads) {Actor + Critic};
 
@@ -552,9 +551,10 @@
   \textbf{Stage 2: PPO in Dream} (generalization)
   \begin{itemize}
     \item Uniform context sampling, excluding last $2K$ frames per episode
-    \item Reward: $+1$ per step survived, rollout stops at death prediction
-    \item 512 episodes/iteration, 4 PPO epochs, GAE ($\gamma$=0.995, $\lambda$=0.95)
-    \item 9K iterations: eval survival $19.86 \to 23.04$
+    \item Reward: $+1$ per step survived $-0.2$ per jump, rollout stops at death prediction
+    \item 512 episodes/iteration, 45-step rollouts, 4 PPO epochs, GAE ($\gamma$=0.995, $\lambda$=0.95)
+    \item MTP auxiliary loss: predict 8 future actions from $\mathbf{h}_t$
+    \item Best eval survival: 33.48 (V3), jump ratio 0.30
   \end{itemize}
 
   \vspace{0.5em}
