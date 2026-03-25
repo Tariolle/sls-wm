@@ -359,7 +359,7 @@ def main():
     parser.add_argument("--n-heads", type=int, default=8)
     parser.add_argument("--n-layers", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--weight-decay", type=float, default=0.05)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     parser.add_argument("--resume", action="store_true")
