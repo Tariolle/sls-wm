@@ -296,7 +296,6 @@
   \begin{itemize}
     \item $\sim$252K frames, batch 2048
     \item GRWM regularization (temporal slowness + uniformity)
-    \item $\pm$4px random shift augmentation (edge padding)
     \item Cosine LR schedule, 200 epochs
     \item GPU: A100, total training time: $\sim$48 min
   \end{itemize}
@@ -569,7 +568,6 @@
   \begin{itemize}
     \item Death + expert episodes, class-weighted BCE (2.6$\times$ jump weight)
     \item Feed context through world model $\to$ get $\mathbf{h}_t$, predict expert action
-    \item Val accuracy: 78\% (above 72\% always-idle baseline)
   \end{itemize}
 
   \vspace{0.5em}
@@ -579,7 +577,6 @@
     \item Reward: $+1$ per step survived $-0.2$ per jump, rollout stops at death prediction
     \item 512 episodes/iteration, 45-step rollouts, 4 PPO epochs, GAE ($\gamma$=0.995, $\lambda$=0.95)
     \item MTP auxiliary loss: predict 8 future actions from $\mathbf{h}_t$
-    \item Best eval survival: 33.48 (V3), jump ratio 0.30
   \end{itemize}
 
   \vspace{0.5em}
