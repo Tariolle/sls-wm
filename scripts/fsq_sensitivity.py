@@ -102,74 +102,172 @@ def main():
     print(f"\nBaseline reconstruction MSE: {baseline_mse:.6f}")
     print()
 
-    # Define perturbation experiments
+    # Define perturbation experiments: all non-empty subsets of dims, +1 step
+    from itertools import combinations
+
     experiments = []
 
-    # Single dimension perturbations: +1 and +2 in each dim
+    # Single dim +1 and +2
     for d in range(n_dims):
         for step in [1, 2]:
             experiments.append((f"dim{d}(L={args.levels[d]}) +{step}", [(d, step)]))
 
-    # Two-dimension perturbations: +1 in two dims
-    for d1 in range(n_dims):
-        for d2 in range(d1 + 1, n_dims):
-            experiments.append(
-                (f"dim{d1}+dim{d2} +1 each", [(d1, 1), (d2, 1)])
-            )
+    # All multi-dim combos at +1 step (2-dim, 3-dim, 4-dim)
+    for k in range(2, n_dims + 1):
+        for combo in combinations(range(n_dims), k):
+            name = "+".join(f"d{d}" for d in combo) + " +1"
+            experiments.append((name, [(d, 1) for d in combo]))
 
-    print(f"{'Perturbation':<30} {'MSE':>10} {'Delta':>10} {'Ratio':>8} {'Valid%':>8}")
-    print("-" * 70)
-
-    results = []
-    for name, perturbations in experiments:
+    def run_perturbation(all_z_q, all_imgs, perturbations):
+        """Apply perturbations and measure MSE."""
         perturbed_z_q = all_z_q.clone()
-
-        # Apply perturbations and clamp to valid range
-        valid_mask = torch.ones(len(all_z_q), dtype=torch.bool)
         for d, step in perturbations:
             half = half_levels[d]
             max_val = half - (1.0 - args.levels[d] % 2)
             min_val = -half
-            # Randomly perturb up or down
-            N = perturbed_z_q.shape[0]
-            signs = (torch.randint(0, 2, (N,)) * 2 - 1).float()  # (N,)
-            delta = signs.view(N, 1, 1) * step  # (N, 1, 1)
-            perturbed_z_q[:, d] = perturbed_z_q[:, d] + delta
-            # Track which samples stay in valid range
-            out_of_range = (
-                (perturbed_z_q[:, d] > max_val) |
-                (perturbed_z_q[:, d] < min_val)
-            ).any(dim=-1).any(dim=-1)
-            # Clamp to valid range
-            perturbed_z_q[:, d] = perturbed_z_q[:, d].clamp(min_val, max_val)
-            valid_mask &= ~out_of_range
+            vals = perturbed_z_q[:, d]
+            can_up = vals + step <= max_val
+            can_down = vals - step >= min_val
+            rand_up = torch.rand_like(vals) > 0.5
+            go_up = torch.where(can_up & can_down, rand_up,
+                                torch.where(can_up, torch.ones_like(rand_up),
+                                            torch.zeros_like(rand_up)))
+            can_any = can_up | can_down
+            delta = torch.where(go_up, step, -step) * can_any.float()
+            perturbed_z_q[:, d] = vals + delta
 
-        valid_pct = valid_mask.float().mean().item() * 100
-
-        # Compute perturbed reconstruction MSE
         with torch.no_grad():
-            perturbed_mse = 0.0
+            mse = 0.0
             for i in range(0, len(perturbed_z_q), args.batch_size):
                 z_q = perturbed_z_q[i:i + args.batch_size].to(device)
                 recon = model.decoder(z_q)
                 orig = all_imgs[i:i + args.batch_size].to(device)
-                perturbed_mse += ((recon - orig) ** 2).sum().item()
-            perturbed_mse /= len(perturbed_z_q)
+                mse += ((recon - orig) ** 2).sum().item()
+            mse /= len(perturbed_z_q)
+        return mse
 
-        delta = perturbed_mse - baseline_mse
-        ratio = perturbed_mse / baseline_mse
-        results.append((name, perturbed_mse, delta, ratio, valid_pct))
-        print(f"{name:<30} {perturbed_mse:10.6f} {delta:+10.6f} {ratio:8.2f}x {valid_pct:7.1f}%")
+    print(f"{'Perturbation':<30} {'MSE':>10} {'Delta':>10} {'Ratio':>8}")
+    print("-" * 62)
 
-    # Summary
+    results = {}
+    for name, perturbations in experiments:
+        mse = run_perturbation(all_z_q, all_imgs, perturbations)
+        delta = mse - baseline_mse
+        ratio = mse / baseline_mse
+        results[name] = (mse, delta, ratio)
+        print(f"{name:<30} {mse:10.6f} {delta:+10.6f} {ratio:8.2f}x")
+
+    # Compounding analysis: compare measured multi-dim ratios against
+    # additive (sum of deltas) and multiplicative (product of ratios) predictions
     print()
-    print("Interpretation for label smoothing sigma:")
-    print("  - If +1 step causes ~1.5-2x MSE: sigma=0.9 is reasonable")
-    print("  - If +1 step causes ~3-5x MSE: sigma is too high, codes are very distinct")
-    print("  - If +1 step causes <1.2x MSE: sigma could be higher, codes are similar")
+    print("=" * 72)
+    print("Compounding analysis (+1 step combos)")
+    print(f"{'Combo':<20} {'Measured':>8} {'Additive':>10} {'Multiplic':>10} {'Best fit':>10}")
+    print("-" * 62)
+
+    # Collect single-dim +1 results
+    single = {}
+    for d in range(n_dims):
+        key = f"dim{d}(L={args.levels[d]}) +1"
+        single[d] = results[key]  # (mse, delta, ratio)
+
+    add_errors = []
+    mul_errors = []
+
+    for k in range(2, n_dims + 1):
+        for combo in combinations(range(n_dims), k):
+            key = "+".join(f"d{d}" for d in combo) + " +1"
+            measured_ratio = results[key][2]
+
+            # Additive: sum of deltas / baseline + 1
+            add_pred = sum(single[d][1] for d in combo) / baseline_mse + 1.0
+            # Multiplicative: product of ratios
+            mul_pred = 1.0
+            for d in combo:
+                mul_pred *= single[d][2]
+
+            add_err = abs(measured_ratio - add_pred) / measured_ratio
+            mul_err = abs(measured_ratio - mul_pred) / measured_ratio
+            add_errors.append(add_err)
+            mul_errors.append(mul_err)
+
+            best = "additive" if add_err < mul_err else "multiplic"
+            print(f"{key:<20} {measured_ratio:8.2f}x {add_pred:9.2f}x {mul_pred:9.2f}x {best:>10}")
+
     print()
-    print("Compare these results against the old FSQ checkpoint to see if")
-    print("neighbor similarity changed with the new training.")
+    avg_add = sum(add_errors) / len(add_errors) * 100
+    avg_mul = sum(mul_errors) / len(mul_errors) * 100
+    print(f"Mean relative error:  additive={avg_add:.1f}%  multiplicative={avg_mul:.1f}%")
+    if avg_add < avg_mul:
+        print("=> Perturbations compound ADDITIVELY (use L1/Manhattan distance)")
+    else:
+        print("=> Perturbations compound MULTIPLICATIVELY (use L2/Euclidean distance)")
+
+    # Sigma sweep: find optimal sigma for weighted L2 Gaussian kernel
+    # Ground truth: 1/ratio = reconstruction similarity (higher = more similar)
+    # Gaussian prediction: exp(-weighted_dist^2 / (2*sigma^2))
+    # We want the sigma where kernel weights best correlate with 1/ratio
+    print()
+    print("=" * 72)
+    print("Sigma sweep (weighted L2 distance)")
+
+    # Measured sensitivities as dim weights (normalized so mean=1)
+    single_ratios = [single[d][2] for d in range(n_dims)]
+    mean_ratio = sum(single_ratios) / n_dims
+    dim_weights = [r / mean_ratio for r in single_ratios]
+    print(f"Dim weights (from sensitivity): {[f'{w:.3f}' for w in dim_weights]}")
+
+    # Collect all +1 step combos with their measured ratios and weighted L2 distances
+    combo_data = []
+    for k in range(1, n_dims + 1):
+        for combo in combinations(range(n_dims), k):
+            if k == 1:
+                key = f"dim{combo[0]}(L={args.levels[combo[0]]}) +1"
+            else:
+                key = "+".join(f"d{d}" for d in combo) + " +1"
+            measured_ratio = results[key][2]
+            # Weighted L2 distance: sqrt(sum(w_d^2)) for +1 step in each dim
+            w_sq_dist = sum(dim_weights[d] ** 2 for d in combo)
+            similarity = 1.0 / measured_ratio
+            combo_data.append((key, w_sq_dist, similarity, measured_ratio))
+
+    print()
+    print(f"{'Sigma':>6}  {'Corr':>7}  {'MSE':>10}  Notes")
+    print("-" * 42)
+
+    best_sigma = 0.0
+    best_mse = float("inf")
+    for sigma_test in [x * 0.1 for x in range(1, 31)]:
+        # Predict similarity as Gaussian kernel value
+        predictions = []
+        targets = []
+        for _, w_sq_dist, similarity, _ in combo_data:
+            pred = np.exp(-w_sq_dist / (2 * sigma_test ** 2))
+            predictions.append(pred)
+            targets.append(similarity)
+        # Normalize both to [0, 1] for fair comparison
+        pred_arr = np.array(predictions)
+        tgt_arr = np.array(targets)
+        # Pearson correlation
+        if pred_arr.std() > 1e-8:
+            corr = np.corrcoef(pred_arr, tgt_arr)[0, 1]
+        else:
+            corr = 0.0
+        # MSE between normalized predictions and targets
+        pred_norm = pred_arr / pred_arr.sum()
+        tgt_norm = tgt_arr / tgt_arr.sum()
+        mse_fit = ((pred_norm - tgt_norm) ** 2).mean()
+        marker = ""
+        if mse_fit < best_mse:
+            best_mse = mse_fit
+            best_sigma = sigma_test
+            marker = " <-- best"
+        print(f"{sigma_test:6.1f}  {corr:7.4f}  {mse_fit:10.6f}{marker}")
+
+    print()
+    print(f"Optimal sigma: {best_sigma:.1f}")
+    print(f"Recommended: --fsq-sigma {best_sigma:.1f} "
+          f"--fsq-dim-weights {' '.join(f'{w:.2f}' for w in dim_weights)}")
 
 
 if __name__ == "__main__":
