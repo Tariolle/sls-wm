@@ -230,16 +230,20 @@ def main():
                         default="val",
                         help="Filter episodes by train/val split")
     parser.add_argument("--seed", type=int, default=42)
-    # Model architecture
-    parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5])
-    parser.add_argument("--vocab-size", type=int, default=1000)
-    parser.add_argument("--embed-dim", type=int, default=384)
-    parser.add_argument("--n-heads", type=int, default=8)
-    parser.add_argument("--n-layers", type=int, default=8)
-    parser.add_argument("--tokens-per-frame", type=int, default=64)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--token-embed-dim", type=int, default=16)
+    # Model architecture (defaults from configs/v3.yaml)
+    parser.add_argument("--config", default=None)
+    parser.add_argument("--levels", type=int, nargs="+", default=None)
+    parser.add_argument("--vocab-size", type=int, default=None)
+    parser.add_argument("--embed-dim", type=int, default=None)
+    parser.add_argument("--n-heads", type=int, default=None)
+    parser.add_argument("--n-layers", type=int, default=None)
+    parser.add_argument("--tokens-per-frame", type=int, default=None)
+    parser.add_argument("--dropout", type=float, default=None)
+    parser.add_argument("--token-embed-dim", type=int, default=None)
     args = parser.parse_args()
+
+    from deepdash.config import apply_config
+    apply_config(args, section="controller_ppo")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")

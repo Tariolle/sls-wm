@@ -72,3 +72,37 @@ def load_config(
                 config[key] = value
 
     return config
+
+
+DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "configs" / "v3.yaml"
+
+
+def apply_config(
+    args: argparse.Namespace,
+    section: str | None = None,
+    config_path: str | Path | None = None,
+) -> argparse.Namespace:
+    """Fill ``None`` argparse values from YAML config.
+
+    Call after ``parser.parse_args()`` with defaults set to ``None``
+    for any argument that should be backed by the YAML.  Explicitly
+    provided CLI args (non-None) always win.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed CLI arguments.
+    section : str, optional
+        YAML section for component-specific values (e.g. "transformer").
+    config_path : str | Path, optional
+        Path to YAML config.  Falls back to ``args.config`` then
+        ``configs/v3.yaml``.
+    """
+    path = config_path or getattr(args, "config", None) or DEFAULT_CONFIG
+    config = load_config(path, section=section)
+
+    for key, value in config.items():
+        arg_key = key.replace("-", "_")
+        if hasattr(args, arg_key) and getattr(args, arg_key) is None:
+            setattr(args, arg_key, value)
+    return args

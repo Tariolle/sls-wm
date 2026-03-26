@@ -1,17 +1,17 @@
-# DeepDash V3 (384d) -- canonical hyperparameters
+# DeepDash V3 (512d) -- canonical hyperparameters
 # Source of truth extracted from slurm/*.sl scripts.
 # Usage: config = load_config("configs/v3.yaml", parse_args())
 
 # Shared model architecture (consumed by transformer, controller_bc, controller_ppo)
 model:
   vocab_size: 1000
-  embed_dim: 384
+  embed_dim: 512
   n_heads: 8
   n_layers: 8
   tokens_per_frame: 64
   context_frames: 4
   levels: [8, 5, 5, 5]
-  dropout: 0.1
+  dropout: 0.15
 
 # FSQ-VAE training
 fsq:
@@ -39,17 +39,19 @@ transformer:
   expert_episodes_dir: data/expert_episodes
   epochs: 200
   batch_size: 512
-  lr: 0.002
+  lr: 0.004
+  lr_min: 0.0005
   weight_decay: 0.01
   cpc_weight: 1.0
   token_noise: 0.05
   fsq_noise: 0.05
   label_smoothing: 0.1
   fsq_sigma: 0.9
+  fsq_dim_weights: [1.29, 0.85, 0.97, 0.89]
   focal_gamma: 2.0
-  death_oversample: 5
+  death_oversample: 4
   steps_per_epoch: 500
-  patience: 30
+  patience: 60
   seed: 42
   checkpoint_dir: checkpoints
 

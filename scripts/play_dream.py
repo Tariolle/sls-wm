@@ -122,17 +122,21 @@ def main():
     parser.add_argument("--filter", choices=["all", "train", "val"],
                         default="all",
                         help="Filter episodes by train/val split")
-    # Model architecture
-    parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5])
-    parser.add_argument("--vocab-size", type=int, default=1000)
-    parser.add_argument("--embed-dim", type=int, default=384)
-    parser.add_argument("--n-heads", type=int, default=8)
-    parser.add_argument("--n-layers", type=int, default=8)
-    parser.add_argument("--tokens-per-frame", type=int, default=64)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    # Model architecture (defaults from configs/v3.yaml)
+    parser.add_argument("--config", default=None)
+    parser.add_argument("--levels", type=int, nargs="+", default=None)
+    parser.add_argument("--vocab-size", type=int, default=None)
+    parser.add_argument("--embed-dim", type=int, default=None)
+    parser.add_argument("--n-heads", type=int, default=None)
+    parser.add_argument("--n-layers", type=int, default=None)
+    parser.add_argument("--tokens-per-frame", type=int, default=None)
+    parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--max-steps", type=int, default=30,
                         help="Max dream steps before auto-restart (0 = unlimited)")
     args = parser.parse_args()
+
+    from deepdash.config import apply_config
+    apply_config(args)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
