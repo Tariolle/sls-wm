@@ -16,15 +16,24 @@ _run = None
 _enabled = False
 
 
-def wandb_init(project="deepdash", name=None, config=None, enabled=True):
-    """Initialize W&B run. Returns None if wandb unavailable."""
+def wandb_init(project="deepdash", name=None, config=None, enabled=True,
+               resume_id=None):
+    """Initialize W&B run. Returns None if wandb unavailable.
+
+    Args:
+        resume_id: If set, resume an existing W&B run by its ID.
+    """
     global _run, _enabled
     if not enabled:
         _enabled = False
         return None
     try:
         import wandb
-        _run = wandb.init(project=project, name=name, config=config)
+        kwargs = dict(project=project, name=name, config=config)
+        if resume_id:
+            kwargs["id"] = resume_id
+            kwargs["resume"] = "must"
+        _run = wandb.init(**kwargs)
         _enabled = True
         print(f"W&B logging enabled: {_run.url}")
         return _run
@@ -32,6 +41,13 @@ def wandb_init(project="deepdash", name=None, config=None, enabled=True):
         print(f"W&B not available ({e}), logging to CSV only")
         _enabled = False
         return None
+
+
+def wandb_run_id():
+    """Return the current W&B run ID, or None."""
+    if _enabled and _run is not None:
+        return _run.id
+    return None
 
 
 def wandb_log(data):

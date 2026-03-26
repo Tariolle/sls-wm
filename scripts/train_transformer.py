@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from deepdash.wandb_utils import wandb_init, wandb_log, wandb_finish
+from deepdash.wandb_utils import wandb_init, wandb_log, wandb_finish, wandb_run_id
 
 import numpy as np
 import torch
@@ -521,6 +521,7 @@ def main():
     start_epoch = 1
     best_val_loss = float("inf")
 
+    wandb_resume_id = None
     if args.resume:
         resume_path = ckpt_dir / "transformer_state.pt"
         if resume_path.exists():
@@ -531,6 +532,7 @@ def main():
                 scaler.load_state_dict(state["scaler"])
             start_epoch = state["epoch"] + 1
             best_val_loss = state["best_val_loss"]
+            wandb_resume_id = state.get("wandb_run_id")
             print(f"Resumed from epoch {state['epoch']} (best val loss: {best_val_loss:.4f})")
         else:
             print("No checkpoint found, starting fresh.")
@@ -541,7 +543,7 @@ def main():
             json.dump(vars(args), f, indent=2)
 
     wandb_init(project="deepdash", name=f"transformer-{args.embed_dim}d",
-               config=vars(args))
+               config=vars(args), resume_id=wandb_resume_id)
 
     # torch.compile full model (static graph since masking was removed)
     if sys.platform != "win32":
@@ -693,6 +695,7 @@ def main():
                 "scheduler": scheduler.state_dict(),
                 "scaler": scaler.state_dict(),
                 "best_val_loss": best_val_loss,
+                "wandb_run_id": wandb_run_id(),
             }, ckpt_dir / "transformer_state.pt")
 
             if val_total < best_val_loss:
@@ -718,6 +721,7 @@ def main():
             "scheduler": scheduler.state_dict(),
             "scaler": scaler.state_dict(),
             "best_val_loss": best_val_loss,
+            "wandb_run_id": wandb_run_id(),
         }, ckpt_dir / "transformer_state.pt")
 
     log_file.close()
