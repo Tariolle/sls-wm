@@ -69,8 +69,9 @@ def main():
     )
     print(f"Loaded {len(frames)} frames")
 
-    # Encode all frames to get quantized codes
+    # Encode all frames to get quantized codes and pre-quantization latents
     all_z_q = []  # (B, D, 8, 8) quantized codes
+    all_z_e = []  # (B, D, 8, 8) pre-quantization (continuous)
     all_imgs = []  # (B, 1, 64, 64) original images
 
     with torch.no_grad():
@@ -80,10 +81,16 @@ def main():
             ).unsqueeze(1).to(device)
             z_e = model.encoder(batch)
             z_q, _ = model.fsq(z_e)
+            # Get bounded continuous values (before rounding)
+            fsq = model.fsq
+            half = fsq.half_levels.view(1, -1, 1, 1)
+            z_bounded = torch.tanh(z_e) * half
+            all_z_e.append(z_bounded.cpu())
             all_z_q.append(z_q.cpu())
             all_imgs.append(batch.cpu())
 
     all_z_q = torch.cat(all_z_q)  # (N, D, 8, 8)
+    all_z_e = torch.cat(all_z_e)  # (N, D, 8, 8)
     all_imgs = torch.cat(all_imgs)  # (N, 1, 64, 64)
 
     n_dims = len(args.levels)
@@ -268,6 +275,50 @@ def main():
     print(f"Optimal sigma: {best_sigma:.1f}")
     print(f"Recommended: --fsq-sigma {best_sigma:.1f} "
           f"--fsq-dim-weights {' '.join(f'{w:.2f}' for w in dim_weights)}")
+
+    # Quantization margin analysis: estimate natural label smoothing epsilon
+    # The FSQ rounds z_bounded to the nearest integer. The "margin" is how
+    # close z_bounded was to rounding differently. Small margin = ambiguous token.
+    print()
+    print("=" * 72)
+    print("Quantization margin analysis (natural label smoothing epsilon)")
+
+    # z_bounded is continuous, z_q is rounded. Margin = |z_bounded - z_q|
+    # per dimension per position. Range is [0, 0.5] (0 = exactly on boundary,
+    # 0.5 = dead center of a level).
+    margin = (all_z_e - all_z_q).abs()  # (N, D, 8, 8)
+
+    # A token is "ambiguous" if ANY dimension has margin < threshold
+    # (it could have rounded to a different code)
+    print(f"\n{'Threshold':<12} {'Ambiguous%':>10} {'Per-dim margins':>40}")
+    print("-" * 65)
+
+    per_dim_means = [margin[:, d].mean().item() for d in range(n_dims)]
+    print(f"{'(mean)':>12} {'':>10} "
+          f"{' '.join(f'd{d}={m:.3f}' for d, m in enumerate(per_dim_means)):>40}")
+
+    for threshold in [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]:
+        # Token is ambiguous if any dim has margin below threshold
+        close_any_dim = (margin < threshold).any(dim=1)  # (N, 8, 8)
+        ambiguous_frac = close_any_dim.float().mean().item()
+        # Per-dim breakdown
+        per_dim = [(margin[:, d] < threshold).float().mean().item() for d in range(n_dims)]
+        per_dim_str = " ".join(f"d{d}={v:.1%}" for d, v in enumerate(per_dim))
+        print(f"{threshold:<12.2f} {ambiguous_frac:>9.1%} {per_dim_str:>40}")
+
+    # Recommended epsilon: fraction of tokens within margin 0.25
+    # (halfway to the next level = coin flip territory)
+    ambig_025 = (margin < 0.25).any(dim=1).float().mean().item()
+    print(f"\nRecommended --label-smoothing {ambig_025:.2f}")
+    print(f"  (fraction of tokens with any dim within 0.25 of a boundary)")
+
+    # Full recommendation
+    print()
+    print("=" * 72)
+    print("Full recommendation:")
+    print(f"  --fsq-sigma {best_sigma:.1f} "
+          f"--fsq-dim-weights {' '.join(f'{w:.2f}' for w in dim_weights)} "
+          f"--label-smoothing {ambig_025:.2f}")
 
 
 if __name__ == "__main__":
