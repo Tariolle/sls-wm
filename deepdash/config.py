@@ -103,6 +103,6 @@ def apply_config(
 
     for key, value in config.items():
         arg_key = key.replace("-", "_")
-        if hasattr(args, arg_key) and getattr(args, arg_key) is None:
+        if not hasattr(args, arg_key) or getattr(args, arg_key) is None:
             setattr(args, arg_key, value)
     return args
