@@ -135,10 +135,16 @@ class WorldModel(nn.Module):
         self._init_weights()
 
         # Zero-init AdaLN projections AFTER _init_weights
+        # Weights=0, scale/shift biases=0: model starts as standard transformer.
+        # Gate biases=1: full residual flow from the start (not dead blocks).
         if adaln:
             for block in self.blocks:
-                nn.init.zeros_(block.adaln_proj[-1].weight)
-                nn.init.zeros_(block.adaln_proj[-1].bias)
+                linear = block.adaln_proj[-1]
+                nn.init.zeros_(linear.weight)
+                nn.init.zeros_(linear.bias)
+                D = linear.out_features // 6
+                nn.init.constant_(linear.bias[2*D:3*D], 1.0)  # gate1
+                nn.init.constant_(linear.bias[5*D:6*D], 1.0)  # gate2
 
     def _backbone_forward(self, x, cond=None):
         """Run transformer blocks + final layernorm (compile-friendly hot path)."""
