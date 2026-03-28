@@ -94,7 +94,7 @@ def compute_hidden_states(model, ctx_tokens, ctx_actions, device, batch_size=256
         ct_t = torch.from_numpy(ct_with_status).to(device)
         ca_t = torch.from_numpy(ca).to(device)
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
             _, _, h_t = m.predict_next_frame(
                 ct_t, ca_t, temperature=0.0, return_hidden=True)
 
