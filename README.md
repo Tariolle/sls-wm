@@ -55,13 +55,14 @@ A complete inference pipeline achieving 30 FPS real-time play on a live game, wi
 ## Pipeline
 
 ```
-1. Record gameplay    ->  data/death_episodes/, data/expert_episodes/
-2. Train FSQ-VAE      ->  checkpoints/fsq_best.pt
-3. Tokenize episodes  ->  tokens.npy per episode
-4. Train Transformer  ->  checkpoints/transformer_best.pt
-5. BC pretrain        ->  checkpoints/controller_bc_best.pt
-6. PPO finetune       ->  checkpoints/controller_ppo_best.pt
-7. Deploy             ->  python scripts/deploy.py
+1. Record gameplay       ->  data/death_episodes/, data/expert_episodes/
+2. Shift augmentation    ->  5x vertical shifts per episode
+3. Train FSQ-VAE         ->  checkpoints/fsq_best.pt
+4. Tokenize episodes     ->  tokens.npy per episode
+5. Train Transformer     ->  checkpoints/transformer_best.pt
+6. BC pretrain           ->  checkpoints/controller_bc_best.pt
+7. PPO finetune          ->  checkpoints/controller_ppo_best.pt
+8. Deploy                ->  python scripts/deploy.py
 ```
 
 ## Data
@@ -78,12 +79,13 @@ A complete inference pipeline achieving 30 FPS real-time play on a live game, wi
 - GRWM regularization, shift augmentation, cosine LR, 200 epochs on A100
 
 ### Transformer
+- AdaLN-Zero action conditioning (DiT/LeWorldModel) + QK-norm (SD3/MMDiT)
 - Block-causal attention + 3D-RoPE + AC-CPC weight 1.0 (TWISTER)
 - Focal loss + structured label smoothing (sigma=0.9) + dual token noise
 - Vertical-only shift augmentation (5x), death oversample 5x
 - No masking (all target tokens predicted, no ground truth leakage)
-- 384d embedding, 8 heads, 8 layers, dropout 0.1
-- 200 epochs, LR 2e-3, batch 512
+- 512d embedding, 8 heads, 8 layers, dropout 0.15
+- 200 epochs, LR 4e-3, batch 512
 
 ### Controller
 - **BC**: death + expert episodes, class-weighted BCE (1.5x jumps), early stopping
