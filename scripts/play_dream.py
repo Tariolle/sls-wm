@@ -131,12 +131,12 @@ def main():
     parser.add_argument("--n-layers", type=int, default=None)
     parser.add_argument("--tokens-per-frame", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
-    parser.add_argument("--max-steps", type=int, default=30,
+    parser.add_argument("--max-dream-steps", type=int, default=None,
                         help="Max dream steps before auto-restart (0 = unlimited)")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
-    apply_config(args)
+    apply_config(args, section="controller_ppo")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -310,7 +310,7 @@ def main():
         steps += 1
 
         actually_died = death_prob_val > 0.5
-        reached_max = args.max_steps > 0 and steps >= args.max_steps
+        reached_max = args.max_dream_steps > 0 and steps >= args.max_dream_steps
         if actually_died or reached_max:
             dead = True
             dead_by_death = actually_died
