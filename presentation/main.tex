@@ -21,6 +21,25 @@
 % Reduce frame title spacing to prevent overflow
 \addtobeamertemplate{frametitle}{}{\vspace*{-0.3em}}
 
+% ---- Architecture constants: change here, propagates everywhere ----
+\newcommand{\hdim}{512}              % transformer embed dim / h_t dim
+\newcommand{\nheads}{8}              % attention heads
+\newcommand{\nlayers}{8}             % transformer layers
+\newcommand{\framesize}{64}          % input frame resolution (pixels)
+\newcommand{\spatialres}{8}          % token grid side length
+\newcommand{\ntokens}{64}            % tokens per frame (\spatialres^2)
+\newcommand{\fsqcodes}{1000}         % FSQ codebook size
+\newcommand{\vocabsize}{1002}        % full vocab (\fsqcodes + ALIVE + DEATH)
+\newcommand{\contextK}{4}            % context frames K
+\newcommand{\seqlen}{329}            % input sequence length (\contextK*65 + \contextK + 65)
+\newcommand{\nshifts}{5}             % number of vertical augmentation shifts
+\newcommand{\nbaseepisodes}{4{,}264} % base episode count
+\newcommand{\naugeps}{21{,}320}      % augmented episodes (\nshifts * \nbaseepisodes)
+\newcommand{\ndeatheps}{4{,}200}     % death episodes (approx)
+\newcommand{\nexperteps}{36}         % expert episodes
+\newcommand{\cnnflat}{256}           % controller CNN flatten output dim (64ch * 2*2)
+\newcommand{\concatdim}{768}         % controller concat dim (\cnnflat + \hdim)
+
 \title{DeepDash}
 \subtitle{World Models for Geometry Dash}
 \author{Florent Tariolle \& Maël Planchot}
@@ -79,7 +98,7 @@
 
     \draw[arr] (input) -- (V);
     \draw[arr] (V) -- node[above, lbl] {$\mathbf{z}_t$} node[below, lbl] {\tiny 8$\times$8} (M);
-    \draw[arr] (M) -- node[above, lbl] {$\mathbf{h}_t$} node[below, lbl] {\tiny 384} (C);
+    \draw[arr] (M) -- node[above, lbl] {$\mathbf{h}_t$} node[below, lbl] {\tiny \hdim} (C);
     \draw[arr] (C) -- (output);
 
     \draw[arr] (V.north) -- ++(0,0.5) -| node[above, lbl, pos=0.25] {$\mathbf{z}_t$} (C.north);
@@ -92,9 +111,9 @@
   \begin{center}
     \small
     \begin{tabular}{c@{\hspace{3em}}c}
-      $\mathbf{x}_t \in \mathbb{R}^{64 \times 64}$: grayscale Sobel frame &
-      $\mathbf{z}_t \in \{0,\ldots,999\}^{64}$: discrete tokens \\[0.3em]
-      $\mathbf{h}_t \in \mathbb{R}^{384}$: hidden state &
+      $\mathbf{x}_t \in \mathbb{R}^{\framesize \times \framesize}$: grayscale Sobel frame &
+      $\mathbf{z}_t \in \{0,\ldots,\fsqcodes-1\}^{\ntokens}$: discrete tokens \\[0.3em]
+      $\mathbf{h}_t \in \mathbb{R}^{\hdim}$: hidden state &
       $a_t \in \{0, 1\}$: jump/idle
     \end{tabular}
   \end{center}
@@ -112,15 +131,15 @@
       \includegraphics[width=0.2\textwidth]{preprocessing_2_cropped.png} &
       \includegraphics[width=0.2\textwidth]{preprocessing_3_sobel.png} &
       \includegraphics[width=0.2\textwidth]{preprocessing_4_final.png} \\
-      {\scriptsize Raw 1080p} & {\scriptsize Square crop} & {\scriptsize Sobel edges} & {\scriptsize 64$\times$64}
+      {\scriptsize Raw 1080p} & {\scriptsize Square crop} & {\scriptsize Sobel edges} & {\scriptsize \framesize$\times$\framesize}
     \end{tabular}
   \end{center}
 
   \begin{itemize}
     \item Live gameplay at \textbf{30 FPS}, death detection via process memory reading
     \item Frames + actions recorded simultaneously, saved as \texttt{.npy} per episode
-    \item \textbf{Death episodes}: $\sim$4,200 episodes, $\sim$219K frames (intentional deaths at obstacles)
-    \item \textbf{Expert episodes}: $\sim$36 clean runs, $\sim$33K frames (no deaths, for BC + rebalancing world model)
+    \item \textbf{Death episodes}: $\sim$\ndeatheps{} episodes, $\sim$219K frames (intentional deaths at obstacles)
+    \item \textbf{Expert episodes}: $\sim$\nexperteps{} clean runs, $\sim$33K frames (no deaths, for BC + rebalancing world model)
   \end{itemize}
 \end{frame}
 
@@ -148,7 +167,7 @@
   \end{center}
 
   \begin{itemize}
-    \item 5 vertical shifts $\times$ 4,264 episodes $=$ \textbf{21,320 augmented episodes}
+    \item \nshifts{} vertical shifts $\times$ \nbaseepisodes{} episodes $=$ \textbf{\naugeps{} augmented episodes}
     \item Vertical shifts simulate different stage elevations (identical dynamics, physically valid)
     \item Horizontal shifts removed: player X position is fixed in Geometry Dash
     \item Edge padding to fill shifted borders
@@ -168,7 +187,7 @@
 
   \vspace{0.3em}
   \begin{center}
-    Levels $[8,5,5,5]$ $\Rightarrow$ 1000 codes, $8\times8$ grid $=$ \textbf{64 tokens/frame}
+    Levels $[8,5,5,5]$ $\Rightarrow$ \fsqcodes{} codes, $\spatialres\times\spatialres$ grid $=$ \textbf{\ntokens{} tokens/frame}
   \end{center}
   % TODO: add before/after reconstruction comparison
 \end{frame}
@@ -294,7 +313,7 @@
 
 \begin{frame}{FSQ-VAE: Training}
   \begin{itemize}
-    \item $\sim$252K frames, batch 2048
+    \item $\sim$252K frames ($\sim$\naugeps{} episodes), batch 2048
     \item GRWM regularization (temporal slowness + uniformity)
     \item Cosine LR schedule, 200 epochs
     \item GPU: A100, total training time: $\sim$48 min
@@ -337,7 +356,7 @@
   \begin{itemize}
     \item Encoder + FSQ frozen after training, used in the full pipeline
     \item Decoder kept only for visualizing Transformer dream rollouts
-    \item 51$\times$ compression: $64 \times 64 \times 8 = 32{,}768$ bits $\to$ $64 \times \underbrace{\lceil\log_2 1000\rceil}_{10} = 640$ bits
+    \item 51$\times$ compression: $\framesize \times \framesize \times 8 = 32{,}768$ bits $\to$ $\ntokens \times \underbrace{\lceil\log_2 \fsqcodes\rceil}_{10} = 640$ bits
   \end{itemize}
 \end{frame}
 
@@ -355,10 +374,10 @@
     arr/.style={-{Stealth[length=2.5mm]}, thick},
     lbl/.style={font=\tiny, align=center},
   ]
-    \node[lbl] (in) {$\mathbf{z}_{t-K:t}$, $a_{t-K:t}$\\{\tiny 329 tokens}};
+    \node[lbl] (in) {$\mathbf{z}_{t-K:t}$, $a_{t-K:t}$\\{\tiny \seqlen{} tokens}};
     \node[block, minimum width=2cm, right=0.6cm of in] (emb) {Token + Action\\Embedding};
     \node[block, minimum width=2cm, right=0.6cm of emb] (rope) {3D-RoPE\\{\tiny row, col, frame}\\{\tiny block-causal}};
-    \node[block, minimum width=2.5cm, right=0.6cm of rope, fill=mcolor!25] (blocks) {8$\times$ Transformer\\Block (384d, 8H)};
+    \node[block, minimum width=2.5cm, right=0.6cm of rope, fill=mcolor!25] (blocks) {\nlayers$\times$ Transformer\\Block (\hdim d, \nheads H)};
     \node[block, minimum width=2cm, right=0.6cm of blocks] (head) {Prediction\\Head};
     \node[lbl, right=0.6cm of head] (out1) {$\hat{\mathbf{z}}_{t+1}$, $\hat{d}_{t+1}$\\{\tiny 64 tokens + death}};
 
@@ -371,7 +390,7 @@
     \draw[arr] (blocks) -- (cpc);
     \draw[arr] (head) -- (out1);
 
-    \node[below=0.4cm of blocks, lbl, font=\scriptsize] (ht) {$\mathbf{h}_t \in \mathbb{R}^{384}$};
+    \node[below=0.4cm of blocks, lbl, font=\scriptsize] (ht) {$\mathbf{h}_t \in \mathbb{R}^{\hdim}$};
     \draw[arr, ccolor] (blocks.south) -- (ht);
   \end{tikzpicture}%
   }
@@ -380,9 +399,9 @@
   \vspace{0.3em}
   \begin{center}
     \small
-    14.7M params \quad\quad
-    Parallel decode: 1 step vs 65 autoregressive \quad\quad
-    Vocab: $|\mathcal{V}| = 1002$
+    $\sim$35M params \quad\quad
+    Parallel decode: 1 step vs \ntokens+1 autoregressive \quad\quad
+    Vocab: $|\mathcal{V}| = \vocabsize$
   \end{center}
 \end{frame}
 
@@ -495,7 +514,7 @@
 
   \vspace{0.3em}
   \begin{itemize}
-    \item Seeded with $K{=}4$ real frames, then dreams autoregressively
+    \item Seeded with $K{=}\contextK$ real frames, then dreams autoregressively
     \item Rollout stops when death predicted or max steps reached
   \end{itemize}
 \end{frame}
@@ -530,7 +549,7 @@
 % ==========================================================
 
 \begin{frame}{Controller: Architecture}
-  \textbf{CNNPolicy} (40K params): CNN actor-critic on 8$\times$8 token grid
+  \textbf{CNNPolicy} (40K params): CNN actor-critic on $\spatialres\times\spatialres$ token grid
 
   \vspace{0.5em}
   \begin{center}
@@ -540,12 +559,12 @@
     arr/.style={-{Stealth[length=2.5mm]}, thick},
     lbl/.style={font=\tiny, align=center},
   ]
-    \node[block] (emb) {Embed(1000, 16)\\{\tiny $\to$ (16, 8, 8)}};
+    \node[block] (emb) {Embed(\fsqcodes, 16)\\{\tiny $\to$ (16, \spatialres, \spatialres)}};
     \node[block, right=0.6cm of emb] (c1) {Conv 32\\MaxPool};
     \node[block, right=0.6cm of c1] (c2) {Conv 64\\MaxPool};
-    \node[block, right=0.6cm of c2] (flat) {Flatten\\{\tiny 384d}};
-    \node[block, fill=mcolor!10, draw=mcolor, above=0.4cm of flat] (ht) {$\mathbf{h}_t$\\{\tiny 384d}};
-    \node[block, right=1cm of flat] (cat) {Concat\\{\tiny 512d}};
+    \node[block, right=0.6cm of c2] (flat) {Flatten\\{\tiny \cnnflat d}};
+    \node[block, fill=mcolor!10, draw=mcolor, above=0.4cm of flat] (ht) {$\mathbf{h}_t$\\{\tiny \hdim d}};
+    \node[block, right=1cm of flat] (cat) {Concat\\{\tiny \concatdim d}};
     \node[block, right=0.6cm of cat] (heads) {Actor + Critic};
 
     \draw[arr] (emb) -- (c1);
@@ -559,7 +578,7 @@
   \end{center}
 
   \vspace{0.5em}
-  Inputs: token grid $\mathbf{z}_t \in \{0,\ldots,999\}^{8 \times 8}$ + hidden state $\mathbf{h}_t \in \mathbb{R}^{256}$
+  Inputs: token grid $\mathbf{z}_t \in \{0,\ldots,\fsqcodes-1\}^{\spatialres \times \spatialres}$ + hidden state $\mathbf{h}_t \in \mathbb{R}^{\hdim}$
 \end{frame}
 
 \begin{frame}{Controller: Training Protocol}
