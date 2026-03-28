@@ -523,18 +523,19 @@ def main():
     best_val_loss = float("inf")
 
     wandb_resume_id = None
+    resume_state = None
     if args.resume:
         resume_path = ckpt_dir / "transformer_state.pt"
         if resume_path.exists():
-            state = torch.load(resume_path, map_location=device, weights_only=False)
-            model.load_state_dict(state["model"])
-            optimizer.load_state_dict(state["optimizer"])
-            if "scaler" in state:
-                scaler.load_state_dict(state["scaler"])
-            start_epoch = state["epoch"] + 1
-            best_val_loss = state["best_val_loss"]
-            wandb_resume_id = state.get("wandb_run_id")
-            print(f"Resumed from epoch {state['epoch']} (best val loss: {best_val_loss:.4f})")
+            resume_state = torch.load(resume_path, map_location=device, weights_only=False)
+            model.load_state_dict(resume_state["model"])
+            optimizer.load_state_dict(resume_state["optimizer"])
+            if "scaler" in resume_state:
+                scaler.load_state_dict(resume_state["scaler"])
+            start_epoch = resume_state["epoch"] + 1
+            best_val_loss = resume_state["best_val_loss"]
+            wandb_resume_id = resume_state.get("wandb_run_id")
+            print(f"Resumed from epoch {resume_state['epoch']} (best val loss: {best_val_loss:.4f})")
         else:
             print("No checkpoint found, starting fresh.")
 
@@ -591,8 +592,9 @@ def main():
         optimizer, T_max=args.epochs - warmup_epochs, eta_min=args.lr_min)
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer, [warmup_scheduler, cosine_scheduler],
-        milestones=[warmup_epochs],
-        last_epoch=start_epoch - 2 if start_epoch > 1 else -1)
+        milestones=[warmup_epochs])
+    if resume_state is not None and "scheduler" in resume_state:
+        scheduler.load_state_dict(resume_state["scheduler"])
 
     log_path = ckpt_dir / "transformer_log.csv"
     log_header = ["epoch", "train_total", "train_loss", "train_acc",
