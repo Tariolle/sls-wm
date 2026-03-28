@@ -38,7 +38,7 @@ A complete inference pipeline achieving 30 FPS real-time play on a live game, wi
 | Component | Model | Params | Function |
 |-----------|-------|--------|----------|
 | **V** (Vision) | FSQ-VAE [8,5,5,5] | 1.9M (0.9M encoder) | 64x64 Sobel frame to 8x8 discrete tokens (1000 codes) |
-| **M** (Memory) | Transformer 384d/8H/8L | 14.7M | Predicts next tokens + death, produces h_t |
+| **M** (Memory) | Transformer 512d/8H/8L + AdaLN + QK-norm | ~35M | Predicts next tokens + death, produces h_t |
 | **C** (Controller) | CNNPolicy + MTP | ~40K | Token grid + h_t to jump/idle (+ 8-step action prediction) |
 
 ## Results (V3)
