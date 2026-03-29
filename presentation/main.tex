@@ -168,7 +168,7 @@
 
   \begin{itemize}
     \item \nshifts{} vertical shifts $\times$ \nbaseepisodes{} episodes $=$ \textbf{\naugeps{} augmented episodes}
-    \item Vertical shifts simulate different stage elevations (identical dynamics, physically valid)
+    \item Vertical shifts simulate different stage elevations (physically valid)
     \item Horizontal shifts removed: player X position is fixed in Geometry Dash
     \item Edge padding to fill shifted borders
   \end{itemize}
@@ -519,28 +519,29 @@
   \end{itemize}
 \end{frame}
 
-\begin{frame}{Transformer: Training Results}
-  Progression across versions (200 epochs each, same data split):
-
+\begin{frame}{Transformer: Current Model (V4)}
   \vspace{0.5em}
   \begin{center}
     \small
-    \begin{tabular}{lccc}
+    \begin{tabular}{lc}
       \toprule
-      Metric & V1 (256d) & V2 (256d) & \textbf{V3 (384d)} \\
+      \textbf{Metric} & \textbf{Value} \\
       \midrule
-      Val accuracy & 36.06\% & 34.22\% & \textbf{35.6\%} \\
-      Death F1 & 0.72 & 0.73 & \textbf{0.78} \\
-      Val CPC loss & -- & 0.203 & \textbf{0.166} \\
-      Train/val gap & 3.7\% & 1.6\% & 3.6\% \\
+      Parameters & $\sim$35M \\
+      Val accuracy & 27.7\% \\
+      Death F1 & 0.79 \\
+      Val CPC loss & \textbf{0.133} \\
       \bottomrule
     \end{tabular}
   \end{center}
 
   \vspace{0.5em}
+  Key changes from earlier versions:
   \begin{itemize}
-    \item V2: removed masking (fixed train/inference mismatch), AC-CPC 1.0
-    \item V3: scaled 256d $\to$ 384d (14.7M params), better death prediction and CPC
+    \item \textbf{AdaLN-Zero} action conditioning (6 params/block, gate bias 1.0)
+    \item \textbf{QK-norm} (RMSNorm per head) to stabilize attention under AdaLN
+    \item Scaled 256d $\to$ 512d, new FSQ with 5$\times$ shift augmentation
+    \item Structured label smoothing ($\sigma$=0.9) + dual token noise
   \end{itemize}
 \end{frame}
 
