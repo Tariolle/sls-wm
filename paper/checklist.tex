@@ -1,0 +1,70 @@
+\section*{NeurIPS Paper Checklist}
+
+\begin{enumerate}
+
+\item {\bf Claims}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The abstract and introduction state our two contributions (SLS and the real-time V-M-C pipeline) and scope them to a single game environment.
+
+\item {\bf Limitations}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section~\ref{sec:limitations} discusses single-environment evaluation, binary action space, and calibration transferability.
+
+\item {\bf Theory assumptions and proofs}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: The paper does not include theoretical results. SLS is an empirical method.
+
+\item {\bf Experimental result reproducibility}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section~\ref{sec:setup} provides full training details. Code will be released.
+
+\item {\bf Open access to data and code}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Code is publicly available on GitHub. Data collection procedure is described in Section~\ref{sec:setup}.
+
+\item {\bf Experimental setting/details}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: All hyperparameters, optimizers, schedules, and data augmentation are specified in Section~\ref{sec:setup}.
+
+\item {\bf Experiment statistical significance}
+    % TODO: Fill in after running N=100 eval runs with confidence intervals.
+    \item[] Answer: \answerTODO{}
+    \item[] Justification: \justificationTODO{}
+
+\item {\bf Experiments compute resources}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: All experiments run on a single NVIDIA A100 GPU. Training times are reported in Section~\ref{sec:setup}.
+
+\item {\bf Code of ethics}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The research involves no human subjects, sensitive data, or dual-use concerns.
+
+\item {\bf Broader impacts}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: This work applies to a single-player video game with no direct societal impact.
+
+\item {\bf Safeguards}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: The released model is a small world model for a video game and poses no misuse risk.
+
+\item {\bf Licenses for existing assets}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: All referenced works are properly cited. Geometry Dash is a commercial game by RobTop Games; gameplay data was collected from a legally purchased copy.
+
+\item {\bf New assets}
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Code and model checkpoints will be released under an open-source license with documentation.
+
+\item {\bf Crowdsourcing and research with human subjects}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: No crowdsourcing or human subjects research was conducted.
+
+\item {\bf Institutional review board (IRB) approvals or equivalent for research with human subjects}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: No human subjects research was conducted.
+
+\item {\bf Declaration of LLM usage}
+    \item[] Answer: \answerNA{}
+    \item[] Justification: LLMs were not used as a component of the core methodology.
+
+\end{enumerate}

@@ -1,0 +1,360 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+
+% ===== Architectural constants (change once, propagate everywhere) =====
+\newcommand{\hdim}{512}
+\newcommand{\nheads}{8}
+\newcommand{\nlayers}{8}
+\newcommand{\nctx}{4}
+\newcommand{\ntokens}{64}
+\newcommand{\vocabsize}{1{,}000}
+\newcommand{\fsqlevels}{[8, 5, 5, 5]}
+\newcommand{\gridsize}{8 \times 8}
+\newcommand{\imgsize}{64 \times 64}
+\newcommand{\fsqsigma}{0.9}
+\newcommand{\fsqeps}{0.1}
+\newcommand{\fsqdimweights}{[1.29, 0.85, 0.97, 0.89]}
+\newcommand{\focalgamma}{2.0}
+\newcommand{\nparams}{35\text{M}}
+
+\title{Structured Label Smoothing over Finite Scalar Quantization\\for Real-Time World Models}
+
+\author{%
+  Florent Tariolle \\
+  INSA Rouen Normandie \\
+  \texttt{florent.tariolle@gmail.com} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+World models that tokenize visual observations with Finite Scalar Quantization (FSQ) inherit a structured codebook where each code maps to a point on a discrete coordinate lattice.
+Standard cross-entropy training ignores this structure, treating all incorrect predictions as equally wrong.
+We introduce \emph{Structured Label Smoothing} (SLS), a training objective that distributes smoothing mass according to a Gaussian kernel over FSQ coordinate distances, weighted by per-dimension perceptual sensitivity.
+We integrate SLS into a full Vision-Model-Controller pipeline for the platformer game Geometry Dash, combining an FSQ tokenizer, a causally-masked transformer with Adaptive Layer Normalization and 3D Rotary Position Embeddings, and a PPO controller trained entirely in dreamed rollouts.
+The resulting system runs at 30\,FPS on consumer hardware.
+% TODO: Add headline result once model is frozen (e.g., "achieving X\% progress on Level 1").
+\end{abstract}
+
+% ===========================================================================
+\section{Introduction}
+\label{sec:intro}
+% ===========================================================================
+
+Learning world models that predict future observations from actions is central to model-based reinforcement learning~\citep{ha2018world}.
+Recent approaches tokenize visual frames into discrete codes and train autoregressive transformers to predict token sequences~\citep{micheli2023iris, hafner2023dreamerv3}.
+Finite Scalar Quantization~\citep[FSQ;][]{mentzer2024fsq} offers a simple alternative to VQ-VAE codebooks: each latent vector is independently rounded to one of $L$ levels per dimension, yielding $\prod_d L_d$ implicit codes with no codebook collapse and no auxiliary losses.
+
+A key property of FSQ, largely unexploited in downstream tasks, is that its codebook has a natural coordinate structure.
+Each code maps to a point on a $D$-dimensional integer lattice, and the distance between two codes in this space is semantically meaningful: codes that differ by one step in one dimension represent visually similar patches.
+Yet standard cross-entropy training treats all incorrect predictions as equally wrong, discarding this metric information entirely.
+
+Label smoothing~\citep{szegedy2016rethinking} is a well-known regularizer that replaces hard targets with a mixture of the ground truth and a uniform distribution over classes.
+We observe that for FSQ-tokenized world models, the uniform assumption is suboptimal: a token one lattice step away from the target is a near-miss, while a token at the opposite corner of the codebook is a gross error.
+We propose \emph{Structured Label Smoothing} (SLS), which replaces the uniform component with a Gaussian kernel over FSQ coordinate distances, calibrated by per-dimension sensitivity weights derived from empirical patch reconstruction error.
+
+We evaluate SLS within a complete Vision-Model-Controller (V-M-C) pipeline for Geometry Dash, a fast-paced platformer that demands frame-accurate predictions under a 33\,ms latency budget.
+Our system consists of three components: (1)~an FSQ tokenizer that encodes $\imgsize$ Sobel edge maps into $\gridsize$ grids of discrete tokens, (2)~a $\nparams$-parameter causal transformer with Adaptive Layer Normalization (AdaLN-Zero) for action conditioning~\citep{peebles2023dit} and QK-norm for attention stability~\citep{esser2024sd3}, and (3)~a lightweight CNN controller trained via PPO entirely in dreamed rollouts~\citep{schulman2017ppo}.
+The full pipeline achieves real-time inference at 30\,FPS on consumer hardware.
+
+Our contributions are:
+\begin{enumerate}
+  \item \textbf{Structured Label Smoothing (SLS)}: a training objective that exploits FSQ coordinate geometry to distribute smoothing mass according to codebook distance, generalizable to any discrete latent space with a coordinate metric.
+  \item \textbf{A real-time world model system}: a complete V-M-C pipeline for Geometry Dash running at 30\,FPS, combining FSQ tokenization, AdaLN-conditioned transformers, and PPO-in-dreams.
+  % TODO: Add quantitative contribution once ablations are done.
+\end{enumerate}
+
+% ===========================================================================
+\section{Related work}
+\label{sec:related}
+% ===========================================================================
+
+\paragraph{Discrete world models.}
+\citet{ha2018world} introduced the Vision-Model-Controller paradigm, encoding frames with a VAE, modeling dynamics with an RNN, and training a controller in dreamed rollouts.
+IRIS~\citep{micheli2023iris} replaced the VAE with a discrete tokenizer and the RNN with an autoregressive transformer, showing that discrete tokens enable sample-efficient learning.
+DreamerV3~\citep{hafner2023dreamerv3} demonstrated that discrete representations with symlog predictions generalize across diverse domains.
+TWISTER~\citep{pignatelli2024twister} added action-conditioned contrastive predictive coding (AC-CPC) to improve temporal coherence.
+Our work builds on these ideas but focuses on a previously unexploited axis: the structure of the discrete codebook itself.
+
+\paragraph{Finite Scalar Quantization.}
+FSQ~\citep{mentzer2024fsq} replaces learned codebooks with per-dimension rounding to fixed levels, eliminating codebook collapse and commitment losses.
+Each code is a point on a $D$-dimensional integer lattice, giving the codebook a natural coordinate structure.
+Prior work has used FSQ as a drop-in replacement for VQ-VAE but has not leveraged this coordinate structure during training.
+
+\paragraph{Label smoothing.}
+\citet{szegedy2016rethinking} proposed replacing one-hot targets with a uniform mixture to reduce overconfidence.
+While effective as a regularizer, uniform smoothing ignores class relationships.
+Knowledge distillation and soft-target methods~distribute mass based on teacher predictions, but require a separate teacher model.
+We instead derive the target distribution from the codebook geometry itself, requiring no additional model.
+
+\paragraph{Adaptive conditioning.}
+FiLM~\citep{perez2018film} introduced adaptive affine conditioning via scale and shift parameters.
+DiT~\citep{peebles2023dit} applied this as AdaLN-Zero with zero-initialized gates for stable training of diffusion transformers.
+\citet{esser2024sd3} added QK-norm (RMSNorm on queries and keys per head) to stabilize attention logits in deep AdaLN models.
+LeWorldModel~\citep{baranes2025leworldmodel} applied AdaLN to world model transformers for robot manipulation.
+We adopt AdaLN-Zero with QK-norm for action conditioning, finding that QK-norm is essential for training stability (Section~\ref{sec:adaln}).
+
+% ===========================================================================
+\section{Method}
+\label{sec:method}
+% ===========================================================================
+
+Our system follows the Vision-Model-Controller (V-M-C) paradigm~\citep{ha2018world}.
+We describe each component below, with Structured Label Smoothing (Section~\ref{sec:sls}) as the primary contribution.
+
+% ---------------------------------------------------------------------------
+\subsection{FSQ tokenization (Vision)}
+\label{sec:fsq}
+% ---------------------------------------------------------------------------
+
+We encode $\imgsize$ grayscale Sobel edge maps using an FSQ-VAE with levels $\fsqlevels$, producing $\vocabsize$ implicit codes.
+The encoder applies three stride-2 convolutional blocks with residual connections, projecting to a 4-channel latent map of size $\gridsize$.
+Each spatial position is independently quantized by applying $\tanh$, scaling to half-levels, and rounding, yielding $\ntokens$ tokens per frame.
+The decoder mirrors the encoder with transposed convolutions.
+
+Training minimizes MSE reconstruction loss with two regularizers from \citet{wang2020uniformity}: temporal slowness ($\lambda_\text{slow} = 0.1$) encouraging smooth latent trajectories across consecutive frames, and a uniformity loss ($\lambda_\text{unif} = 0.01$) preventing representational collapse.
+The FSQ-VAE achieves full codebook utilization ($\vocabsize / \vocabsize$ active codes, perplexity 766).
+
+% ---------------------------------------------------------------------------
+\subsection{Structured Label Smoothing}
+\label{sec:sls}
+% ---------------------------------------------------------------------------
+
+\paragraph{Motivation.}
+Standard label smoothing~\citep{szegedy2016rethinking} replaces a one-hot target $\mathbf{e}_i$ with:
+\begin{equation}
+  q_\text{uniform}(j \mid i) = (1 - \varepsilon)\,\delta_{ij} + \frac{\varepsilon}{V - 1}(1 - \delta_{ij}),
+  \label{eq:uniform_ls}
+\end{equation}
+where $V = \vocabsize$ is the vocabulary size and $\varepsilon$ controls the smoothing strength.
+This distributes $\varepsilon$ uniformly across all alternatives, ignoring codebook geometry.
+
+\paragraph{FSQ coordinate distance.}
+An FSQ codebook with levels $\mathbf{L} = (L_1, \dots, L_D)$ assigns each code $i$ a coordinate vector $\mathbf{c}(i) = (c_1(i), \dots, c_D(i))$ on a $D$-dimensional integer lattice.
+We define the weighted squared distance:
+\begin{equation}
+  d^2(i, j) = \sum_{d=1}^{D} \alpha_d \left( c_d(i) - c_d(j) \right)^2,
+  \label{eq:fsq_dist}
+\end{equation}
+where $\alpha_d$ are per-dimension sensitivity weights.
+
+\paragraph{Per-dimension calibration.}
+To determine $\boldsymbol{\alpha}$, we measure how much a one-step perturbation in each FSQ dimension affects the decoded image.
+For 800 randomly sampled patches, we perturb each dimension $d$ by $\pm 1$, decode both the original and perturbed codes, and compute the mean patch-wise MSE.
+The weights $\alpha_d$ are set proportional to these empirical sensitivities, normalized to mean 1.
+This yields $\boldsymbol{\alpha} = \fsqdimweights$ for our $\fsqlevels$ codebook, indicating that dimension~1 (with 8 levels) carries the most perceptual information.
+
+\paragraph{Gaussian kernel smoothing.}
+We replace the uniform distribution in Equation~\ref{eq:uniform_ls} with a Gaussian kernel over FSQ distances:
+\begin{equation}
+  w(i, j) = \exp\!\left( -\frac{d^2(i, j)}{2\sigma^2} \right), \quad j \neq i,
+  \label{eq:gaussian_kernel}
+\end{equation}
+yielding the structured smooth target:
+\begin{equation}
+  q_\text{SLS}(j \mid i) =
+  \begin{cases}
+    1 - \varepsilon & \text{if } j = i, \\[4pt]
+    \displaystyle \varepsilon \cdot \frac{w(i, j)}{\sum_{k \neq i} w(i, k)} & \text{otherwise}.
+  \end{cases}
+  \label{eq:sls}
+\end{equation}
+The full target matrix $\mathbf{Q} \in \mathbb{R}^{V \times V}$ is precomputed once and stored on GPU.
+We use $\sigma = \fsqsigma$ and $\varepsilon = \fsqeps$.
+
+\paragraph{Integration with focal loss.}
+To handle class imbalance (background tokens dominate over obstacle and spike tokens), we combine SLS with focal loss~\citep{lin2017focal}:
+\begin{equation}
+  \mathcal{L}_\text{SLS-focal} = -\sum_{j=1}^{V} (1 - p_j)^\gamma \, q_\text{SLS}(j \mid i) \, \log p_j,
+  \label{eq:sls_focal}
+\end{equation}
+where $p_j = \text{softmax}(\mathbf{z})_j$ and $\gamma = \focalgamma$.
+
+% ---------------------------------------------------------------------------
+\subsection{Transformer world model (Model)}
+\label{sec:transformer}
+% ---------------------------------------------------------------------------
+
+The world model is a causal transformer that predicts the next frame's tokens given a context of $K = \nctx$ past frames and their associated actions.
+
+\paragraph{Sequence construction.}
+Each frame contributes $\ntokens$ visual tokens (from the $\gridsize$ FSQ grid) plus one status token (ALIVE or DEATH), for 65 tokens per frame.
+A context window of $K + 1$ frames (including the target) produces a sequence of $325$ tokens.
+All target-frame tokens are replaced with a learnable \texttt{[MASK]} embedding to prevent information leakage.
+
+\paragraph{3D Rotary Position Embedding.}
+We apply factored RoPE~\citep{su2024rope} encoding three positional axes: spatial row, spatial column, and temporal frame index.
+The head dimension (64) is partitioned into three bands (22 row, 22 column, 20 time) with separate base frequencies ($\theta_\text{spatial} = 10$, $\theta_\text{time} = 10{,}000$).
+Status tokens receive the grid center coordinates $(3.5, 3.5)$ to represent whole-frame summaries.
+
+\paragraph{Block-causal attention.}
+Within each frame block, attention is bidirectional (tokens attend to all positions in the same frame).
+Across frames, attention is strictly causal: each frame attends only to current and past frames.
+
+\paragraph{AdaLN-Zero action conditioning.}
+\label{sec:adaln}
+Rather than inserting action tokens into the sequence, we condition the transformer on the action history via Adaptive Layer Normalization~\citep{peebles2023dit, perez2018film}.
+The $K$-step action sequence is one-hot encoded and projected through an MLP to produce per-layer scale, shift, and gate parameters that modulate each sublayer:
+\begin{equation}
+  \text{AdaLN}(\mathbf{x}) = (1 + \mathbf{s}) \odot \text{LayerNorm}(\mathbf{x}) + \mathbf{b}, \qquad
+  \mathbf{y} = \mathbf{g} \odot f(\text{AdaLN}(\mathbf{x})),
+  \label{eq:adaln}
+\end{equation}
+where $f$ is the attention or MLP sublayer and $(\mathbf{s}, \mathbf{b}, \mathbf{g})$ are predicted from the action context.
+Gates are initialized with bias~$= 1$ to preserve residual flow at initialization, following our empirical finding that zero-initialized gates suppress both conditioning and learning (Section~\ref{sec:training_stability}).
+
+\paragraph{QK-norm.}
+We apply per-head RMSNorm to queries and keys before computing attention scores~\citep{esser2024sd3}.
+This prevents attention logit overflow that otherwise causes training divergence in AdaLN-conditioned models, as we observed in our ablation of training stability (Section~\ref{sec:training_stability}).
+
+\paragraph{AC-CPC auxiliary loss.}
+Following \citet{pignatelli2024twister}, we add an Action-Conditioned Contrastive Predictive Coding loss.
+Learned predictors map each frame's hidden representation and future actions to a shared embedding space, trained with InfoNCE~\citep{oord2018cpc} at temperature $\tau = 0.1$.
+
+\paragraph{Output projection and total loss.}
+The output projection shares weights with the input embedding (weight tying).
+The total training loss is $\mathcal{L} = \mathcal{L}_\text{SLS-focal} + \lambda_\text{CPC} \mathcal{L}_\text{CPC}$ with $\lambda_\text{CPC} = 1.0$.
+
+% ---------------------------------------------------------------------------
+\subsection{PPO controller (Controller)}
+\label{sec:controller}
+% ---------------------------------------------------------------------------
+
+The controller is a lightweight CNN that takes the predicted next-frame tokens and the transformer's hidden state as input, and outputs a jump probability and a state value estimate.
+
+\paragraph{Architecture.}
+Token IDs are embedded (16-dim), reshaped to a $16 \times \gridsize$ feature map, and processed by two convolutional layers with max-pooling, producing a 256-dim feature vector.
+This is concatenated with the 256-dim transformer hidden state (projected from $\hdim$) and fed to separate actor and critic heads.
+An auxiliary multi-token prediction head predicts the next 8 actions.
+The full controller has approximately 40K parameters.
+
+\paragraph{Training in dreams.}
+The controller is first pretrained via behavioral cloning on expert demonstrations, then fine-tuned with PPO~\citep{schulman2017ppo} in dreamed rollouts.
+At each iteration, 512 rollouts of up to 45 steps are generated by autoregressively sampling from the frozen world model.
+Rollouts terminate when the predicted death probability exceeds 0.5.
+Rewards are $+1$ per survival step with a $-0.2$ penalty per jump.
+We use GAE~\citep{schulman2017ppo} with $\gamma = 0.995$, $\lambda = 0.95$, and clip ratio $\varepsilon_\text{PPO} = 0.2$.
+
+% ===========================================================================
+\section{Experimental setup}
+\label{sec:setup}
+% ===========================================================================
+
+\paragraph{Environment.}
+Geometry Dash is a rhythm-based platformer where the player controls a cube that moves at constant horizontal speed.
+The only action is a binary jump.
+Colliding with any obstacle causes instant death.
+Levels are deterministic: the same action sequence always produces the same outcome, but frame-accurate timing is required.
+
+\paragraph{Data collection.}
+We collect 4,265 gameplay episodes (252K frames) including both intentional-death episodes (covering diverse failure modes) and 36 expert demonstrations (full level clears).
+Vertical shift augmentation ($\pm 2, \pm 4$ pixels) expands the dataset 5$\times$.
+Frames are preprocessed with Sobel edge detection and resized to $\imgsize$.
+
+\paragraph{Training details.}
+The FSQ-VAE is trained for 200 epochs with Adam (lr $= 10^{-3}$, batch size 2,048) on frame pairs.
+The transformer is trained for 200 epochs with Adam (lr $= 4 \times 10^{-3}$, weight decay $0.01$, batch size 512) using cosine annealing with 5-epoch warmup.
+We apply 5\% random token noise and 5\% FSQ-neighbor noise as data augmentation.
+Death frames are oversampled $4\times$ via weighted sampling.
+Mixed-precision training (FP16 with loss scaling on the transformer, BF16 on the FSQ-VAE) is used throughout.
+All training runs on a single NVIDIA A100 GPU.
+
+\paragraph{Evaluation metrics.}
+% TODO: Fill in once metrics are finalized.
+We evaluate on: (1)~next-token prediction accuracy and cross-entropy on held-out episodes, (2)~Contrastive Predictive Coding loss (CPC), (3)~Death prediction F1 score, and (4)~real-environment gameplay performance measured as percentage of level completed (mean over $N = 100$ automated runs).
+
+% ===========================================================================
+\section{Results}
+\label{sec:results}
+% ===========================================================================
+
+% TODO: This entire section will be written after model freeze (deadline: May 31, 2026).
+% Expected contents:
+% - Table 1: Main results (level progress %, CPC, accuracy, Death F1) across model versions
+% - Table 2: SLS ablation (with vs without, sigma sweep, dim weights vs uniform)
+% - Table 3: Ablations (context length, action conditioning, death oversampling, MTP)
+% - Table 4: Baselines (random, open-loop, heuristic, BC-only, frame-prediction-free)
+% - Figure: dreamed rollout vs ground truth frames
+% - Figure: inference latency breakdown per component
+% - Table: per-GPU latency comparison
+
+\textit{Results pending model freeze and ablation experiments.}
+
+% ---------------------------------------------------------------------------
+\subsection{Training stability of AdaLN variants}
+\label{sec:training_stability}
+% ---------------------------------------------------------------------------
+
+% TODO: Turn this into a proper figure/table once all runs are final.
+
+During development, we ran five AdaLN configurations to identify the minimal set of stabilization techniques required:
+
+\begin{enumerate}
+  \item \textbf{No gates} (4 params/layer): CPC reached 0.171 before diverging at epoch 44 due to attention logit explosion.
+  \item \textbf{Zero-init gates} (6 params/layer): CPC plateaued at 0.276 with overfitting. Zero-initialized gates suppressed all residual flow, killing both conditioning and learning.
+  \item \textbf{Gate bias $= 1$}: CPC reached 0.189, diverged at epoch 46. Restored learning speed but unbounded attention scores persisted.
+  \item \textbf{Tanh bounding + gate bias $= 1$}: CPC reached 0.205, still diverged. Bounding modulation values to $[-1, 1]$ proved that the explosion source was not in the modulation parameters.
+  \item \textbf{QK-norm + gate bias $= 1$}: Stable through 200 epochs, CPC $< 0.14$, surpassing all previous configurations. Per-head RMSNorm on queries and keys eliminated the attention logit overflow that was the true root cause.
+\end{enumerate}
+
+This progression demonstrates that in AdaLN-conditioned world model transformers, attention stability (via QK-norm) is more critical than modulation bounding.
+
+% ===========================================================================
+\section{Limitations}
+\label{sec:limitations}
+% ===========================================================================
+
+Our evaluation is limited to a single game (Geometry Dash) with a binary action space and deterministic level layouts.
+The generalization of SLS to environments with higher-dimensional actions, stochastic dynamics, or RGB observations remains to be validated.
+The per-dimension calibration of $\boldsymbol{\alpha}$ requires a one-time empirical measurement that may not transfer across different FSQ configurations.
+% TODO: Expand after results are in.
+
+% ===========================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% ===========================================================================
+
+% TODO: Write after results are finalized.
+We introduced Structured Label Smoothing, a training objective that exploits the coordinate geometry of FSQ codebooks to improve next-token prediction in discrete world models.
+Integrated into a full V-M-C pipeline with AdaLN-conditioned transformers and PPO-in-dreams, the system achieves real-time 30\,FPS gameplay on Geometry Dash.
+SLS is applicable to any model that predicts over a discrete latent space with a coordinate metric, including image generation, video prediction, and planning.
+
+\begin{ack}
+  % TODO: Add compute acknowledgments (SLURM cluster, A100 access).
+  % Geometry Dash is developed by RobTop Games.
+\end{ack}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\appendix
+
+% TODO: Appendix sections to add:
+% A. Full hyperparameter tables
+% B. Additional dreamed rollout visualizations
+% C. Per-position accuracy analysis
+% D. Inference latency breakdown
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\newpage
+\input{checklist}
+
+\end{document}
