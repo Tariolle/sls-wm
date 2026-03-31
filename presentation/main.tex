@@ -392,7 +392,7 @@
     \draw[arr] (head) -- (out1);
 
     \node[below=0.4cm of blocks, lbl, font=\scriptsize] (ht) {$\mathbf{h}_t \in \mathbb{R}^{\hdim}$};
-    \draw[arr, ccolor] (blocks.south) -- (ht);
+    \draw[arr] (blocks.south) -- (ht);
   \end{tikzpicture}%
   }
   \end{center}
@@ -481,7 +481,7 @@
 
     \draw[arr] (h0) -- ([yshift=0.2cm]M1.west);
     \draw[arr] (z0in) -- ([yshift=-0.2cm]M1.west);
-    \draw[arr, ccolor] (M1) -- node[left, lbl] {$\mathbf{h}_t$} node[right, lbl] {$\hat{\mathbf{z}}_t$} (C1);
+    \draw[arr] (M1) -- node[left, lbl] {$\mathbf{h}_t$} node[right, lbl] {$\hat{\mathbf{z}}_t$} (C1);
     \draw[arr] (C1) -- (a1);
 
     % --- Timestep t+1 ---
@@ -490,8 +490,8 @@
 
     \node[lbl, below=0.4cm of C2] (a2) {$a_{t+1}$};
 
-    \draw[arr, mcolor] ([yshift=0.2cm]M1.east) -- node[above, lbl] {$\mathbf{h}_t$} node[below, lbl] {$\hat{\mathbf{z}}_t$} ([yshift=0.2cm]M2.west);
-    \draw[arr, ccolor] (M2) -- node[left, lbl] {$\mathbf{h}_{t+1}$} node[right, lbl] {$\hat{\mathbf{z}}_{t+1}$} (C2);
+    \draw[arr] ([yshift=0.2cm]M1.east) -- node[above, lbl] {$\mathbf{h}_t$} node[below, lbl] {$\hat{\mathbf{z}}_t$} ([yshift=0.2cm]M2.west);
+    \draw[arr] (M2) -- node[left, lbl] {$\mathbf{h}_{t+1}$} node[right, lbl] {$\hat{\mathbf{z}}_{t+1}$} (C2);
     \draw[arr] (C2) -- (a2);
 
     % --- Timestep t+2 ---
@@ -501,10 +501,10 @@
     \node[lbl, below=0.4cm of C3] (a3) {$a_{t+2}$};
     \node[lbl, right=0.8cm of M3] (hout) {$\mathbf{h}_{t+2}$};
 
-    \draw[arr, mcolor] ([yshift=0.2cm]M2.east) -- node[above, lbl] {$\mathbf{h}_{t+1}$} node[below, lbl] {$\hat{\mathbf{z}}_{t+1}$} ([yshift=0.2cm]M3.west);
-    \draw[arr, ccolor] (M3) -- node[left, lbl] {$\mathbf{h}_{t+2}$} node[right, lbl] {$\hat{\mathbf{z}}_{t+2}$} (C3);
+    \draw[arr] ([yshift=0.2cm]M2.east) -- node[above, lbl] {$\mathbf{h}_{t+1}$} node[below, lbl] {$\hat{\mathbf{z}}_{t+1}$} ([yshift=0.2cm]M3.west);
+    \draw[arr] (M3) -- node[left, lbl] {$\mathbf{h}_{t+2}$} node[right, lbl] {$\hat{\mathbf{z}}_{t+2}$} (C3);
     \draw[arr] (C3) -- (a3);
-    \draw[arr, mcolor] (M3.east) -- (hout);
+    \draw[arr] (M3.east) -- (hout);
 
     % Action feeds back to next M (enters at bottom 25%)
     \draw[arr, gray!50, dashed] (a1.east) -- ++(0.8,0) |- ([yshift=-0.2cm]M2.west);
