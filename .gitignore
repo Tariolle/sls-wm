@@ -26,6 +26,9 @@ slurm/logs/
 *.fls
 *.synctex.gz
 presentation/*.pdf
+paper/*.pdf
+Formatting_Instructions_For_NeurIPS_2026/
+outputs/
 plots/
 checkpoints/*_final.pt
 checkpoints/transformer_state.pt
