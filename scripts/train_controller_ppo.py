@@ -110,7 +110,7 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
         if not alive.any():
             break
 
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+        with torch.no_grad(), torch.autocast("cuda", dtype=amp_dtype, enabled=device.type == "cuda"):
             pred_tokens, death_prob, h_t = model.predict_next_frame(
                     ctx_t, ctx_a, temperature=0.0, return_hidden=True)
 
@@ -371,7 +371,7 @@ def evaluate_fixed(model, controller, ctx_tokens_np, ctx_actions_np,
         if not alive.any():
             break
 
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+        with torch.no_grad(), torch.autocast("cuda", dtype=amp_dtype, enabled=device.type == "cuda"):
             pred_tokens, death_prob, h_t = model.predict_next_frame(
                     ctx_t, ctx_a, temperature=0.0, return_hidden=True)
 
@@ -468,6 +468,12 @@ def main():
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
     model.load_state_dict(state)
     model.eval()
+
+    # AMP dtype: bfloat16 on A100+, float16 on Turing (RTX 2060 etc.)
+    amp_dtype_str = getattr(args, 'amp_dtype', 'bfloat16')
+    amp_dtype = getattr(torch, amp_dtype_str, torch.bfloat16)
+    print(f"AMP dtype: {amp_dtype}")
+
     if sys.platform != "win32":
         try:
             model = torch.compile(model)
