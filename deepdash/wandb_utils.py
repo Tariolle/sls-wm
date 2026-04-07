@@ -29,6 +29,9 @@ def wandb_init(project="deepdash", name=None, config=None, enabled=True,
         return None
     try:
         import wandb
+        if config:
+            config = {k: v.item() if hasattr(v, 'item') else v
+                      for k, v in config.items()}
         kwargs = dict(project=project, name=name, config=config)
         if resume_id:
             kwargs["id"] = resume_id
