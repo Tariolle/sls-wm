@@ -30,13 +30,8 @@ def wandb_init(project="deepdash", name=None, config=None, enabled=True,
     try:
         import wandb
         if config:
-            def _native(v):
-                if hasattr(v, 'item'):
-                    return v.item()
-                if isinstance(v, list):
-                    return [_native(x) for x in v]
-                return v
-            config = {k: _native(v) for k, v in config.items()}
+            import json
+            config = json.loads(json.dumps(config, default=lambda x: x.item() if hasattr(x, 'item') else str(x)))
         kwargs = dict(project=project, name=name, config=config)
         if resume_id:
             kwargs["id"] = resume_id
