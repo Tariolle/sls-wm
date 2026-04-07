@@ -29,14 +29,10 @@ def wandb_init(project="deepdash", name=None, config=None, enabled=True,
         return None
     try:
         import wandb
-        kwargs = dict(project=project, name=name)
+        kwargs = dict(project=project, name=name, config=config)
         if resume_id:
             kwargs["id"] = resume_id
-            kwargs["resume"] = "allow"
-            # Config already on server for resumed runs; skip to
-            # avoid numpy type serialization issues with W&B.
-        else:
-            kwargs["config"] = config
+            kwargs["resume"] = "must"
         _run = wandb.init(**kwargs)
         _enabled = True
         print(f"W&B logging enabled: {_run.url}")
@@ -54,10 +50,10 @@ def wandb_run_id():
     return None
 
 
-def wandb_log(data, step=None):
+def wandb_log(data):
     """Log metrics. No-op if wandb unavailable."""
     if _enabled and _run is not None:
-        _run.log(data, step=step or data.get("iteration"))
+        _run.log(data)
 
 
 def wandb_finish():
