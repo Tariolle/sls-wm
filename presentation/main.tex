@@ -65,15 +65,15 @@
 % ==========================================================
 
 \begin{frame}{Why World Models?}
+  \vfill
   \begin{itemize}
-    \item Model-free RL (DQN, PPO) requires \textbf{millions of environment interactions}
-    \item World Models (Ha \& Schmidhuber, 2018): learn a \textbf{compressed model of the environment}, then train a controller entirely \textbf{in imagination}
-    \item \textbf{Geometry Dash}: deterministic physics, binary action (jump/idle), precision timing. Ideal testbed for latent dynamics learning
-    \item \textbf{Real-time constraint}: game runs at 30 FPS, no pausing to think. Rules out tree search (MCTS) and multi-step lookahead. Agent must react in $<$33ms
+    \item Model-free RL $\to$ \textbf{millions of interactions}
+    \item World Models: learned environment, training \textbf{in imagination}
+    \item \textbf{Geometry Dash}: deterministic, binary action, precision timing
+    \item \textbf{Real-time}: 30 FPS $\to$ no MCTS, reaction $<$33ms
+    \item \textbf{Goal}: master unseen levels, trained entirely \emph{in imagination}
   \end{itemize}
-
-  \vspace{0.5em}
-  \textbf{Goal}: master Geometry Dash levels by training a controller entirely \emph{in imagination}
+  \vfill
 \end{frame}
 
 % ==========================================================
@@ -116,6 +116,49 @@
       $\mathbf{h}_t \in \mathbb{R}^{\hdim}$: hidden state &
       $a_t \in \{0, 1\}$: jump/idle
     \end{tabular}
+  \end{center}
+\end{frame}
+
+\begin{frame}{Inference: Assembling the Pipeline}
+  \vspace{0.5em}
+  At inference, the prediction head is pruned. C receives $\mathbf{z}_t$ and $\mathbf{h}_t$.
+
+  \vspace{0.5em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw, rounded corners, minimum height=1cm, align=center, font=\small, line width=0.8pt},
+    arr/.style={-{Stealth[length=3mm]}, thick},
+    lbl/.style={font=\scriptsize, align=center},
+    ghost/.style={rectangle, draw=gray!40, fill=gray!5, rounded corners, minimum height=0.8cm, align=center, font=\scriptsize, dashed},
+  ]
+    \node[block, fill=gray!10, draw=gray, minimum width=1.6cm] (pre) {Sobel\\$\downarrow$ 64$\times$64};
+    \node[block, fill=vcolor!20, draw=vcolor, right=1.2cm of pre, minimum width=1.6cm] (enc) {\textbf{V}};
+    \node[block, fill=mcolor!20, draw=mcolor, right=1.2cm of enc, minimum width=1.6cm] (tfm) {\textbf{M}};
+    \node[block, fill=ccolor!20, draw=ccolor, right=1.2cm of tfm, minimum width=1.6cm] (ctrl) {\textbf{C}};
+    \node[lbl, right=1.6cm of ctrl] (act) {$a_t$};
+
+    \node[ghost, above=0.3cm of tfm] (pred) {Pred. Head\\{\tiny pruned}};
+    \draw[gray!40, dashed] (tfm) -- (pred);
+
+    \draw[arr] (pre) -- node[above, lbl] {$\mathbf{x}_t$} (enc);
+    \draw[arr] (enc) -- node[above, lbl] {$\mathbf{z}_t$} (tfm);
+    \draw[arr] (tfm) -- node[above, lbl] {$\mathbf{h}_t$} (ctrl);
+    \draw[arr] (ctrl) -- (act);
+
+    % z_t routed lower and shifted right on C to clear space
+    \draw[arr] (enc.south) -- ++(0,-0.8) -| node[below, lbl, pos=0.25] {$\mathbf{z}_t$} ([xshift=0.2cm]ctrl.south);
+
+    % a_t routed higher and shifted left on C to avoid intersection entirely
+    \draw[arr] ([xshift=-0.2cm]ctrl.south) -- ++(0,-0.4) -| node[below, lbl, pos=0.25] {$a_t$} ([xshift=0.2cm]tfm.south);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \begin{center}
+    \small
+    Screen capture at 30 FPS $\to$ Sobel $\to$ V $\to$ M $\to$ C $\to$ game input \\[0.3em]
+    Full pipeline must complete in $<$33ms to maintain 30 FPS real-time play
   \end{center}
 \end{frame}
 
@@ -355,9 +398,9 @@
 
   \vspace{1em}
   \begin{itemize}
-    \item Encoder + FSQ frozen after training, used in the full pipeline
-    \item Decoder kept only for visualizing Transformer dream rollouts
-    \item 51$\times$ compression: $\framesize \times \framesize \times 8 = 32{,}768$ bits $\to$ $\ntokens \times \underbrace{\lceil\log_2 \fsqcodes\rceil}_{10} = 640$ bits
+    \item Encoder + FSQ \textbf{frozen} after training
+    \item Decoder $\to$ visualization only (dream rollouts)
+    \item \textbf{51$\times$ compression}: $32{,}768 \to 640$ bits/frame
   \end{itemize}
 \end{frame}
 
@@ -436,10 +479,10 @@
 \end{frame}
 
 \begin{frame}[t]{Novel: FSQ-Structured Label Smoothing}
-  \textbf{Problem}: standard label smoothing spreads probability \emph{uniformly}. A $\pm1$ neighbor (visually identical) gets the same target mass as a completely unrelated token.
+  \textbf{Problem}: uniform smoothing $\to$ FSQ neighbor = random token
 
   \vspace{0.5em}
-  \textbf{Solution} {\color{insared}\textit{(novel)}}: Gaussian kernel over squared FSQ coordinate distance:
+  \textbf{Solution} {\color{insared}\textit{(novel)}}: Gaussian kernel over FSQ coordinate distance:
   \[
     w(a,b) = \exp\!\left(-\frac{d^2(a,b)}{2\sigma^2}\right), \quad d^2 = \sum_i (\Delta_i)^2, \quad \sigma = 0.9
   \]
@@ -616,78 +659,31 @@
 \end{frame}
 
 % ==========================================================
-\section{Full Inference Pipeline}
-% ==========================================================
-
-\begin{frame}{Inference: Assembling the Pipeline}
-  \vspace{0.5em}
-  At inference, the prediction head is pruned. C receives $\mathbf{z}_t$ and $\mathbf{h}_t$.
-
-  \vspace{0.5em}
-  \begin{center}
-  \resizebox{\textwidth}{!}{%
-  \begin{tikzpicture}[
-    block/.style={rectangle, draw, rounded corners, minimum height=1cm, align=center, font=\small, line width=0.8pt},
-    arr/.style={-{Stealth[length=3mm]}, thick},
-    lbl/.style={font=\scriptsize, align=center},
-    ghost/.style={rectangle, draw=gray!40, fill=gray!5, rounded corners, minimum height=0.8cm, align=center, font=\scriptsize, dashed},
-  ]
-    \node[block, fill=gray!10, draw=gray, minimum width=1.6cm] (pre) {Sobel\\$\downarrow$ 64$\times$64};
-    \node[block, fill=vcolor!20, draw=vcolor, right=1.2cm of pre, minimum width=1.6cm] (enc) {\textbf{V}};
-    \node[block, fill=mcolor!20, draw=mcolor, right=1.2cm of enc, minimum width=1.6cm] (tfm) {\textbf{M}};
-    \node[block, fill=ccolor!20, draw=ccolor, right=1.2cm of tfm, minimum width=1.6cm] (ctrl) {\textbf{C}};
-    \node[lbl, right=1.6cm of ctrl] (act) {$a_t$};
-
-    \node[ghost, above=0.3cm of tfm] (pred) {Pred. Head\\{\tiny pruned}};
-    \draw[gray!40, dashed] (tfm) -- (pred);
-
-    \draw[arr] (pre) -- node[above, lbl] {$\mathbf{x}_t$} (enc);
-    \draw[arr] (enc) -- node[above, lbl] {$\mathbf{z}_t$} (tfm);
-    \draw[arr] (tfm) -- node[above, lbl] {$\mathbf{h}_t$} (ctrl);
-    \draw[arr] (ctrl) -- (act);
-    
-    % z_t routed lower and shifted right on C to clear space
-    \draw[arr] (enc.south) -- ++(0,-0.8) -| node[below, lbl, pos=0.25] {$\mathbf{z}_t$} ([xshift=0.2cm]ctrl.south);
-    
-    % a_t routed higher and shifted left on C to avoid intersection entirely
-    \draw[arr] ([xshift=-0.2cm]ctrl.south) -- ++(0,-0.4) -| node[below, lbl, pos=0.25] {$a_t$} ([xshift=0.2cm]tfm.south);
-  \end{tikzpicture}%
-  }
-  \end{center}
-
-  \begin{center}
-    \small
-    Screen capture at 30 FPS $\to$ Sobel $\to$ V $\to$ M $\to$ C $\to$ game input \\[0.3em]
-    Full pipeline must complete in $<$33ms to maintain 30 FPS real-time play
-  \end{center}
-\end{frame}
-
-% ==========================================================
 \section{Analysis}
 % ==========================================================
 
 \begin{frame}{What Worked}
   \vspace{0.5em}
   \begin{itemize}
-    \item \textbf{FSQ-VAE}: sharp reconstructions, 100\% codebook utilization, no tuning headaches
-    \item \textbf{Sobel preprocessing}: filters visual noise, forces structural perception
-    \item \textbf{Vertical shift augmentation}: reduced overfitting, physically valid for side-scrollers
-    \item \textbf{Parallel decoding}: all 65 tokens in 1 forward pass vs 65 autoregressive. Critical for real-time play
-    \item \textbf{Structured label smoothing}: empirically grounded via FSQ distance analysis
-    \item \textbf{AdaLN-Zero}: action conditioning via adaptive LayerNorm, lowest CPC ever (0.133)
-    \item \textbf{QK-norm}: RMSNorm on Q,K per head, enabled stable AdaLN training (4 runs exploded without it)
+    \item \textbf{FSQ-VAE}: sharp, 100\% utilization, no tuning
+    \item \textbf{Sobel}: filters visual noise $\to$ structural perception
+    \item \textbf{Vertical shifts}: reduced overfitting, physically valid
+    \item \textbf{Parallel decoding}: 1 pass vs 65 $\to$ real-time
+    \item \textbf{Structured label smoothing}: grounded in FSQ distance analysis
+    \item \textbf{AdaLN-Zero}: best CPC (0.133)
+    \item \textbf{QK-norm}: stabilized AdaLN (4 runs diverged without)
   \end{itemize}
 \end{frame}
 
 \begin{frame}{What Didn't Work (or Didn't Help)}
   \vspace{0.5em}
   \begin{itemize}
-    \item \textbf{$\beta$-VAE}: fundamentally blurry. Wide range of hyperparameter search before switching to VQ/FSQ
-    \item \textbf{LR $10^{-3}$ without augmentation}: 13.5pp train/val gap at epoch 29, model memorizing
-    \item \textbf{FSQ neighbor substitution}: no measurable accuracy impact (same curves), but theoretically sound and free to keep
-    \item \textbf{Pure RL controller}: CMA-ES converged to $\sim$12 steps (local optimum). BC pretraining required
-    \item \textbf{Death-only training data}: 15$\times$ death oversample caused memorization (44pp precision gap). Fixed: 5$\times$ + expert episodes
-    \item \textbf{MaskGIT iterative decoding}: degraded dream quality on 64-token grid. Parallel single-step worked better (bidirectional attention sufficient)
+    \item \textbf{$\beta$-VAE}: blurry, large grid search $\to$ abandoned
+    \item \textbf{LR $10^{-3}$ w/o augmentation}: 13.5pp train/val gap $\to$ memorization
+    \item \textbf{FSQ neighbor substitution}: no measurable impact, kept (free)
+    \item \textbf{Pure RL (CMA-ES)}: $\sim$12 steps (local optimum) $\to$ BC required
+    \item \textbf{Death oversample 15$\times$}: memorization (44pp precision gap). Fix: 5$\times$ + expert
+    \item \textbf{MaskGIT}: degraded on 64 tokens, parallel single-step better
   \end{itemize}
 \end{frame}
 
@@ -697,10 +693,10 @@
 
 \begin{frame}{Limitations \& Future Work}
   \begin{itemize}
-    \item \textbf{Controller precision}: jumps too often/early, struggles with complex obstacle sequences
-    \item \textbf{Dream/reality gap}: controller trained in imagination, h$_t$ distribution may differ in real game
-    \item \textbf{Sobel bottleneck}: solved with GPU Sobel (numerically identical, 7ms vs 10ms CPU)
-    \item \textbf{Token-level augmentation}: can't crop/resize once tokenized (tokens are patch-specific)
+    \item \textbf{Controller precision}: jumps too often/early
+    \item \textbf{Dream/reality gap}: $\mathbf{h}_t$ distribution differs in real game
+    \item \textbf{Sobel bottleneck}: solved with GPU (7ms vs 10ms CPU)
+    \item \textbf{Token-level augmentation}: impossible post-tokenization
   \end{itemize}
 \end{frame}
 
