@@ -73,7 +73,7 @@ controller_ppo:
   transformer_checkpoint: checkpoints/transformer_best.pt
   pretrained: checkpoints/controller_bc_best.pt
   amp_dtype: bfloat16
-  n_iterations: 15000
+  n_iterations: 30000
   n_episodes: 512
   lr: 0.0001
   gamma: 0.995
