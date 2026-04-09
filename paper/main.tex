@@ -92,7 +92,7 @@ Our contributions are:
 \citet{ha2018world} introduced the Vision-Model-Controller paradigm, encoding frames with a VAE, modeling dynamics with an RNN, and training a controller in dreamed rollouts.
 IRIS~\citep{micheli2023iris} replaced the VAE with a discrete tokenizer and the RNN with an autoregressive transformer, showing that discrete tokens enable sample-efficient learning.
 DreamerV3~\citep{hafner2025dreamerv3} demonstrated that discrete representations with symlog predictions generalize across diverse domains, and \citet{hafner2025dreamer4} scaled this approach further.
-TWISTER~\citep{burchert2025twister} added action-conditioned contrastive predictive coding (AC-CPC) to improve temporal coherence.
+TWISTER~\citep{burchi2025twister} added action-conditioned contrastive predictive coding (AC-CPC) to improve temporal coherence.
 Our work builds on these ideas but focuses on a previously unexploited axis: the structure of the discrete codebook itself.
 
 \paragraph{Finite Scalar Quantization.}
@@ -110,7 +110,7 @@ We instead derive the target distribution from the codebook geometry itself, req
 FiLM~\citep{perez2018film} introduced adaptive affine conditioning via scale and shift parameters.
 DiT~\citep{peebles2023dit} applied this as AdaLN-Zero with zero-initialized gates for stable training of diffusion transformers.
 \citet{esser2024sd3} added QK-norm (RMSNorm on queries and keys per head) to stabilize attention logits in deep AdaLN models.
-LeWorldModel~\citep{charraut2026leworldmodel} applied AdaLN to world model transformers for robot manipulation.
+LeWorldModel~\citep{maes2026leworldmodel} applied AdaLN to world model transformers for robot manipulation.
 We adopt AdaLN-Zero with QK-norm for action conditioning, finding that QK-norm is essential for training stability (Section~\ref{sec:adaln}).
 
 % ===========================================================================
@@ -241,7 +241,7 @@ We apply per-head RMSNorm to queries and keys before computing attention scores~
 This prevents attention logit overflow that otherwise causes training divergence in AdaLN-conditioned models, as we observed in our ablation of training stability (Section~\ref{sec:training_stability}).
 
 \paragraph{AC-CPC auxiliary loss.}
-Following \citet{burchert2025twister}, we add an Action-Conditioned Contrastive Predictive Coding loss.
+Following \citet{burchi2025twister}, we add an Action-Conditioned Contrastive Predictive Coding loss.
 Learned predictors map each frame's hidden representation and future actions to a shared embedding space, trained with InfoNCE~\citep{oord2018cpc} at temperature $\tau = 0.1$.
 
 \paragraph{Output projection and total loss.}

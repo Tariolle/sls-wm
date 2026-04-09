@@ -18,7 +18,7 @@ Inspired by V-JEPA 2 (Bardes et al., 2025).
 
 References:
     - IRIS (Micheli et al., ICLR 2023): block-causal attention on VQ tokens
-    - TWISTER (Burchert et al., ICLR 2025): AC-CPC contrastive loss
+    - TWISTER (Burchi & Timofte, ICLR 2025): AC-CPC contrastive loss
     - Su et al., 2021: RoFormer / Rotary Position Embeddings
     - Bardes et al., 2025: V-JEPA 2 — 3D factored RoPE
 """

@@ -34,7 +34,7 @@ Full architecture redesign, cherry-picking techniques from recent world model pa
 - FSQ-VAE tokenizer (from **FSQ**, Mentzer et al. 2023)
 - Transformer world model on discrete tokens (from **IRIS**, Micheli et al. 2023)
 - Parallel single-step decoding (from **IRIS**, simplified by dropping MaskGIT iterative decoding)
-- AC-CPC contrastive loss (from **TWISTER**, Burchert et al. 2025)
+- AC-CPC contrastive loss (from **TWISTER**, Burchi & Timofte 2025)
 - 3D-RoPE (from **V-JEPA 2**, Bardes et al. 2025)
 - PPO controller training (from **PPO**, Schulman et al. 2017)
 
