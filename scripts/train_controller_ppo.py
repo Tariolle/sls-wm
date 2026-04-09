@@ -208,24 +208,6 @@ class PercentileNormalizer:
         return advantages / scale
 
 
-def pmpo_actor_loss(log_probs, advantages, alpha=0.5):
-    """PMPO policy loss (Dreamer 4): uses sign of advantages.
-
-    Splits transitions into positive (A >= 0) and negative (A < 0) sets,
-    averages log-likelihood separately, then combines. Ignores advantage
-    magnitude, giving equal focus to all improving/worsening actions.
-    """
-    pos_mask = advantages >= 0
-    neg_mask = ~pos_mask
-
-    loss = torch.tensor(0.0, device=log_probs.device)
-    if pos_mask.any():
-        loss = loss - alpha * log_probs[pos_mask].mean()
-    if neg_mask.any():
-        loss = loss + (1 - alpha) * log_probs[neg_mask].mean()
-    return loss
-
-
 def ppo_update(controller, optimizer, rollout, advantages, returns,
                clip_eps=0.2, entropy_coeff=0.01, critic_coeff=0.5,
                max_grad_norm=0.5, n_epochs=4, minibatch_size=None,

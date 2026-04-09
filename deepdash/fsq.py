@@ -7,7 +7,7 @@ No codebook, no EMA, no dead entries, no commitment loss tuning.
 FSQ levels [8,5,5,5] → 1000 implicit codes with 4d latent per spatial position.
 
 References:
-    - Mentzer et al., 2023: Finite Scalar Quantization
+    - Mentzer et al., 2024: Finite Scalar Quantization (ICLR 2024)
     - Huh et al., 2023: GRWM — geometric regularization for world models
 """
 

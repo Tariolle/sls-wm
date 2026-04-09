@@ -17,14 +17,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.wandb_utils import wandb_init, wandb_log, wandb_finish, wandb_run_id
+from deepdash.world_model import WorldModel
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader, WeightedRandomSampler
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from deepdash.world_model import WorldModel
 
 
 def _unwrap(model):
@@ -353,7 +351,7 @@ def main():
     parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--expert-episodes-dir", default="data/expert_episodes",
                         help="Directory with expert episodes (no death on last frame)")
-    parser.add_argument("--config", default=None, help="YAML config path (default: configs/v3.yaml)")
+    parser.add_argument("--config", default=None, help="YAML config path (default: configs/v4.yaml)")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
