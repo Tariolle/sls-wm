@@ -351,6 +351,7 @@ The per-dimension calibration of $\boldsymbol{\alpha}$ requires a one-time empir
 We introduced Structured Label Smoothing, a training objective that exploits the coordinate geometry of FSQ codebooks to improve next-token prediction in discrete world models.
 Integrated into a full V-M-C pipeline with AdaLN-conditioned transformers and PPO-in-dreams, the system achieves real-time 30\,FPS gameplay on Geometry Dash.
 SLS is in principle applicable to any model that predicts over a discrete latent space with a coordinate metric.
+A natural extension is to make the kernel bandwidth $\sigma$ and per-dimension weights $\boldsymbol{\alpha}$ learnable and jointly optimized with the world model, moving SLS from a data-derived prior to a fully end-to-end objective; care must be taken to prevent degenerate solutions in which the learned targets collapse to uniform smoothing.
 
 \begin{ack}
   We thank Ma{\"e}l Planchot for contributing gameplay data.
