@@ -65,11 +65,13 @@ class TestFSQVAE:
 
 
 class TestWorldModel:
+    """Tests use V4 architecture: 512d, 8 heads, 8 layers, AdaLN."""
+
     def _make_model(self, device):
         from deepdash.world_model import WorldModel
         return WorldModel(
-            vocab_size=1000, embed_dim=384, n_heads=8, n_layers=8,
-            context_frames=4, tokens_per_frame=64,
+            vocab_size=1000, embed_dim=512, n_heads=8, n_layers=8,
+            context_frames=4, tokens_per_frame=64, adaln=True,
         ).to(device).eval()
 
     def _make_inputs(self, device, B=1):
@@ -100,7 +102,7 @@ class TestWorldModel:
         actions = torch.randint(0, 2, (1, 4), device=device)
         with torch.no_grad():
             h_t = model.encode_context(tokens, actions)
-        assert h_t.shape == (1, 384), f"Expected (1, 384), got {h_t.shape}"
+        assert h_t.shape == (1, 512), f"Expected (1, 512), got {h_t.shape}"
 
     def test_predict_next_frame_shape(self, device, seed):
         model = self._make_model(device)
@@ -112,15 +114,17 @@ class TestWorldModel:
                 tokens, actions, temperature=0.0, return_hidden=True)
         assert pred_tokens.shape == (1, 64)
         assert death_prob.shape == (1,)
-        assert h_t.shape == (1, 384)
+        assert h_t.shape == (1, 512)
 
 
 class TestCNNPolicy:
+    """Tests use V4 architecture: h_dim=512 matching world model embed_dim."""
+
     def test_forward_shape(self, device, seed):
         from deepdash.controller import CNNPolicy
-        policy = CNNPolicy(vocab_size=1000, h_dim=384).to(device).eval()
+        policy = CNNPolicy(vocab_size=1000, h_dim=512).to(device).eval()
         tokens = torch.randint(0, 1000, (2, 64), device=device)
-        h_t = torch.randn(2, 384, device=device)
+        h_t = torch.randn(2, 512, device=device)
         with torch.no_grad():
             prob, value = policy(tokens, h_t)
         assert prob.shape == (2,)
@@ -129,18 +133,18 @@ class TestCNNPolicy:
 
     def test_mtp_shape(self, device, seed):
         from deepdash.controller import CNNPolicy
-        policy = CNNPolicy(vocab_size=1000, h_dim=384, mtp_steps=8).to(device).eval()
+        policy = CNNPolicy(vocab_size=1000, h_dim=512, mtp_steps=8).to(device).eval()
         tokens = torch.randint(0, 1000, (2, 64), device=device)
-        h_t = torch.randn(2, 384, device=device)
+        h_t = torch.randn(2, 512, device=device)
         with torch.no_grad():
             mtp = policy.predict_future_actions(tokens, h_t)
         assert mtp.shape == (2, 8)
 
     def test_act_deterministic(self, device, seed):
         from deepdash.controller import CNNPolicy
-        policy = CNNPolicy(vocab_size=1000, h_dim=384).to(device).eval()
+        policy = CNNPolicy(vocab_size=1000, h_dim=512).to(device).eval()
         tokens = torch.randint(0, 1000, (1, 64), device=device)
-        h_t = torch.randn(1, 384, device=device)
+        h_t = torch.randn(1, 512, device=device)
         with torch.no_grad():
             a1 = policy.act_deterministic(tokens, h_t)
             a2 = policy.act_deterministic(tokens, h_t)
