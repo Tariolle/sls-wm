@@ -595,6 +595,8 @@ def main():
         elapsed = time.time() - t0
         mean_surv = survival.mean().item()
         mean_return = rollout['rewards'].sum(dim=0).mean().item()
+        alive_actions = rollout['actions'][rollout['alive_masks'].bool()]
+        train_jump_ratio = alive_actions.float().mean().item() if len(alive_actions) > 0 else 0.0
         lr = optimizer.param_groups[0]["lr"]
 
         # Periodic evaluation
@@ -628,6 +630,7 @@ def main():
             "train/loss": mean_loss,
             "train/value": mean_value,
             "train/entropy": mean_entropy,
+            "train/jump_ratio": train_jump_ratio,
         }
         if eval_surv:
             log_data["eval/survival"] = float(eval_surv)
