@@ -471,6 +471,10 @@ def main():
         dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
+        ffn_variant=getattr(args, 'ffn_variant', 'gelu'),
+        ffn_hidden=getattr(args, 'ffn_hidden', None),
+        multi_level_readout=getattr(args, 'multi_level_readout', False),
+        readout_layers=getattr(args, 'readout_layers', None),
     ).to(device)
 
     # Pre-stack into contiguous tensors (avoids per-item numpy->torch overhead)
