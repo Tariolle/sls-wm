@@ -39,18 +39,22 @@ A complete inference pipeline achieving 30 FPS real-time play on a live game, wi
 |-----------|-------|--------|----------|
 | **V** (Vision) | FSQ-VAE [8,5,5,5] | 1.9M (0.9M encoder) | 64x64 Sobel frame to 8x8 discrete tokens (1000 codes) |
 | **M** (Memory) | Transformer 512d/8H/8L + AdaLN + QK-norm | ~35M | Predicts next tokens + death, produces h_t |
-| **C** (Controller) | CNNPolicy + MTP | ~40K | Token grid + h_t to jump/idle (+ 8-step action prediction) |
+| **C** (Controller) | MLPPolicy | ~265K | h_t to jump/idle (1-hidden-layer MLP) |
 
-## Results (V3)
+## Results (V4)
 
-| Metric | V1 | V2 | V3 (current) |
-|--------|-----|-----|-------------|
-| Transformer params | 6.7M | 6.7M | 14.7M |
-| Val accuracy | 36.1% | 34.2% | 35.6% |
-| Death F1 (val) | 0.72 | 0.73 | 0.78 |
-| BC val acc | 78% | 83.6% | 87.1% |
-| Level 1 progress | 10% | 11% | 20% |
-| Inference | 27ms | 24ms | ~27ms |
+| Metric | V1 | V2 | V3 | V4 (current) |
+|--------|-----|-----|-----|-------------|
+| Transformer params | 6.7M | 6.7M | 14.7M | ~35M |
+| Val CPC | -- | 0.203 | 0.166 | **0.1328** |
+| Death F1 (val) | 0.72 | 0.73 | 0.78 | ~0.79 |
+| Controller params | ~40K | ~40K | ~40K | ~265K |
+| Controller type | CNNPolicy | CNNPolicy | CNNPolicy | **MLPPolicy** |
+| PPO plateau iters | 9K | 5K | 7K | **~5K** |
+| Level 1 progress | 10% | 11% | 20% | 14-16% |
+| Inference | 27ms | 24ms | ~27ms | ~30ms |
+
+V4 trails V3's L1 progress because the V3 FSQ converged to an oversmoothed local optimum (higher RMSE but artificially easy latent). V4's FSQ is more faithful to the data; the real-game gap is now an upstream problem (FSQ quality / dream-reality gap), not a controller problem -- MLPPolicy already beats every CNN variant on the V4 transformer.
 
 ## Pipeline
 
@@ -89,7 +93,7 @@ A complete inference pipeline achieving 30 FPS real-time play on a live game, wi
 
 ### Controller
 - **BC**: death + expert episodes, class-weighted BCE (1.5x jumps), early stopping
-- **PPO**: clipped surrogate + MTP auxiliary loss (8-step), jump penalty 0.2/jump, percentile-based advantage normalization, EMA target critic (0.98), 45-step dream rollouts, constant LR 1e-4
+- **PPO**: clipped surrogate, jump penalty 0.2/jump, percentile-based advantage normalization, EMA target critic (0.98), 45-step dream rollouts, constant LR 1e-4
 
 ### Deployment
 - Screen capture (dxcam), Sobel (7ms, GPU), FSQ encode (4ms), Transformer h_t (14ms), Controller (1ms), keyboard input
@@ -99,7 +103,7 @@ A complete inference pipeline achieving 30 FPS real-time play on a live game, wi
 
 ## Version History
 
-See [VERSIONS.md](VERSIONS.md) for full V0 through V3 evolution.
+See [VERSIONS.md](VERSIONS.md) for full V0 through V4 evolution.
 
 ## References
 
