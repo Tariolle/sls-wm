@@ -29,7 +29,7 @@
 \newcommand{\fsqdimweights}{[1.29, 0.85, 0.97, 0.89]}
 \newcommand{\focalgamma}{2.0}
 \newcommand{\nparams}{35\text{M}}
-\newcommand{\ctrlparams}{\sim\!966\text{K}}
+\newcommand{\ctrlparams}{\sim\!265\text{K}}
 
 \title{Structured Label Smoothing over Finite Scalar Quantization\\for Real-Time World Models}
 
@@ -47,7 +47,7 @@
 World models that tokenize visual observations with Finite Scalar Quantization (FSQ) inherit a structured codebook where each code maps to a point on a discrete coordinate lattice.
 Standard cross-entropy training ignores this structure, treating all incorrect predictions as equally wrong.
 We introduce \emph{Structured Label Smoothing} (SLS), a training objective that distributes smoothing mass according to a Gaussian kernel over FSQ coordinate distances, weighted by per-dimension perceptual sensitivity.
-We integrate SLS into a full Vision-Model-Controller pipeline for the platformer game Geometry Dash, combining an FSQ tokenizer, a causally-masked transformer with Adaptive Layer Normalization and 3D Rotary Position Embeddings, and a PPO controller trained entirely in dreamed rollouts.
+We integrate SLS into a full Vision-Model-Controller pipeline for the platformer game Geometry Dash, combining an FSQ tokenizer, a causally-masked transformer with Adaptive Layer Normalization and 3D Rotary Position Embeddings, and an MLP controller on the transformer's hidden state, trained with PPO entirely in dreamed rollouts.
 The resulting system runs at 30\,FPS on consumer hardware.
 % TODO: Add headline result once model is frozen (e.g., "achieving X\% progress on Level 1").
 \end{abstract}
@@ -74,7 +74,7 @@ Uniform label smoothing treats the label space as structureless; SLS recovers th
 Unlike knowledge distillation, which requires a separate teacher model to produce soft targets, SLS exploits geometry already present in the FSQ codebook at no additional cost.
 
 We evaluate SLS within a complete Vision-Model-Controller (V-M-C) pipeline for Geometry Dash, a fast-paced platformer that demands frame-accurate predictions under a 33\,ms latency budget.
-Our system consists of three components: (1)~an FSQ tokenizer that encodes $\imgsize$ Sobel edge maps into $\gridsize$ grids of discrete tokens, (2)~a $\nparams$-parameter causal transformer with Adaptive Layer Normalization (AdaLN-Zero) for action conditioning~\citep{peebles2023dit} and QK-norm for attention stability~\citep{esser2024sd3}, and (3)~a lightweight CNN controller trained via PPO entirely in dreamed rollouts~\citep{schulman2017ppo}.
+Our system consists of three components: (1)~an FSQ tokenizer that encodes $\imgsize$ Sobel edge maps into $\gridsize$ grids of discrete tokens, (2)~a $\nparams$-parameter causal transformer with Adaptive Layer Normalization (AdaLN-Zero) for action conditioning~\citep{peebles2023dit} and QK-norm for attention stability~\citep{esser2024sd3}, and (3)~a lightweight MLP controller trained via PPO entirely in dreamed rollouts~\citep{schulman2017ppo}.
 The full pipeline achieves real-time inference at 30\,FPS on consumer hardware.
 
 Our contributions are:
@@ -125,7 +125,7 @@ We describe each component below, with Structured Label Smoothing (Section~\ref{
 \begin{figure}[t]
   \centering
   \includegraphics[width=\textwidth]{figures/pipeline.pdf}
-  \caption{Vision-Model-Controller pipeline. The FSQ-VAE (V) tokenizes Sobel edge maps into a grid of discrete codes, the causal transformer (M) predicts next-frame tokens conditioned on actions via AdaLN, and the CNN controller (C) selects actions from predicted tokens and hidden states. The action feedback loop enables autoregressive dreaming.}
+  \caption{Vision-Model-Controller pipeline. The FSQ-VAE (V) tokenizes Sobel edge maps into a grid of discrete codes, the causal transformer (M) predicts next-frame tokens conditioned on actions via AdaLN, and the MLP controller (C) selects actions from the transformer's hidden state. The action feedback loop enables autoregressive dreaming.}
   \label{fig:pipeline}
 \end{figure}
 
@@ -254,13 +254,12 @@ The total training loss is $\mathcal{L} = \mathcal{L}_\text{SLS-focal} + \lambda
 \label{sec:controller}
 % ---------------------------------------------------------------------------
 
-The controller is a lightweight CNN that takes the predicted next-frame tokens and the transformer's hidden state as input, and outputs a jump probability and a state value estimate.
+The controller is a lightweight MLP that takes the transformer's hidden state $\mathbf{h}_t$ as input and outputs a jump probability and a state value estimate.
 
 \paragraph{Architecture.}
-Token IDs are embedded (16-dim), reshaped to a $16 \times \gridsize$ feature map, and processed by two convolutional layers with max-pooling, producing a 256-dim feature vector.
-This is concatenated with the $\hdim$-dim transformer hidden state and fed through a three-layer MLP trunk (512 hidden units, LayerNorm, SiLU) to separate actor and critic heads.
-An auxiliary multi-token prediction head predicts the next 8 actions.
-The full controller has $\ctrlparams$ parameters.
+The controller is a single-hidden-layer MLP ($\hdim$ hidden units with LayerNorm and SiLU), followed by zero-initialized linear actor and critic heads. Input is the transformer's hidden state $\mathbf{h}_t \in \mathbb{R}^{\hdim}$; output is a jump probability and a state value estimate. The full controller has $\ctrlparams$ parameters.
+
+This design follows the TWISTER~\citep{burchi2025twister} and DreamerV3~\citep{hafner2025dreamerv3} pattern where the controller operates on the latent state produced by a trained world model. Our $\mathbf{h}_t$ already encodes spatial and temporal structure through \nlayers{} transformer layers with 3D-RoPE and AdaLN action conditioning, so an additional encoder on the token grid would duplicate work already done upstream.
 
 \paragraph{Training in dreams.}
 The controller is first pretrained via behavioral cloning on expert demonstrations, then fine-tuned with PPO~\citep{schulman2017ppo} in dreamed rollouts.
@@ -306,7 +305,7 @@ We evaluate on: (1)~next-token prediction accuracy and cross-entropy on held-out
 % Expected contents:
 % - Table 1: Main results (level progress %, CPC, accuracy, Death F1) across model versions
 % - Table 2: SLS ablation (with vs without, sigma sweep, dim weights vs uniform)
-% - Table 3: Ablations (context length, action conditioning, death oversampling, MTP)
+% - Table 3: Ablations (context length, action conditioning, death oversampling, BC pretraining)
 % - Table 4: Baselines (random, open-loop, heuristic, BC-only, frame-prediction-free)
 % - Figure: dreamed rollout vs ground truth frames
 % - Figure: inference latency breakdown per component

@@ -16,7 +16,7 @@
 ]
   \node[block, fill=vcolor!20, draw=vcolor] (V) {\textbf{V}\\\scriptsize FSQ-VAE};
   \node[block, fill=mcolor!20, draw=mcolor, right=1.5cm of V] (M) {\textbf{M}\\\scriptsize Transformer};
-  \node[block, fill=ccolor!20, draw=ccolor, right=1.5cm of M] (C) {\textbf{C}\\\scriptsize Controller};
+  \node[block, fill=ccolor!20, draw=ccolor, right=1.5cm of M] (C) {\textbf{C}\\\scriptsize MLP};
 
   \node[left=1.2cm of V, lbl] (input) {$\mathbf{x}_t$\\{\tiny 64$\times$64$\times$1}};
   \node[right=1.2cm of C, lbl] (output) {$a_t$};
@@ -24,7 +24,6 @@
   \draw[arr] (input) -- (V);
   \draw[arr] (V) -- node[above, lbl] {$\mathbf{z}_t$} node[below, lbl] {\tiny 8$\times$8} (M);
   \draw[arr] (M) -- node[above, lbl] {$\mathbf{h}_t$} (C);
-  \draw[arr] (V.north) -- ++(0,0.6) -| node[above, lbl, pos=0.25] {$\mathbf{z}_t$} (C.north);
   \draw[arr] (C) -- (output);
 
   \draw[arr] (C.south) -- ++(0,-0.6) -| node[below, lbl, pos=0.25] {$a_t$} (M.south);
@@ -33,7 +32,7 @@
   \node[below=1.75cm of mid, lbl] (legend) {%
     $\mathbf{x}_t \in \mathbb{R}^{64 \times 64}$: Sobel frame \quad
     $\mathbf{z}_t \in \{0,\ldots,999\}^{64}$: tokens \quad
-    $\mathbf{h}_t \in \mathbb{R}^{256}$: hidden state \quad
+    $\mathbf{h}_t \in \mathbb{R}^{512}$: hidden state \quad
     $a_t \in \{0, 1\}$: jump/idle%
   };
 \end{tikzpicture}
