@@ -182,6 +182,10 @@ class WorldModel(nn.Module):
                 nn.LayerNorm(embed_dim) for _ in range(K)
             ])
             self.fusion_proj = nn.Linear(K * embed_dim, embed_dim, bias=False)
+            # Output LayerNorm bounds the fused CPC source path, mirroring
+            # the unit-scale contract ln_f gives the V4 source. Without it,
+            # fusion_proj output is unbounded and can overflow under AMP.
+            self.fusion_ln = nn.LayerNorm(embed_dim)
         else:
             self.readout_layers = []
             self._readout_layer_set = set()
@@ -224,10 +228,12 @@ class WorldModel(nn.Module):
 
         # Identity-on-last-slice init for fusion_proj:
         # at step 0, fusion_proj(concat(readout_lns(layer_outs))) equals
-        # readout_lns[-1](last_layer_out), which is numerically equivalent
-        # to ln_f(last_layer_out) because both LayerNorms are default-init
-        # (weight=1, bias=0). So V5 h_t and CPC source match V4 at init,
-        # and CPC gradient moves the fusion off identity during training.
+        # readout_lns[-1](last_layer_out). After fusion_ln this becomes
+        # LayerNorm(LayerNorm(last_layer_out)), which matches V4's
+        # ln_f(last_layer_out) to within LayerNorm eps (~1e-5) because
+        # all three LayerNorms are default-init (weight=1, bias=0). So V5
+        # h_t and CPC source bootstrap from V4 at init, and CPC gradient
+        # moves the fusion off identity during training.
         if multi_level_readout:
             K = len(self.readout_layers)
             W = torch.zeros(embed_dim, K * embed_dim)
@@ -252,17 +258,17 @@ class WorldModel(nn.Module):
         return self.ln_f(x), captured
 
     def _fuse_multi_level(self, captured):
-        """Per-layer LN + concat + linear fusion for multi-level features.
+        """Per-layer LN + concat + linear fusion + output LN.
 
         Args:
             captured: list of K tensors, each (B, T, D), pre-ln_f block
                       outputs at the readout layer indices.
         Returns:
-            (B, T, D) fused representation.
+            (B, T, D) fused representation at unit scale.
         """
         normed = [ln(lo) for ln, lo in zip(self.readout_lns, captured)]
-        h_stack = torch.cat(normed, dim=-1)  # (B, T, K*D)
-        return self.fusion_proj(h_stack)     # (B, T, D)
+        h_stack = torch.cat(normed, dim=-1)          # (B, T, K*D)
+        return self.fusion_ln(self.fusion_proj(h_stack))  # (B, T, D)
 
     def _build_position_ids(self):
         """Build 3D position IDs (row, col, frame) for each sequence position.
@@ -598,11 +604,10 @@ class WorldModel(nn.Module):
         x = self.ln_f(x)
 
         if self.multi_level_readout:
-            # Per-layer LN + concat + fusion at position -1 only
-            normed_last = [ln(lo[:, -1:]) for ln, lo
-                           in zip(self.readout_lns, captured)]
-            h_stack = torch.cat(normed_last, dim=-1)  # (B, 1, K*D)
-            return self.fusion_proj(h_stack).squeeze(1)  # (B, D)
+            # Slice captured at position -1 before fusion to avoid fusing
+            # the whole sequence just to read the last position.
+            captured_last = [lo[:, -1:] for lo in captured]
+            return self._fuse_multi_level(captured_last).squeeze(1)  # (B, D)
         return x[:, -1]  # h_t at last context position
 
     @torch.no_grad()
@@ -670,10 +675,8 @@ class WorldModel(nn.Module):
 
         if return_hidden:
             if self.multi_level_readout:
-                normed_last = [ln(lo[:, -1:]) for ln, lo
-                               in zip(self.readout_lns, captured)]
-                h_stack = torch.cat(normed_last, dim=-1)  # (B, 1, K*D)
-                h_t = self.fusion_proj(h_stack).squeeze(1)  # (B, D)
+                captured_last = [lo[:, -1:] for lo in captured]
+                h_t = self._fuse_multi_level(captured_last).squeeze(1)
             else:
                 h_t = x[:, -1]
         else:
