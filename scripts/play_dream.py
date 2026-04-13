@@ -162,6 +162,10 @@ def main():
         context_frames=args.context_frames, dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
+        ffn_variant=getattr(args, 'ffn_variant', 'gelu'),
+        ffn_hidden=getattr(args, 'ffn_hidden', None),
+        multi_level_readout=getattr(args, 'multi_level_readout', False),
+        readout_layers=getattr(args, 'readout_layers', None),
     ).to(device)
     state = torch.load(args.transformer_checkpoint, map_location=device,
                        weights_only=True)
@@ -335,8 +339,12 @@ def main():
             keys = pygame.key.get_pressed()
             action = 1 if keys[pygame.K_SPACE] else 0
 
-        # World model prediction
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=device.type == "cuda"):
+        # World model prediction.
+        # bf16 instead of fp16: V5 SwiGLU overflows fp16 at inference, same
+        # failure mode that killed training. bf16 is native on Ampere+.
+        with torch.no_grad(), torch.amp.autocast(
+                device.type, dtype=torch.bfloat16,
+                enabled=device.type == "cuda"):
             pred_tokens, death_prob = wm.predict_next_frame(
                 ctx_t, ctx_a, temperature=0.0)
 

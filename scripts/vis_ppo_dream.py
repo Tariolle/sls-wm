@@ -122,7 +122,7 @@ def dream_rollout_visual(model, controller, vae, ctx_tokens_np, ctx_actions_np,
 
     for step in range(max_steps):
         with torch.no_grad():
-            with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
                 pred_tokens, death_prob, h_t = model.predict_next_frame(
                     ctx_t, ctx_a, temperature=0.0, return_hidden=True)
 
@@ -262,6 +262,10 @@ def main():
         context_frames=args.context_frames, dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
+        ffn_variant=getattr(args, 'ffn_variant', 'gelu'),
+        ffn_hidden=getattr(args, 'ffn_hidden', None),
+        multi_level_readout=getattr(args, 'multi_level_readout', False),
+        readout_layers=getattr(args, 'readout_layers', None),
     ).to(device)
     state = torch.load(args.transformer_checkpoint, map_location=device,
                        weights_only=True)

@@ -103,6 +103,10 @@ def main():
         dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
+        ffn_variant=getattr(args, 'ffn_variant', 'gelu'),
+        ffn_hidden=getattr(args, 'ffn_hidden', None),
+        multi_level_readout=getattr(args, 'multi_level_readout', False),
+        readout_layers=getattr(args, 'readout_layers', None),
     ).to(device)
     state = torch.load(args.transformer_checkpoint, map_location=device, weights_only=True)
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
@@ -155,7 +159,7 @@ def main():
     if not args.quick:
         total_correct, total_tokens = 0, 0
         batch_size = 256
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=device.type == "cuda"):
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
             for ep_idx, ep in enumerate(candidates):
                 print(f"  Single-step: episode {ep_idx + 1}/{len(candidates)} ({ep.name})",
                       end="\r")
@@ -221,7 +225,7 @@ def main():
         death_probs = []
         fed_actions = []
 
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled=device.type == "cuda"):
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
             for step in range(args.rollout_steps):
                 t = K + step
                 if t >= len(tokens):
