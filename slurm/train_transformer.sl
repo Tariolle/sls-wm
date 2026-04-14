@@ -66,7 +66,7 @@ fi
 
 echo "=== Step 2: Train Transformer ($(date)) ==="
 python -u scripts/train_transformer.py \
-    --config configs/v5.yaml \
+    --config configs/v6.yaml \
     --episodes-dir data/death_episodes \
     --expert-episodes-dir data/expert_episodes \
     --epochs 200 \
