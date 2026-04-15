@@ -40,6 +40,7 @@ python -u scripts/train_controller_ppo.py \
     --config configs/v4.yaml \
     --checkpoint-dir checkpoints_nobc \
     --wandb-name ppo-512d-nobc \
+    --no-pretrained \
     --seed 42 \
     $RESUME_FLAG &
 

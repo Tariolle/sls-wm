@@ -383,6 +383,8 @@ def main():
     # Output / initialization
     parser.add_argument("--pretrained", type=str, default=None,
                         help="Path to BC-pretrained controller checkpoint")
+    parser.add_argument("--no-pretrained", action="store_true",
+                        help="Force cold-start (ignore pretrained in config)")
     parser.add_argument("--wandb-name", type=str, default=None,
                         help="Override wandb run name (default: ppo-{embed_dim}d)")
     parser.add_argument("--resume", action="store_true",
@@ -395,6 +397,8 @@ def main():
 
     from deepdash.config import apply_config
     apply_config(args, section="controller_ppo")
+    if args.no_pretrained:
+        args.pretrained = None
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
