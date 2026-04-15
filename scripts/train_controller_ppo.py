@@ -383,6 +383,8 @@ def main():
     # Output / initialization
     parser.add_argument("--pretrained", type=str, default=None,
                         help="Path to BC-pretrained controller checkpoint")
+    parser.add_argument("--wandb-name", type=str, default=None,
+                        help="Override wandb run name (default: ppo-{embed_dim}d)")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from latest checkpoint and append to CSV log")
     parser.add_argument("--checkpoint-dir", default="checkpoints")
@@ -507,7 +509,8 @@ def main():
         with open(ckpt_dir / "controller_ppo_args.json", "w") as f:
             json.dump(vars(args), f, indent=2)
 
-    wandb_init(project="deepdash", name=f"ppo-{args.embed_dim}d",
+    run_name = args.wandb_name or f"ppo-{args.embed_dim}d"
+    wandb_init(project="deepdash", name=run_name,
                config=vars(args), resume_id=wandb_resume_id)
 
     # Fixed eval contexts (from val episodes only)
@@ -625,16 +628,16 @@ def main():
 
         log_data = {
             "iteration": iteration,
-            "train/survival": mean_surv,
-            "train/return": mean_return,
-            "train/loss": mean_loss,
-            "train/value": mean_value,
-            "train/entropy": mean_entropy,
-            "train/jump_ratio": train_jump_ratio,
+            "ppo/train/survival": mean_surv,
+            "ppo/train/return": mean_return,
+            "ppo/train/loss": mean_loss,
+            "ppo/train/value": mean_value,
+            "ppo/train/entropy": mean_entropy,
+            "ppo/train/jump_ratio": train_jump_ratio,
         }
         if eval_surv:
-            log_data["eval/survival"] = float(eval_surv)
-            log_data["eval/jump_ratio"] = float(jump_ratio_str)
+            log_data["ppo/eval/survival"] = float(eval_surv)
+            log_data["ppo/eval/jump_ratio"] = float(jump_ratio_str)
         wandb_log(log_data)
 
         # Save latest checkpoint for resume

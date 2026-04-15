@@ -320,9 +320,11 @@ def main():
 
         wandb_log({
             "epoch": epoch,
-            "train/loss": train_loss, "train/acc": train_acc,
-            "val/loss": val_loss, "val/acc": val_acc,
-            "lr": lr,
+            "bc/train/loss": train_loss,
+            "bc/train/acc": train_acc,
+            "bc/val/loss": val_loss,
+            "bc/val/acc": val_acc,
+            "bc/lr": lr,
         })
 
         # Save best + early stopping

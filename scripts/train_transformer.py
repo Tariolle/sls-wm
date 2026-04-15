@@ -679,13 +679,18 @@ def main():
 
             wandb_log({
                 "epoch": epoch,
-                "train/total": train_total, "train/loss": train_loss,
-                "train/acc": train_acc, "train/death_f1": train_d_f1,
-                "train/cpc": train_cpc,
-                "val/total": val_total, "val/loss": val_loss,
-                "val/acc": val_acc, "val/death_f1": val_d_f1,
-                "val/cpc": val_cpc,
-                "gap": gap, "lr": lr,
+                "transformer/train/total": train_total,
+                "transformer/train/loss": train_loss,
+                "transformer/train/acc": train_acc,
+                "transformer/train/death_f1": train_d_f1,
+                "transformer/train/cpc": train_cpc,
+                "transformer/val/total": val_total,
+                "transformer/val/loss": val_loss,
+                "transformer/val/acc": val_acc,
+                "transformer/val/death_f1": val_d_f1,
+                "transformer/val/cpc": val_cpc,
+                "transformer/gap": gap,
+                "transformer/lr": lr,
             })
 
             # Save full state
