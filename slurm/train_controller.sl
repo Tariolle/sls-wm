@@ -33,11 +33,10 @@ pip install --user wandb 2>/dev/null
 echo "$(date): Starting on $(hostname), Job ID: $SLURM_JOB_ID"
 
 # --- Phase 1: BC (skipped if PPO checkpoint exists) ---
-if [ ! -f checkpoints/controller_ppo_latest.pt ]; then
+if [ ! -f checkpoints_v6/controller_ppo_latest.pt ]; then
     echo "=== Phase 1: Behavioral Cloning ==="
     python -u scripts/train_controller_bc.py \
-        --config configs/v4.yaml \
-        --checkpoint-dir checkpoints \
+        --config configs/v6.yaml \
         --seed 42
 
     BC_EXIT=$?
@@ -46,7 +45,7 @@ if [ ! -f checkpoints/controller_ppo_latest.pt ]; then
         exit $BC_EXIT
     fi
     echo "=== BC complete ==="
-    PRETRAINED="--pretrained checkpoints/controller_bc_best.pt"
+    PRETRAINED="--pretrained checkpoints_v6/controller_bc_best.pt"
 else
     echo "=== Skipping BC (PPO checkpoint found, resuming) ==="
     PRETRAINED=""
@@ -55,13 +54,13 @@ fi
 # --- Phase 2: PPO ---
 echo "=== Phase 2: PPO ==="
 RESUME_FLAG=""
-if [ -f checkpoints/controller_ppo_latest.pt ]; then
+if [ -f checkpoints_v6/controller_ppo_latest.pt ]; then
     RESUME_FLAG="--resume"
 fi
 
 python -u scripts/train_controller_ppo.py \
-    --config configs/v4.yaml \
-    --checkpoint-dir checkpoints \
+    --config configs/v6.yaml \
+    --wandb-name ppo-768d \
     --seed 42 \
     $PRETRAINED \
     $RESUME_FLAG &

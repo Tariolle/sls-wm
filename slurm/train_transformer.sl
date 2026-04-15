@@ -23,7 +23,7 @@
 
 # Auto-resume: the trap creates a sentinel file before requeuing.
 # On next run, if the sentinel exists, we pass --resume.
-RESUME_FLAG=checkpoints/.resume_transformer
+RESUME_FLAG=checkpoints_v6/.resume_transformer
 
 handle_timeout() {
     echo "=== USR1 received ($(date)), saving and resubmitting ==="
@@ -66,31 +66,7 @@ fi
 
 echo "=== Step 2: Train Transformer ($(date)) ==="
 python -u scripts/train_transformer.py \
-    --episodes-dir data/death_episodes \
-    --expert-episodes-dir data/expert_episodes \
-    --epochs 200 \
-    --batch-size 512 \
-    --lr 4e-3 \
-    --context-frames 4 \
-    --vocab-size 1000 \
-    --tokens-per-frame 64 \
-    --embed-dim 512 \
-    --n-heads 8 \
-    --n-layers 8 \
-    --dropout 0.15 \
-    --weight-decay 0.01 \
-    --cpc-weight 1.0 \
-    --token-noise 0.05 \
-    --fsq-noise 0.05 \
-    --label-smoothing 0.1 \
-    --fsq-sigma 0.9 \
-    --fsq-dim-weights 1.30 0.84 0.97 0.89 \
-    --focal-gamma 2.0 \
-    --death-oversample 4 \
-    --steps-per-epoch 500 \
-    --checkpoint-dir checkpoints \
-    --patience 60 \
-    --seed 42 \
+    --config configs/v6.yaml \
     $RESUME_ARG &
 
 TRAIN_PID=$!
