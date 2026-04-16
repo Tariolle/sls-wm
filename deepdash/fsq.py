@@ -43,7 +43,10 @@ class FSQQuantizer(nn.Module):
                              torch.tensor([L // 2 for L in levels], dtype=torch.float32))
 
     def forward(self, z_e):
-        """Quantize encoder output via tanh + round.
+        """Quantize encoder output via iFSQ bounding + round.
+
+        Uses 2*sigmoid(1.6*z)-1 instead of tanh(z) for near-uniform bin
+        utilization (~100% vs ~83% with tanh). See iFSQ (arXiv 2601.17124).
 
         Args:
             z_e: (B, D, H, W) float — raw encoder output, D = len(levels).
@@ -57,13 +60,13 @@ class FSQQuantizer(nn.Module):
         # Even L: values in {-L/2+1, ..., L/2}  then shift by -0.5 to center
         # Following the FSQ paper's approach for even levels.
         half = self.half_levels.view(1, -1, 1, 1)  # (1, D, 1, 1)
-        z_bounded = torch.tanh(z_e) * half
+        z_bounded = (2.0 * torch.sigmoid(1.6 * z_e) - 1.0) * half
         z_q = z_bounded.round()
         # Clamp to valid range to handle even levels correctly
         levels = self.levels.float().view(1, -1, 1, 1)
         z_q = z_q.clamp(-half, half - (1.0 - levels % 2))
 
-        # Straight-through estimator: gradient flows through tanh, not round
+        # Straight-through estimator: gradient flows through sigmoid, not round
         z_q = z_bounded + (z_q - z_bounded).detach()
 
         indices = self._codes_to_indices(z_q)
