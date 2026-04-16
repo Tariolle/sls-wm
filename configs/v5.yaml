@@ -1,18 +1,18 @@
-# DeepDash V6 (768d + AdaLN + QK-norm) -- V4 scaled up
-# Single variable change from V4: embed_dim 512->768, n_heads 8->12
-# n_heads bumped to preserve head_dim=64 (important for QK-norm calibration).
-# All other hyperparameters frozen at V4 values.
-# Checkpoints isolated in checkpoints_v6/ to preserve V4 artifacts.
+# DeepDash V5 candidate -- V4 + FSQ [6,6,6,6]
+# Single variable change from V4: FSQ levels [8,5,5,5] -> [6,6,6,6] (vocab 1000 -> 1296).
+# Equal levels -> isotropic SLS kernel -> equal dim_weights.
+# All transformer/controller hyperparameters frozen at V4 values.
+# Checkpoints isolated in checkpoints_v5/ to preserve V4 artifacts.
 
-# Shared model architecture (consumed by transformer, controller_bc, controller_ppo)
+# Shared model architecture
 model:
-  vocab_size: 1000
-  embed_dim: 768
-  n_heads: 12
+  vocab_size: 1296
+  embed_dim: 512
+  n_heads: 8
   n_layers: 8
   tokens_per_frame: 64
   context_frames: 4
-  levels: [8, 5, 5, 5]
+  levels: [6, 6, 6, 6]
   dropout: 0.15
   adaln: true
 
@@ -22,7 +22,7 @@ transformer:
   expert_episodes_dir: data/expert_episodes
   epochs: 200
   batch_size: 512
-  lr: 0.002
+  lr: 0.004
   lr_min: 0.0005
   weight_decay: 0.01
   cpc_weight: 1.0
@@ -30,30 +30,30 @@ transformer:
   fsq_noise: 0.05
   label_smoothing: 0.1
   fsq_sigma: 0.9
-  fsq_dim_weights: [1.29, 0.85, 0.97, 0.89]
+  fsq_dim_weights: [1.0, 1.0, 1.0, 1.0]
   focal_gamma: 2.0
   death_oversample: 4
   steps_per_epoch: 500
   patience: 60
   seed: 42
-  checkpoint_dir: checkpoints_v6
+  checkpoint_dir: checkpoints_v5
 
 # Controller -- behavioral cloning pretraining
 controller_bc:
   expert_episodes_dir: data/expert_episodes
-  transformer_checkpoint: checkpoints_v6/transformer_best.pt
+  transformer_checkpoint: checkpoints_v5/transformer_best.pt
   epochs: 50
   batch_size: 512
   lr: 0.001
   weight_decay: 0.0001
   val_ratio: 0.1
   seed: 42
-  checkpoint_dir: checkpoints_v6
+  checkpoint_dir: checkpoints_v5
 
 # Controller -- PPO fine-tuning
 controller_ppo:
-  transformer_checkpoint: checkpoints_v6/transformer_best.pt
-  pretrained: checkpoints_v6/controller_bc_best.pt
+  transformer_checkpoint: checkpoints_v5/transformer_best.pt
+  pretrained: checkpoints_v5/controller_bc_best.pt
   amp_dtype: bfloat16
   n_iterations: 50000
   n_episodes: 512
@@ -72,4 +72,4 @@ controller_ppo:
   n_eval_episodes: 512
   eval_interval: 10
   seed: 42
-  checkpoint_dir: checkpoints_v6
+  checkpoint_dir: checkpoints_v5

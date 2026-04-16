@@ -23,7 +23,7 @@
 
 # Auto-resume: the trap creates a sentinel file before requeuing.
 # On next run, if the sentinel exists, we pass --resume.
-RESUME_FLAG=checkpoints_v6/.resume_transformer
+RESUME_FLAG=checkpoints_v5/.resume_transformer
 
 handle_timeout() {
     echo "=== USR1 received ($(date)), saving and resubmitting ==="
@@ -44,18 +44,18 @@ pip install --user wandb 2>/dev/null
 echo "=== Step 1a: Tokenize death episodes ==="
 python -u scripts/tokenize_episodes.py \
     --model fsq \
-    --checkpoint checkpoints/fsq_best.pt \
+    --checkpoint checkpoints_v5/fsq_best.pt \
     --episodes-dir data/death_episodes \
     --batch-size 512 \
-    --levels 8 5 5 5
+    --levels 6 6 6 6
 
 echo "=== Step 1b: Tokenize expert episodes ==="
 python -u scripts/tokenize_episodes.py \
     --model fsq \
-    --checkpoint checkpoints/fsq_best.pt \
+    --checkpoint checkpoints_v5/fsq_best.pt \
     --episodes-dir data/expert_episodes \
     --batch-size 512 \
-    --levels 8 5 5 5
+    --levels 6 6 6 6
 
 RESUME_ARG=""
 if [ -f "$RESUME_FLAG" ]; then
@@ -66,7 +66,7 @@ fi
 
 echo "=== Step 2: Train Transformer ($(date)) ==="
 python -u scripts/train_transformer.py \
-    --config configs/v6.yaml \
+    --config configs/v5.yaml \
     $RESUME_ARG &
 
 TRAIN_PID=$!

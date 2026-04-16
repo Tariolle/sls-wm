@@ -103,27 +103,33 @@ def val_epoch(model, loader, amp_dtype=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Train FSQ-VAE on Geometry Dash frames")
-    parser.add_argument("--episodes-dir", default="data/death_episodes")
-    parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=4e-3)
-    parser.add_argument("--checkpoint-dir", default="checkpoints")
+    parser.add_argument("--config", default=None, help="YAML config path (default: configs/v4.yaml)")
+    parser.add_argument("--episodes-dir", default=None)
+    parser.add_argument("--expert-episodes-dir", default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--resume", default=None, help="Path to checkpoint to resume from")
-    parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5],
+    parser.add_argument("--levels", type=int, nargs="+", default=None,
                         help="FSQ quantization levels per channel")
-    parser.add_argument("--alpha-slow", type=float, default=0.1,
+    parser.add_argument("--alpha-slow", type=float, default=None,
                         help="Weight for GRWM temporal slowness loss")
-    parser.add_argument("--alpha-uniform", type=float, default=0.01,
+    parser.add_argument("--alpha-uniform", type=float, default=None,
                         help="Weight for GRWM uniformity loss")
-    parser.add_argument("--val-ratio", type=float, default=0.1,
+    parser.add_argument("--val-ratio", type=float, default=None,
                         help="Fraction of episodes for validation")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--amp", action="store_true",
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--amp", action="store_true", default=None,
                         help="Enable bf16 automatic mixed precision (A100+)")
-    parser.add_argument("--compile", action="store_true",
+    parser.add_argument("--compile", action="store_true", default=None,
                         help="Use torch.compile for faster training")
     args = parser.parse_args()
+
+    from deepdash.config import apply_config
+    apply_config(args, section="fsq")
+    args.amp = bool(args.amp)
+    setattr(args, 'compile', bool(getattr(args, 'compile', False)))
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():

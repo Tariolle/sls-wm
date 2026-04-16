@@ -31,15 +31,4 @@ python -u scripts/shift_episodes.py \
 
 echo "=== Step 1: Train FSQ-VAE ==="
 python -u scripts/train_fsq.py \
-    --episodes-dir data/death_episodes \
-    --expert-episodes-dir data/expert_episodes \
-    --epochs 200 \
-    --batch-size 2048 \
-    --lr 1e-3 \
-    --checkpoint-dir checkpoints \
-    --levels 8 5 5 5 \
-    --alpha-slow 0.1 \
-    --alpha-uniform 0.01 \
-    --seed 42 \
-    --amp \
-    --compile
+    --config configs/v5.yaml
