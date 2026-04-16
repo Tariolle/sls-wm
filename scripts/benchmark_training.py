@@ -20,6 +20,8 @@ from pathlib import Path
 
 import torch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 
 # Config tuples: (name, amp_dtype, use_scaler, use_compile, compile_mode, tf32, fused_optim)
 CONFIGS = [
@@ -40,8 +42,6 @@ CONFIGS = [
 def run_single_config(config_json, model_json, batch_size, warmup, steps):
     """Run a single benchmark config (called in subprocess)."""
     import torch.nn.functional as F
-
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from deepdash.world_model import WorldModel
 
     cfg = json.loads(config_json)
