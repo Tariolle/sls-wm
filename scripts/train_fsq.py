@@ -230,8 +230,8 @@ def main():
 
     if args.compile:
         try:
-            model = torch.compile(model)
-            print("torch.compile enabled")
+            model = torch.compile(model, mode="max-autotune")
+            print("torch.compile enabled (max-autotune)")
         except Exception as e:
             print(f"torch.compile failed ({e}), continuing without it")
 

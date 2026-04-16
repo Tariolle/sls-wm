@@ -433,8 +433,8 @@ def main():
 
     if sys.platform != "win32":
         try:
-            model = torch.compile(model)
-            print("torch.compile enabled (full model)")
+            model = torch.compile(model, mode="max-autotune")
+            print("torch.compile enabled (max-autotune)")
         except Exception as e:
             print(f"torch.compile not available: {e}")
 

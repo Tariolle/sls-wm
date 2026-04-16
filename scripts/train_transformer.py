@@ -246,7 +246,7 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
             ctx[:, :, :tpf] = visual
             frame_tokens = torch.cat([ctx, frame_tokens[:, -1:]], dim=1)
 
-        with torch.autocast(device.type, dtype=torch.float16, enabled=use_amp):
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
             logits, cpc_loss = model(frame_tokens, actions)
             token_loss = focal_cross_entropy(
                 logits.reshape(-1, logits.size(-1)),  # (B*65, vocab)
@@ -309,7 +309,7 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
 
         target = frame_tokens[:, -1]
 
-        with torch.autocast(device.type, dtype=torch.float16, enabled=use_amp):
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
             logits, cpc_loss = model(frame_tokens, actions)
 
             token_loss = focal_cross_entropy(
@@ -512,7 +512,8 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                    weight_decay=args.weight_decay)
-    scaler = torch.GradScaler(device.type)
+    # bf16 doesn't need loss scaling; GradScaler with enabled=False is a no-op passthrough
+    scaler = torch.GradScaler(device.type, enabled=False)
 
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(exist_ok=True)
@@ -550,7 +551,7 @@ def main():
         try:
             import torch._inductor.config as inductor_cfg
             inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
-            model = torch.compile(model)
+            model = torch.compile(model, mode="max-autotune")
             print(f"torch.compile enabled (full model, {inductor_cfg.compile_threads} compile threads)")
         except Exception as e:
             print(f"torch.compile not available, running eager: {e}")
