@@ -16,6 +16,20 @@ model:
   dropout: 0.15
   adaln: true
 
+# FSQ-VAE training
+fsq:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 200
+  batch_size: 2048
+  lr: 0.001
+  alpha_slow: 0.1
+  alpha_uniform: 0.01
+  seed: 42
+  amp: true
+  compile: true
+  checkpoint_dir: checkpoints_v5
+
 # Transformer world-model training
 transformer:
   episodes_dir: data/death_episodes
