@@ -16,16 +16,18 @@ model:
 
 # FSQ-VAE training
 fsq:
-  episodes_dir: data/death_episodes
-  expert_episodes_dir: data/expert_episodes
+  episodes_dir: C:/Users/Florent/sls-wm-data/death_episodes
+  expert_episodes_dir: C:/Users/Florent/sls-wm-data/expert_episodes
   epochs: 200
   batch_size: 1024
   lr: 0.001
   alpha_slow: 0.1
   alpha_uniform: 0.01
   k_shifts: 1               # 1 random shift variant per base ep per epoch (standard aug pattern)
-  pixel_noise_std: 0.02     # denoising-AE Gaussian noise (target clean)
-  brightness_range: 0.1     # uniform ±0.1 offset, pair-coherent
+  # pixel_noise removed: game renders are deterministic, no sensor noise in the input
+  # distribution. Training to denoise wastes capacity and creates a train/val gap
+  # (decoder over-corrects clean val frames).
+  brightness_range: 0.1     # uniform ±0.1 offset, pair-coherent (plausible: skin/bg variation)
   contrast_range: 0.1       # uniform 1±0.1 factor, pair-coherent
   seed: 42
   # Benchmarked on RTX 2060 SUPER: compile(default)+fp16+GradScaler = 2.08x vs eager fp32.

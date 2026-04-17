@@ -107,12 +107,9 @@ class FramePairDataset(Dataset):
         return ft, ft1
 
 
-def _augment_pair_gpu(ft, ft1, pixel_noise_std, brightness_range, contrast_range):
-    """GPU-side augmentation. Returns (input_t, target_t, input_t+1, target_t+1).
-
-    Brightness/contrast are sampled per-sample and pair-coherent (same value for
-    (f_t, f_{t+1}), different across batch elements). Pixel noise is independent
-    per frame (denoising-AE: only affects encoder input, target stays clean).
+def _augment_pair_gpu(ft, ft1, brightness_range, contrast_range):
+    """GPU-side augmentation. Brightness/contrast sampled per-sample, pair-coherent
+    (same value for (f_t, f_{t+1}), different across batch elements).
     """
     B = ft.shape[0]
     device = ft.device
@@ -124,21 +121,12 @@ def _augment_pair_gpu(ft, ft1, pixel_noise_std, brightness_range, contrast_range
         c = 1.0 + (torch.rand(B, 1, 1, 1, device=device) * 2.0 - 1.0) * contrast_range
         ft = (ft - 0.5) * c + 0.5
         ft1 = (ft1 - 0.5) * c + 0.5
-    ft = ft.clamp(0.0, 1.0)
-    ft1 = ft1.clamp(0.0, 1.0)
-
-    ft_tgt = ft.clone()
-    ft1_tgt = ft1.clone()
-
-    if pixel_noise_std > 0.0:
-        ft = (ft + torch.randn_like(ft) * pixel_noise_std).clamp(0.0, 1.0)
-        ft1 = (ft1 + torch.randn_like(ft1) * pixel_noise_std).clamp(0.0, 1.0)
-    return ft, ft_tgt, ft1, ft1_tgt
+    return ft.clamp(0.0, 1.0), ft1.clamp(0.0, 1.0)
 
 
 def train_epoch(model, loader, optimizer, alpha_slow, alpha_uniform,
                 scaler=None, amp_dtype=None,
-                pixel_noise_std=0.0, brightness_range=0.0, contrast_range=0.0):
+                brightness_range=0.0, contrast_range=0.0):
     model.train()
     total_recon, total_slow, total_uniform, n = 0, 0, 0, 0
     t_data = t_aug = t_fwd = t_bwd = t_opt = 0.0
@@ -152,16 +140,15 @@ def train_epoch(model, loader, optimizer, alpha_slow, alpha_uniform,
         t0 = time.perf_counter()
         t_data += t0 - t_prev
 
-        ft_in, ft_tgt, ft1_in, ft1_tgt = _augment_pair_gpu(
-            ft, ft1, pixel_noise_std, brightness_range, contrast_range)
+        ft, ft1 = _augment_pair_gpu(ft, ft1, brightness_range, contrast_range)
         sync()
         t1 = time.perf_counter()
         t_aug += t1 - t0
 
         with torch.amp.autocast("cuda", enabled=amp_dtype is not None, dtype=amp_dtype):
-            recon_t, z_e_t, _ = model(ft_in)
-            recon_t1, z_e_t1, _ = model(ft1_in)
-            recon_loss = (fsqvae_loss(recon_t, ft_tgt) + fsqvae_loss(recon_t1, ft1_tgt)) / 2
+            recon_t, z_e_t, _ = model(ft)
+            recon_t1, z_e_t1, _ = model(ft1)
+            recon_loss = (fsqvae_loss(recon_t, ft) + fsqvae_loss(recon_t1, ft1)) / 2
             slow_loss = grwm_slowness(z_e_t, z_e_t1)
             uniform_loss = grwm_uniformity(z_e_t)
             loss = recon_loss + alpha_slow * slow_loss + alpha_uniform * uniform_loss
@@ -264,9 +251,6 @@ def main():
                         help="Cap the dataset to the first N base episodes "
                              "(shift variants of kept bases are all included). "
                              "Counts base eps across death + expert combined.")
-    parser.add_argument("--pixel-noise-std", type=float, default=None,
-                        help="Gaussian pixel noise std on [0,1] encoder input "
-                             "(denoising AE — target stays clean)")
     parser.add_argument("--brightness-range", type=float, default=None,
                         help="Uniform brightness offset in [-r, +r] applied to "
                              "both input and target, same value per frame pair")
@@ -362,11 +346,9 @@ def main():
 
     print(f"Episodes: {len(all_episodes)} total, {len(train_eps)} train, {len(val_eps)} val")
 
-    pixel_noise = getattr(args, "pixel_noise_std", None) or 0.0
     brightness = getattr(args, "brightness_range", None) or 0.0
     contrast = getattr(args, "contrast_range", None) or 0.0
-    print(f"Augmentation: pixel_noise_std={pixel_noise}, "
-          f"brightness_range=±{brightness}, contrast_range=±{contrast}")
+    print(f"Augmentation: brightness_range=±{brightness}, contrast_range=±{contrast}")
     train_dataset = FramePairDataset(
         train_eps, k_shifts=args.k_shifts, seed=args.seed, device=device)
     val_dataset = FramePairDataset(val_eps, device=device)
@@ -461,8 +443,7 @@ def main():
             train_recon, train_slow, train_uniform, timing = train_epoch(
                 model, train_loader, optimizer, args.alpha_slow, args.alpha_uniform,
                 scaler=scaler, amp_dtype=amp_dtype,
-                pixel_noise_std=pixel_noise, brightness_range=brightness,
-                contrast_range=contrast)
+                brightness_range=brightness, contrast_range=contrast)
             val_recon, codebook_usage, codebook_ppl = val_epoch(model, val_loader, amp_dtype=amp_dtype)
             scheduler.step()
             dt = time.time() - t0
