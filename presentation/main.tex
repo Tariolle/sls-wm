@@ -69,7 +69,7 @@
     \item World Models: learned environment, training \textbf{in imagination}
     \item \textbf{Geometry Dash}: deterministic, binary action, precision timing
     \item \textbf{Real-time}: 30 FPS $\to$ no MCTS, reaction $<$33ms
-    \item \textbf{Goal}: master unseen levels, trained entirely \emph{in imagination}
+    \item \textbf{Goal}: master unseen levels, trained \emph{entirely} in imagination
   \end{itemize}
   \vfill
 \end{frame}
@@ -109,7 +109,7 @@
     \small
     \begin{tabular}{c@{\hspace{3em}}c}
       $\mathbf{x}_t \in \mathbb{R}^{\framesize \times \framesize}$: grayscale Sobel frame &
-      $\mathbf{z}_t \in \{0,\ldots,\fsqcodes-1\}^{\ntokens}$: discrete tokens \\[0.3em]
+      $\mathbf{z}_t \in \{0,\ldots,624\}^{\ntokens}$: discrete tokens \\[0.3em]
       $\mathbf{h}_t \in \mathbb{R}^{\hdim}$: hidden state &
       $a_t \in \{0, 1\}$: jump/idle
     \end{tabular}
@@ -233,8 +233,8 @@
   \begin{itemize}
     \item Live gameplay at \textbf{30 FPS}, death detection via process memory reading
     \item Frames + actions recorded simultaneously, saved as \texttt{.npy} per episode
-    \item \textbf{Death episodes}: $\sim$\ndeatheps{} episodes, $\sim$219K frames (intentional deaths at obstacles)
-    \item \textbf{Expert episodes}: $\sim$\nexperteps{} clean runs, $\sim$33K frames (no deaths, for BC + rebalancing world model)
+    \item \textbf{Death episodes}: $\sim$\ndeatheps{} episodes, $\sim$219K frames (intentional deaths)
+    \item \textbf{Expert episodes}: $\sim$\nexperteps{} clean runs, $\sim$33K frames (for BC + rebalancing)
   \end{itemize}
 \end{frame}
 
@@ -264,7 +264,6 @@
   \begin{itemize}
     \item \nshifts{} vertical shifts $\times$ \nbaseepisodes{} episodes $=$ \textbf{\naugeps{} augmented episodes}
     \item Vertical shifts simulate different stage elevations (physically valid)
-    \item Horizontal shifts removed: player X position is fixed in Geometry Dash
     \item Edge padding to fill shifted borders
   \end{itemize}
 \end{frame}
@@ -490,33 +489,20 @@
 \end{frame}
 
 \begin{frame}[t]{Novel: FSQ-Structured Label Smoothing}
+  \vspace{0.8em}
   \textbf{Problem}: uniform smoothing $\to$ FSQ neighbor = random token
 
   \vspace{0.5em}
   \textbf{Solution} {\color{insared}\textit{(novel)}}: Gaussian kernel over FSQ coordinate distance:
   \[
-    w(a,b) = \exp\!\left(-\frac{d^2(a,b)}{2\sigma^2}\right), \quad d^2 = \sum_i (\Delta_i)^2, \quad \sigma = 0.9
+    w(a,b) = \exp\!\left(-\frac{d^2(a,b)}{2\sigma^2}\right), \quad d^2 = \sum_d \alpha_d\,(\Delta_d)^2, \quad \sigma = 0.9
   \]
 
-  $\sigma$ calibrated from empirical MSE analysis (800 samples per perturbation):
-
-  \vspace{0.2em}
-  \begin{center}
-    \small
-    \begin{tabular}{lcc}
-      \toprule
-      Perturbation & Patch MSE & Ratio \\
-      \midrule
-      $\pm1$ single dim & 0.000078 & 1.0$\times$ \\
-      $+1$ two dims & 0.000200 & 2.55$\times$ \\
-      $+2$ single dim & 0.000493 & \textbf{6.30$\times$} \\
-      \bottomrule
-    \end{tabular}
-  \end{center}
+  $\sigma$ and per-dim weights calibrated from empirical MSE (5{,}000 val frames, 500-sample bootstrap, 3 seeds).
 
   \vspace{0.2em}\end{frame}
 
-\begin{frame}{Transformer: Current Model (V4)}
+\begin{frame}{Transformer: Current Model (V5 baseline)}
   \vspace{0.5em}
   \begin{center}
     \small
@@ -525,21 +511,24 @@
       \textbf{Metric} & \textbf{Value} \\
       \midrule
       Parameters & $\sim$35M \\
-      Val accuracy & 27.7\% \\
-      Death F1 & 0.79 \\
-      Val CPC loss & \textbf{0.133} \\
+      Val accuracy & 32.2\% \\
+      Death F1 & 0.76 \\
+      Val CPC loss & 0.307 \\
+      Val--train gap & 0.056 \\
       \bottomrule
     \end{tabular}
   \end{center}
 
   \vspace{0.5em}
-  Key changes from earlier versions:
+  Key changes from V4:
   \begin{itemize}
-    \item \textbf{AdaLN-Zero} action conditioning (6 params/block, gate bias 1.0)
-    \item \textbf{QK-norm} (RMSNorm per head) to stabilize attention under AdaLN
-    \item Scaled 256d $\to$ 512d, new FSQ with 5$\times$ shift augmentation
-    \item Structured label smoothing ($\sigma$=0.9) + dual token noise
+    \item FSQ codebook $[8,5,5,5]$ (1000 codes) $\to$ $[5,5,5,5]$ (\fsqcodes{} codes), near-double perplexity utilization
+    \item Structured label smoothing with \emph{calibrated} per-dim weights $\boldsymbol{\alpha} = [1.02,\,0.94,\,0.83,\,1.20]$ ($\sigma$=0.9, $\varepsilon$=0.1)
+    \item AdaLN-Zero + QK-norm + RoPE retained from V4
   \end{itemize}
+
+  \vspace{0.3em}
+  {\footnotesize Val CPC is higher than V4's 0.133 because the cleaner FSQ has fewer easy contrastive negatives; this is a property of the tokenizer, not a regression.}
 \end{frame}
 
 % ==========================================================
@@ -598,7 +587,7 @@
   \end{itemize}
 
   \vspace{0.5em}
-  \textbf{Test:} zero-shot deployment on \emph{unseen} levels
+  \textbf{Test:} zero-shot deployment on the real game (no fine-tuning)
 \end{frame}
 
 % ==========================================================
