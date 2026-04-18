@@ -100,10 +100,10 @@ Benchmarked 11 configurations (all `torch.compile` modes × precisions) with sub
 |--------|---------|---------|
 | Eager FP32 (baseline) | ~2036ms | 1.00x |
 | Compile default + BF16 | ~317ms | 6.42x |
-| Compile reduce-overhead + BF16 | ~314ms | 6.48x |
-| **Compile max-autotune + BF16** | **311ms** | **6.55x** |
+| **Compile reduce-overhead + BF16** | **~314ms** | **6.48x** |
+| Compile max-autotune + BF16 | ~311ms | 6.55x |
 
-`max-autotune` adds ~2 min compile time but amortizes within 20 training epochs.
+`reduce-overhead` is our default: max-autotune's extra ~1% gain does not justify the CUDA-graph autotuning failures we hit on new model code.
 
 ### Controller
 - **BC**: death + expert episodes, class-weighted BCE (1.5x jumps), early stopping
