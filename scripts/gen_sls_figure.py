@@ -4,7 +4,14 @@ Two panels:
   (a) 2D heatmap slice of SLS weights for a center token
   (b) Sorted SLS vs uniform distribution comparison (log scale)
 
-Usage: python scripts/gen_sls_figure.py [--output paper/figures/sls_kernel.pdf]
+Defaults reflect the current V5 baseline (FSQ [5,5,5,5] with calibrated
+per-dim weights). Override via CLI for other codebooks or ablations.
+
+Usage:
+    python scripts/gen_sls_figure.py
+    python scripts/gen_sls_figure.py --output paper/figures/sls_kernel.pdf
+    python scripts/gen_sls_figure.py --levels 5 5 5 5 \\
+        --dim-weights 1.02 0.94 0.83 1.20 --target-coords 2 2 2 2
 """
 
 import argparse
@@ -58,17 +65,59 @@ def build_sls_row(levels, target_idx, sigma=0.9, smoothing=0.1, dim_weights=None
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="paper/figures/sls_kernel.pdf")
+    parser.add_argument("--levels", type=int, nargs="+", default=[5, 5, 5, 5],
+                        help="FSQ codebook levels (default: V5 baseline [5,5,5,5])")
+    parser.add_argument("--sigma", type=float, default=0.9)
+    parser.add_argument("--smoothing", type=float, default=0.1,
+                        help="Label smoothing epsilon")
+    parser.add_argument("--dim-weights", type=float, nargs="+",
+                        default=[1.02, 0.94, 0.83, 1.20],
+                        help="Per-dim sensitivity weights (default: V5 baseline)")
+    parser.add_argument("--target-coords", type=int, nargs="+",
+                        default=None,
+                        help="Target token coordinates as ints per dim "
+                             "(default: center of the lattice)")
+    parser.add_argument("--slice-dims", type=int, nargs=2, default=[1, 2],
+                        help="Which two FSQ dims to show as the 2D slice "
+                             "(default: 1 2, matching the paper's V5 figure)")
     args = parser.parse_args()
 
-    levels = [8, 5, 5, 5]
-    sigma = 0.9
-    smoothing = 0.1
-    dim_weights = [1.29, 0.85, 0.97, 0.89]
+    levels = args.levels
+    n_dims = len(levels)
+    if len(args.dim_weights) != n_dims:
+        raise SystemExit(
+            f"--dim-weights length {len(args.dim_weights)} must match "
+            f"--levels length {n_dims}"
+        )
 
-    # Target token: center of lattice (3, 2, 2, 2) -> index 437
-    target_idx = 3 * 125 + 2 * 25 + 2 * 5 + 2  # = 437
+    # Choose target: center coords unless overridden
+    if args.target_coords is None:
+        target_coords = [L // 2 for L in levels]
+    else:
+        if len(args.target_coords) != n_dims:
+            raise SystemExit(
+                f"--target-coords length {len(args.target_coords)} must match "
+                f"--levels length {n_dims}"
+            )
+        target_coords = list(args.target_coords)
+
+    # Decompose target coords into flat index
+    divisors = []
+    acc = 1
+    for L in reversed(levels):
+        divisors.append(acc)
+        acc *= L
+    divisors.reverse()
+    target_idx = sum(c * div for c, div in zip(target_coords, divisors))
+
+    print(f"Levels:        {levels}")
+    print(f"Dim weights:   {args.dim_weights}")
+    print(f"Sigma:         {args.sigma}")
+    print(f"Epsilon:       {args.smoothing}")
+    print(f"Target coords: {tuple(target_coords)}  ->  index {target_idx}")
+
     sls_row, coords, divisors = build_sls_row(
-        levels, target_idx, sigma, smoothing, dim_weights
+        levels, target_idx, args.sigma, args.smoothing, args.dim_weights,
     )
 
     # --- Paper-quality settings ---
@@ -82,36 +131,40 @@ def main():
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(5.5, 2.4))
 
     # --- Panel (a): 2D heatmap slice ---
-    # Fix dim0=3, dim3=2 (matching target), vary dim1 (5) x dim2 (5)
-    target_d0, target_d3 = 3, 2
-    target_d1, target_d2 = 2, 2
-    grid = np.full((levels[1], levels[2]), np.nan)
-    for d1 in range(levels[1]):
-        for d2 in range(levels[2]):
-            idx = target_d0 * divisors[0] + d1 * divisors[1] + d2 * divisors[2] + target_d3
-            if (d1, d2) != (target_d1, target_d2):
-                grid[d1, d2] = sls_row[idx]
+    # Fix all dims EXCEPT the two we're slicing over
+    d1, d2 = args.slice_dims
+    if d1 == d2 or d1 < 0 or d2 < 0 or d1 >= n_dims or d2 >= n_dims:
+        raise SystemExit(f"--slice-dims {d1} {d2} invalid for n_dims={n_dims}")
+    grid = np.full((levels[d1], levels[d2]), np.nan)
+    for v1 in range(levels[d1]):
+        for v2 in range(levels[d2]):
+            cur_coords = list(target_coords)
+            cur_coords[d1] = v1
+            cur_coords[d2] = v2
+            idx = sum(c * div for c, div in zip(cur_coords, divisors))
+            if (v1, v2) != (target_coords[d1], target_coords[d2]):
+                grid[v1, v2] = sls_row[idx]
 
     im = ax1.imshow(grid, cmap="viridis", origin="lower", aspect="equal")
-    # Mark target cell with a red square
-    ax1.plot(target_d2, target_d1, "s", markeredgecolor="red", markerfacecolor="red",
+    ax1.plot(target_coords[d2], target_coords[d1], "s",
+             markeredgecolor="red", markerfacecolor="red",
              markersize=12, markeredgewidth=2)
-    ax1.set_xlabel("Dim 2 (5 levels)")
-    ax1.set_ylabel("Dim 1 (5 levels)")
+    ax1.set_xlabel(f"Dim {d2} ({levels[d2]} levels)")
+    ax1.set_ylabel(f"Dim {d1} ({levels[d1]} levels)")
     ax1.set_title("(a) SLS weights (2D slice)")
-    ax1.set_xticks(range(levels[2]))
-    ax1.set_yticks(range(levels[1]))
+    ax1.set_xticks(range(levels[d2]))
+    ax1.set_yticks(range(levels[d1]))
     cb = fig.colorbar(im, ax=ax1, fraction=0.046, pad=0.04)
     cb.ax.tick_params(labelsize=7)
 
     # --- Panel (b): Sorted distribution comparison ---
-    # Remove target from distribution
     off_diag = np.delete(sls_row, target_idx)
     sorted_sls = np.sort(off_diag)[::-1]
-    uniform_val = smoothing / (math.prod(levels) - 1)
+    uniform_val = args.smoothing / (math.prod(levels) - 1)
 
     ax2.semilogy(sorted_sls, color="#2196F3", linewidth=1.2, label="SLS (Gaussian)")
-    ax2.axhline(uniform_val, color="#FF9800", linewidth=1.2, linestyle="--", label="Uniform")
+    ax2.axhline(uniform_val, color="#FF9800", linewidth=1.2,
+                linestyle="--", label="Uniform")
     ax2.set_xlabel("Token rank (by SLS weight)")
     ax2.set_ylabel("Smoothing probability")
     ax2.set_title("(b) SLS vs. uniform smoothing")
