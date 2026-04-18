@@ -296,7 +296,7 @@ All training runs on a single NVIDIA A100 GPU.
 \paragraph{Training throughput.}
 We benchmarked 11 training configurations (all combinations of \texttt{torch.compile} mode and floating-point precision) using subprocess isolation to prevent CUDA allocator fragmentation across runs.
 All \texttt{torch.compile} modes are within 3\% of each other on our workload (default 6.42$\times$, reduce-overhead 6.48$\times$, max-autotune 6.55$\times$ over eager FP32).
-We adopt \texttt{reduce-overhead} with BF16 (314\,ms per gradient step, 6.48$\times$) as the default: the additional ${\sim}1\%$ offered by \texttt{max-autotune} does not outweigh its occasional CUDA-graph autotuning failures on new model code.
+We adopt the \texttt{default} mode with BF16 (317\,ms per gradient step, 6.42$\times$) for training: both \texttt{reduce-overhead} and \texttt{max-autotune} rely on CUDA graphs, which occasionally trigger illegal-memory-access failures inside Inductor's Triton autotuning on our PyTorch 2.6 / CUDA 12.6 stack; the ${\sim}2\%$ throughput gap is not worth the stability risk.
 This configuration is applied to the FSQ-VAE, transformer, and controller training scripts.
 While the A100 was occupied with a primary training run, a secondary NVIDIA RTX 2060 SUPER (Turing, SM 7.5) was used in parallel to train auxiliary networks and probe augmentation / architecture variants, requiring its own hardware-specific optimization stack.
 Turing lacks native BF16 (software-emulated, ${\sim}12\times$ slower than FP32 on this card) and has no TF32 support (Ampere+ only); additionally, Inductor's channels-last layout heuristic triggers a stride assertion in the convolution backward, which we disable by setting \texttt{torch.\_inductor.config.layout\_optimization = False}.

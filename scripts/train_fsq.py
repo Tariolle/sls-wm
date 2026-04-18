@@ -382,7 +382,7 @@ def main():
     print(f"FSQ levels: {args.levels} -> {model.codebook_size} implicit codes")
 
     if args.compile:
-        compile_mode = getattr(args, "compile_mode", None) or "reduce-overhead"
+        compile_mode = getattr(args, "compile_mode", None) or "default"
         # Inductor's automatic channels_last conversion hits a stride assertion in
         # conv_backward on Turing for this model. Force NCHW layout throughout.
         try:

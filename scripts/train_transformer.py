@@ -584,7 +584,7 @@ def main():
         try:
             import torch._inductor.config as inductor_cfg
             inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
-            model = torch.compile(model, mode="reduce-overhead")
+            model = torch.compile(model, mode="default")
             print(f"torch.compile enabled (full model, {inductor_cfg.compile_threads} compile threads)")
         except Exception as e:
             print(f"torch.compile not available, running eager: {e}")

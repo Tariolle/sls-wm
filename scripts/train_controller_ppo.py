@@ -433,8 +433,8 @@ def main():
 
     if sys.platform != "win32":
         try:
-            model = torch.compile(model, mode="reduce-overhead")
-            print("torch.compile enabled (reduce-overhead)")
+            model = torch.compile(model, mode="default")
+            print("torch.compile enabled (default)")
         except Exception as e:
             print(f"torch.compile not available: {e}")
 
