@@ -897,6 +897,7 @@ class AdaLNSpaceTimeBlock(nn.Module):
             h_r = (
                 h.view(B, n_frames, n_per_frame, D)
                  .permute(0, 2, 1, 3)
+                 .contiguous()
                  .reshape(B * n_per_frame, n_frames, D)
             )
             rope_cos, rope_sin = rope_cos_time, rope_sin_time
@@ -923,6 +924,7 @@ class AdaLNSpaceTimeBlock(nn.Module):
             out = (
                 out.view(B, n_per_frame, n_frames, D)
                    .permute(0, 2, 1, 3)
+                   .contiguous()
                    .reshape(B, T, D)
             )
 
