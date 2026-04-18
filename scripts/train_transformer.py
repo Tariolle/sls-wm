@@ -591,8 +591,12 @@ def main():
         try:
             import torch._inductor.config as inductor_cfg
             inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
-            model = torch.compile(model, mode="reduce-overhead")
-            print(f"torch.compile enabled (full model, {inductor_cfg.compile_threads} compile threads)")
+            # mode="default" skips cudagraph capture. reduce-overhead triggers
+            # a separate torch 2.6 bug where Inductor's pointwise-autotune of a
+            # _to_copy kernel hits an illegal memory access inside cudagraph
+            # warmup. The ~1% throughput loss is not worth chasing.
+            model = torch.compile(model, mode="default")
+            print(f"torch.compile enabled (full model, {inductor_cfg.compile_threads} compile threads, mode=default)")
         except Exception as e:
             print(f"torch.compile not available, running eager: {e}")
     else:
