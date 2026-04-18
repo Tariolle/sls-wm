@@ -21,10 +21,6 @@ os.environ.setdefault(
     "TORCHINDUCTOR_CACHE_DIR",
     str(Path.home() / ".cache" / "torchinductor"),
 )
-# Synchronous CUDA launches so crash stacktraces point at the real
-# faulting kernel. Debug-only: slows training; remove once v5-spacetime
-# is stable.
-os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.wandb_utils import wandb_init, wandb_log, wandb_finish, wandb_run_id
@@ -595,12 +591,8 @@ def main():
         try:
             import torch._inductor.config as inductor_cfg
             inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
-            # mode="default" keeps Inductor fused-kernel compilation (main
-            # speedup) but skips cudagraph capture, which repeatedly
-            # segfaults/illegal-memory-accesses on v5-spacetime under
-            # torch 2.6. Revisit once torch upgrades.
-            model = torch.compile(model, mode="default")
-            print(f"torch.compile enabled (full model, {inductor_cfg.compile_threads} compile threads, mode=default)")
+            model = torch.compile(model, mode="reduce-overhead")
+            print(f"torch.compile enabled (full model, {inductor_cfg.compile_threads} compile threads)")
         except Exception as e:
             print(f"torch.compile not available, running eager: {e}")
     else:
