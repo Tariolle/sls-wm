@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J "train_tfm"
-#SBATCH -o slurm/logs/train_transformer.out
-#SBATCH -e slurm/logs/train_transformer.err
+#SBATCH -J "train_wm"
+#SBATCH -o slurm/logs/train_world_model.out
+#SBATCH -e slurm/logs/train_world_model.err
 #SBATCH -p ar_a100
 #SBATCH --gres=gpu:a100:1
 #SBATCH -n 1
@@ -10,13 +10,16 @@
 #SBATCH --time=08:00:00
 #SBATCH --signal=B:USR1@300
 
-# Train Transformer world model on A100.
+# Train the world model (FSQ + Transformer) on A100. Config picks the
+# mode: e6.1-joint.yaml (joint FSQ+Transformer) vs v5.yaml (Transformer
+# only, tokenised input; requires prior FSQ + tokenize_episodes step,
+# triggered below).
 # Auto-resumes: SLURM sends USR1 5 min before time limit,
 # the trap saves checkpoint and resubmits the job.
 #
-# Submit:  sbatch slurm/train_transformer.sl [config]
-# Example: sbatch slurm/train_transformer.sl configs/v5.yaml
-# Monitor: tail -f slurm/logs/train_transformer.out
+# Submit:  sbatch slurm/train_world_model.sl [config]
+# Example: sbatch slurm/train_world_model.sl configs/v5.yaml
+# Monitor: tail -f slurm/logs/train_world_model.out
 
 CONFIG=${1:-configs/v5.yaml}
 
@@ -83,7 +86,7 @@ if [ -f "$RESUME_FLAG" ]; then
 fi
 
 echo "=== Step 2: Train Transformer ($(date)) ==="
-python -u scripts/train_transformer.py \
+python -u scripts/train_world_model.py \
     --config "$CONFIG" \
     $RESUME_ARG &
 

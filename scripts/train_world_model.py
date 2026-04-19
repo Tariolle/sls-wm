@@ -1,9 +1,24 @@
-"""Train the Transformer world model on tokenized episode data.
+"""Train the world model (FSQ tokenizer + Transformer dynamics).
+
+Two modes:
+  - V5 / standard: train only the Transformer on pre-tokenized episode
+    data. FSQ is trained separately by scripts/train_fsq.py first, then
+    scripts/tokenize_episodes.py materialises tokens.npy files.
+  - E6.1+ joint: --joint trains FSQ and Transformer simultaneously from
+    raw frames, with gradient from transformer losses routed back to the
+    FSQ encoder via STE (see JointStep / WorldModel.fsq_grad_proj).
 
 Usage:
+    # V5 (tokenised-input) training:
     python scripts/tokenize_episodes.py --model fsq   # must run first
-    python scripts/train_transformer.py
-    python scripts/train_transformer.py --context-frames 4 --epochs 400
+    python scripts/train_world_model.py --config configs/v5.yaml
+
+    # E6.1 joint training (no pretokenisation):
+    python scripts/train_world_model.py --config configs/e6.1-joint.yaml
+
+Historical note: this file used to be named scripts/train_transformer.py
+back when it only trained the Transformer on tokenized input. Renamed
+2026-04-19 when joint training landed.
 """
 
 import argparse

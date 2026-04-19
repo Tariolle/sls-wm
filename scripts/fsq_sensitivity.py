@@ -537,7 +537,7 @@ def run_self_test():
     backward compatibility with the pre-upgrade implementation.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from scripts.train_transformer import build_structured_smooth_targets
+    from scripts.train_world_model import build_structured_smooth_targets
     levels = [5, 5, 5, 5]
     full_vocab = 625 + 2
     # Default kernel should be 'gaussian' and output should equal pre-upgrade
