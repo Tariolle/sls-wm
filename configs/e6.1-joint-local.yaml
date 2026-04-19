@@ -55,7 +55,12 @@ transformer:
   shift_max: 4          # on-the-fly vertical shift aug
   # Turing hardware overrides
   amp_dtype: float16
-  compile_mode: default
+  # Inductor's autotune leaks scratch buffers during first-epoch trace
+  # on Turing + Windows torch 2.10 (reports 14 GB allocated on an 8 GB
+  # card and OOMs at the first FFN intermediate). Eager is the cheapest
+  # correct mode for this hardware; compile is for A100 only via
+  # configs/e6.1-joint.yaml (reduce-overhead there).
+  compile_mode: none
 
 # Controller sections (not exercised by the probe, but kept so the config
 # validates and future local controller runs inherit the right checkpoint dir).
