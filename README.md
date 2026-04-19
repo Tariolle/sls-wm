@@ -25,7 +25,7 @@ $$
 w(i, j) = \exp\!\left(-\frac{\sum_d \alpha_d \cdot (\Delta_d)^2}{2\sigma^2}\right)
 $$
 
-The per-dimension weights $\alpha_d$ are calibrated from empirical patch-level MSE analysis (800 samples per perturbation type), measuring the actual visual impact of each FSQ dimension. This formulation generalizes to any discrete latent space equipped with a coordinate metric.
+The per-dimension weights $\alpha_d$ are calibrated from empirical patch-level MSE analysis over 5,000 validation frames, measuring the actual visual impact of a one-step perturbation in each FSQ dimension. This formulation generalizes to any discrete latent space equipped with a coordinate metric.
 
 ### Secondary: Real-Time World Model Deployment
 
@@ -37,24 +37,24 @@ A complete inference pipeline achieving 30 FPS real-time play on a live game, wi
 
 | Component | Model | Params | Function |
 |-----------|-------|--------|----------|
-| **V** (Vision) | FSQ-VAE [8,5,5,5] | 1.9M (0.9M encoder) | 64x64 Sobel frame to 8x8 discrete tokens (1000 codes) |
+| **V** (Vision) | FSQ-VAE [5,5,5,5] | 1.9M (0.9M encoder) | 64x64 Sobel frame to 8x8 discrete tokens (625 codes) |
 | **M** (Memory) | Transformer 512d/8H/8L + AdaLN + QK-norm | ~35M | Predicts next tokens + death, produces h_t |
 | **C** (Controller) | MLPPolicy | ~265K | h_t to jump/idle (1-hidden-layer MLP) |
 
-## Results (V4)
+## Results (V5 headline)
 
-| Metric | V1 | V2 | V3 | V4 (current) |
-|--------|-----|-----|-----|-------------|
-| Transformer params | 6.7M | 6.7M | 14.7M | ~35M |
-| Val CPC | -- | 0.203 | 0.166 | **0.1328** |
-| Death F1 (val) | 0.72 | 0.73 | 0.78 | ~0.79 |
-| Controller params | ~40K | ~40K | ~40K | ~265K |
-| Controller type | CNNPolicy | CNNPolicy | CNNPolicy | **MLPPolicy** |
-| PPO plateau iters | 9K | 5K | 7K | **~5K** |
-| Level 1 progress | 10% | 11% | 20% | 14-16% |
-| Inference | 27ms | 24ms | ~27ms | ~30ms |
+V5 baseline = FSQ [5,5,5,5] + Transformer with calibrated SLS (`sigma=0.9`, `dim_weights=[1.02, 0.94, 0.83, 1.20]`, `epsilon=0.1`).
 
-V4 trails V3's L1 progress because the V3 FSQ converged to an oversmoothed local optimum (higher RMSE but artificially easy latent). V4's FSQ is more faithful to the data; the real-game gap is now an upstream problem (FSQ quality / dream-reality gap), not a controller problem -- MLPPolicy already beats every CNN variant on the V4 transformer.
+| Metric | V5 |
+|--------|-----|
+| Transformer params | ~35M |
+| Val CPC | 0.3069 |
+| Val accuracy | 0.3215 |
+| Val death P/R/F1 | 0.666 / 0.885 / 0.760 |
+| Controller params | ~265K |
+| Controller / deployment | pending (controller gate run in progress) |
+
+Full V0 -> V5 evolution with per-version decisions and ablation trails is in [VERSIONS.md](VERSIONS.md).
 
 ## Pipeline
 
@@ -79,14 +79,14 @@ V4 trails V3's L1 progress because the V3 FSQ converged to an oversmoothed local
 ## Training Details
 
 ### FSQ-VAE
-- RMSE 0.025/pixel, 100% codebook utilization, 37% perplexity (exp(H)/V; uniform = 100%)
+- 100% codebook utilization (625/625 active), 76% perplexity (exp(H)/V; uniform = 100%)
 - iFSQ bounding (2σ(1.6z)−1 instead of tanh) for near-uniform bin utilization
-- GRWM regularization, shift augmentation, cosine LR, BF16, 200 epochs on A100
+- GRWM temporal slowness (0.1) + uniformity loss (0.01), shift augmentation, cosine LR, BF16, 200 epochs on A100
 
 ### Transformer
 - AdaLN-Zero action conditioning (DiT/LeWorldModel) + QK-norm (SD3/MMDiT)
 - Block-causal attention + 3D-RoPE + AC-CPC weight 1.0 (TWISTER)
-- Focal loss + structured label smoothing (sigma=0.9) + dual token noise
+- Focal loss (gamma=2.0) + structured label smoothing (sigma=0.9, eps=0.1, calibrated dim_weights) + dual token noise
 - Vertical-only shift augmentation (5x), death oversample 4x
 - No masking (all target tokens predicted, no ground truth leakage)
 - 512d embedding, 8 heads, 8 layers, dropout 0.15
@@ -118,19 +118,25 @@ Benchmarked 11 configurations (all `torch.compile` modes × precisions) with sub
 
 ## Version History
 
-See [VERSIONS.md](VERSIONS.md) for full V0 through V4 evolution.
+See [VERSIONS.md](VERSIONS.md) for full V0 through V5 evolution.
 
 ## References
 
 - **FSQ**: Mentzer et al. (2024). [*Finite Scalar Quantization: VQ-VAE Made Simple*](https://arxiv.org/abs/2309.15505). ICLR
 - **iFSQ**: Vali et al. (2026). [*iFSQ: Improving FSQ for Image Generation with 1 Line of Code*](https://arxiv.org/abs/2601.17124). ICLR
 - **Label Smoothing**: Szegedy et al. (2016). [*Rethinking the Inception Architecture for Computer Vision*](https://arxiv.org/abs/1512.00567). CVPR
+- **Striving for Simplicity**: Springenberg et al. (2015). [*Striving for Simplicity: The All Convolutional Net*](https://arxiv.org/abs/1412.6806). ICLR Workshop
 - **World Models**: Ha & Schmidhuber (2018). [*World Models*](https://arxiv.org/abs/1803.10122). NeurIPS
 - **IRIS**: Micheli et al. (2023). [*Transformers are Sample-Efficient World Models*](https://arxiv.org/abs/2209.00588). ICLR
 - **TWISTER**: Burchi & Timofte (2025). [*Transformer-based World Models with AC-CPC*](https://arxiv.org/abs/2503.04416). ICLR
 - **LeWorldModel**: Maes et al. (2026). [*Stable End-to-End Joint-Embedding Predictive Architecture from Pixels*](https://arxiv.org/abs/2603.19312). Preprint
 - **DiT**: Peebles & Xie (2023). [*Scalable Diffusion Models with Transformers*](https://arxiv.org/abs/2212.09748). ICCV
 - **SD3/MMDiT**: Esser et al. (2024). [*Scaling Rectified Flow Transformers for High-Resolution Image Synthesis*](https://arxiv.org/abs/2403.03206). ICML
+- **FiLM**: Perez et al. (2018). [*FiLM: Visual Reasoning with a General Conditioning Layer*](https://arxiv.org/abs/1709.07871). AAAI
+- **RoPE**: Su et al. (2024). [*RoFormer: Enhanced Transformer with Rotary Position Embedding*](https://arxiv.org/abs/2104.09864). Neurocomputing
+- **CPC / InfoNCE**: van den Oord et al. (2018). [*Representation Learning with Contrastive Predictive Coding*](https://arxiv.org/abs/1807.03748). Preprint
+- **GRWM (temporal slowness)**: Huh et al. (2023). [*Straightening Out the Frame-by-Frame Video Prediction Problem*](https://arxiv.org/abs/2311.17009). Preprint
+- **Uniformity loss**: Wang & Isola (2020). [*Understanding Contrastive Representation Learning through Alignment and Uniformity on the Hypersphere*](https://arxiv.org/abs/2005.10242). ICML
 - **DreamerV3**: Hafner et al. (2025). [*Mastering Diverse Control Tasks through World Models*](https://arxiv.org/abs/2301.04104). Nature
 - **Dreamer 4**: Hafner et al. (2025). [*Training Agents Inside of Scalable World Models*](https://arxiv.org/abs/2509.24527). Preprint
 - **PPO**: Schulman et al. (2017). [*Proximal Policy Optimization Algorithms*](https://arxiv.org/abs/1707.06347). Preprint
