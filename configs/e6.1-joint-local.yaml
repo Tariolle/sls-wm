@@ -29,16 +29,15 @@ transformer:
   episodes_dir: data/death_episodes
   expert_episodes_dir: data/expert_episodes
   epochs: 200
-  batch_size: 56            # 2060 SUPER 8 GB. Calibrated against observed
-                            # steady state: B=32 -> 4.9 GB, B=48 -> 6.5 GB,
-                            # B=56 -> 7.1 GB (fits in VRAM), B=60 -> 7.6 GB
-                            # reported but observed paging to shared memory
-                            # (Windows still routes some of it to sysRAM
-                            # at this margin). B=56 is the pure-VRAM ceiling.
-                            # B=64 OOMed (first MLP GELU tipped over at
-                            # 7.04 GB live, 82 MB ask unallocatable).
-                            # Gradient checkpointing (not wired yet) would
-                            # unlock bigger batches.
+  batch_size: 48            # 2060 SUPER 8 GB. Calibrated eager VRAM:
+                            # B=32 -> 4.9 GB, B=48 -> 6.5 GB, B=56 -> 7.1 GB
+                            # (pure VRAM ceiling, no compile). B=48 leaves
+                            # ~1 GB headroom for the reduce-overhead compile
+                            # trace autotune peak, so the probe runs compiled
+                            # without Windows sysmem fallback paging. B=64
+                            # OOMed cleanly (first MLP GELU at 7.04 GB live,
+                            # 82 MB ask unallocatable). Gradient checkpointing
+                            # (not wired yet) would unlock bigger batches.
   lr: 0.004                 # peak LR identical to V5 / e6.1 (keep schedule shape)
   lr_min: 0.0002            # E6.1 tighter-tail floor
   weight_decay: 0.01
