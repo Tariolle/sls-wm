@@ -29,12 +29,15 @@ transformer:
   episodes_dir: data/death_episodes
   expert_episodes_dir: data/expert_episodes
   epochs: 200
-  batch_size: 48            # 2060 SUPER 8 GB. B=32 observed steady-state
-                            # 4.9 GB -> ~3 GB headroom. Activations scale
-                            # linearly with batch: B=48 ~7.3 GB (1.5x).
-                            # B=64 OOMs (7.04 GB live before the first MLP
-                            # GELU's 82 MB ask). Use gradient checkpointing
-                            # (not wired yet) to go higher than 48.
+  batch_size: 56            # 2060 SUPER 8 GB. Calibrated from observed
+                            # steady-state: B=32 -> 4.9 GB, B=48 -> 6.5 GB.
+                            # Per-sample activation ~115 MB; fixed cost
+                            # (weights + Adam state) ~1 GB. B=56 projects
+                            # ~7.4 GB, leaving 500 MB margin for the
+                            # GradScaler retry-on-overflow peak. B=64 OOMs
+                            # (first MLP GELU tipped over at 7.04 GB live).
+                            # Gradient checkpointing (not wired yet) would
+                            # unlock bigger batches.
   lr: 0.004                 # peak LR identical to V5 / e6.1 (keep schedule shape)
   lr_min: 0.0002            # E6.1 tighter-tail floor
   weight_decay: 0.01
