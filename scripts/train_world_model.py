@@ -677,8 +677,14 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        all_params = list(js.wm.parameters()) + list(js.fsq.parameters())
-        torch.nn.utils.clip_grad_norm_(all_params, 1.0)
+        # Per-group grad clip: each network gets its own norm=1.0 budget
+        # independently. A global clip would let the encoder's large
+        # recon-driven gradient saturate the whole budget and attenuate
+        # the transformer's (already smaller) gradient by the encoder-to-
+        # transformer ratio, severely slowing transformer learning.
+        # Per-group matches the per-group LR design philosophy.
+        torch.nn.utils.clip_grad_norm_(list(js.wm.parameters()), 1.0)
+        torch.nn.utils.clip_grad_norm_(list(js.fsq.parameters()), 1.0)
 
         with torch.no_grad():
             e = sum(p.grad.detach().pow(2).sum().item()
