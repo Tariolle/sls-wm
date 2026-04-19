@@ -1015,7 +1015,7 @@ def main():
     # capture spans encode -> STE -> transformer -> losses.
     if joint:
         print("Joint mode: model compile deferred to JointStep below")
-    elif sys.platform != "win32":
+    else:
         try:
             import torch._inductor.config as inductor_cfg
             inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
@@ -1023,8 +1023,6 @@ def main():
             print(f"torch.compile enabled (full model, {inductor_cfg.compile_threads} compile threads)")
         except Exception as e:
             print(f"torch.compile not available, running eager: {e}")
-    else:
-        print("Skipping torch.compile (not supported on Windows)")
 
     # Build FSQ neighbor lookup table for structured noise
     if args.fsq_noise > 0:
@@ -1089,17 +1087,14 @@ def main():
             neighbor_table=None, neighbor_counts=None,
             soft_target_matrix=soft_target_matrix,
         ).to(device)
-        if sys.platform != "win32":
-            try:
-                import torch._inductor.config as inductor_cfg
-                inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
-                joint_step_train = torch.compile(joint_step_train, mode="reduce-overhead")
-                joint_step_val = torch.compile(joint_step_val, mode="reduce-overhead")
-                print("JointStep compiled (reduce-overhead, train + val)")
-            except Exception as e:
-                print(f"JointStep compile failed, running eager: {e}")
-        else:
-            print("Skipping JointStep compile (Windows)")
+        try:
+            import torch._inductor.config as inductor_cfg
+            inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
+            joint_step_train = torch.compile(joint_step_train, mode="reduce-overhead")
+            joint_step_val = torch.compile(joint_step_val, mode="reduce-overhead")
+            print("JointStep compiled (reduce-overhead, train + val)")
+        except Exception as e:
+            print(f"JointStep compile failed, running eager: {e}")
 
     # Closed-form LR factor: linear warmup followed by cosine decay to
     # eta_min. Implemented as a single LambdaLR so resume is state-
