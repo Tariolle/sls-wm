@@ -1099,7 +1099,12 @@ def main():
     else:
         try:
             import torch._inductor.config as inductor_cfg
-            inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
+            # Windows: Inductor's parallel-compile SubprocPool uses
+            # subprocess `pass_fds`, which raises on Windows. Fall back
+            # to single-threaded compile there.
+            inductor_cfg.compile_threads = (
+                1 if sys.platform == "win32"
+                else min(os.cpu_count() or 1, 8))
             model = torch.compile(model, mode=compile_mode)
             print(f"torch.compile enabled (mode={compile_mode}, "
                   f"{inductor_cfg.compile_threads} compile threads)")
@@ -1177,10 +1182,14 @@ def main():
         else:
             try:
                 import torch._inductor.config as inductor_cfg
-                inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
+                # Windows: parallel compile SubprocPool breaks on pass_fds.
+                inductor_cfg.compile_threads = (
+                    1 if sys.platform == "win32"
+                    else min(os.cpu_count() or 1, 8))
                 joint_step_train = torch.compile(joint_step_train, mode=compile_mode)
                 joint_step_val = torch.compile(joint_step_val, mode=compile_mode)
-                print(f"JointStep compiled (mode={compile_mode}, train + val)")
+                print(f"JointStep compiled (mode={compile_mode}, "
+                      f"{inductor_cfg.compile_threads} compile threads, train + val)")
             except Exception as e:
                 print(f"JointStep compile failed, running eager: {e}")
 
