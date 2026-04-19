@@ -29,12 +29,15 @@ transformer:
   episodes_dir: data/death_episodes
   expert_episodes_dir: data/expert_episodes
   epochs: 200
-  batch_size: 128           # 2060 SUPER 8 GB peak activation budget:
-                            # per-layer attn-scores B×H×T×T fp16 ~ 87 MB and
-                            # FFN intermediate B×T×4D fp16 ~ 163 MB at B=128,
-                            # T=325, D=512 -> 8 layers ~ 2 GB activations +
-                            # FSQ encode/decode ~500 MB + weights/grads/opt
-                            # state ~2 GB. Headroom intact. Larger OOMs.
+  batch_size: 64            # 2060 SUPER 8 GB. Eager autograd caches more
+                            # activations than compiled mode, so bigger
+                            # batches silently page to system RAM via
+                            # Windows CUDA sysmem fallback (observed at 128
+                            # during E6.1 probe: 8 GB VRAM + 6.5 GB shared,
+                            # single step takes minutes). 64 is the safe
+                            # floor that doesn't page. If you really want
+                            # bigger, enable gradient checkpointing — not
+                            # wired up yet.
   lr: 0.004                 # peak LR identical to V5 / e6.1 (keep schedule shape)
   lr_min: 0.0002            # E6.1 tighter-tail floor
   weight_decay: 0.01

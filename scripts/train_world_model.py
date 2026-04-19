@@ -37,10 +37,9 @@ os.environ.setdefault(
     str(Path.home() / ".cache" / "torchinductor"),
 )
 # Expandable CUDA allocator segments: reduces fragmentation between the
-# peak activation burst (big FFN intermediate + attention scores) and
-# later allocations. Essential on small-VRAM Turing cards where tight
-# batch sizes + fp16 GradScaler shuffle memory at each step. Harmless on
-# A100 (silently improves packing).
+# peak activation burst and later allocations. Helpful on Linux/A100; on
+# Windows the allocator emits "expandable_segments not supported on this
+# platform" and ignores it. Harmless either way.
 os.environ.setdefault(
     "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True",
 )
@@ -1280,7 +1279,8 @@ def main():
 
     patience_counter = 0
 
-    print("First epoch will be slower due to torch.compile tracing...")
+    if compile_mode != "none":
+        print("First epoch will be slower due to torch.compile tracing...")
     try:
         for epoch in range(start_epoch, args.epochs + 1):
             t0 = time.time()
