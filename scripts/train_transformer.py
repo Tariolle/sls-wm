@@ -8,6 +8,7 @@ Usage:
 
 import argparse
 import csv
+import math
 import os
 import re
 import signal
@@ -628,16 +629,29 @@ def main():
     else:
         soft_target_matrix = None
 
+    # Closed-form LR factor: linear warmup followed by cosine decay to
+    # eta_min. Implemented as a single LambdaLR so resume is state-
+    # independent: on load_state_dict the child scheduler state doesn't
+    # fully round-trip across SequentialLR milestones, which previously
+    # caused the warmup leg to re-trigger from the current LR on resume.
     warmup_epochs = 5
-    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=1e-2, total_iters=warmup_epochs)
-    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs - warmup_epochs, eta_min=args.lr_min)
-    scheduler = torch.optim.lr_scheduler.SequentialLR(
-        optimizer, [warmup_scheduler, cosine_scheduler],
-        milestones=[warmup_epochs])
-    if resume_state is not None and "scheduler" in resume_state:
-        scheduler.load_state_dict(resume_state["scheduler"])
+    start_factor = 1e-2
+    cosine_length = max(1, args.epochs - warmup_epochs)
+    final_ratio = args.lr_min / args.lr
+    def lr_factor(epoch):
+        if epoch < warmup_epochs:
+            return start_factor + (1.0 - start_factor) * epoch / warmup_epochs
+        progress = (epoch - warmup_epochs) / cosine_length
+        progress = min(max(progress, 0.0), 1.0)
+        cos = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return final_ratio + (1.0 - final_ratio) * cos
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_factor)
+    if resume_state is not None:
+        # last_epoch semantics: optimizer.step() already ran `start_epoch - 1`
+        # times before the first pending step, so set last_epoch accordingly
+        # and let LambdaLR recompute the factor analytically from lr_factor().
+        scheduler.last_epoch = start_epoch - 1
+        scheduler._last_lr = [group["lr"] for group in optimizer.param_groups]
 
     log_path = ckpt_dir / "transformer_log.csv"
     log_header = ["epoch", "train_total", "train_loss", "train_acc",
