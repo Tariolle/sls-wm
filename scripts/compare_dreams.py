@@ -123,7 +123,6 @@ def load_transformer(args, ckpt_path, device):
         context_frames=args.context_frames, dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, "adaln", False),
-        attention_pattern=(getattr(args, "attention_pattern", None) or "full"),
     ).to(device)
     state = torch.load(ckpt_path, map_location=device, weights_only=True)
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}

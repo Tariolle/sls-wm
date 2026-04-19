@@ -71,7 +71,6 @@ class WorldModel(nn.Module):
         cpc_dim: int = 64,
         tokens_per_frame: int = 64,
         adaln: bool = False,
-        attention_pattern: str = "full",
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -80,7 +79,6 @@ class WorldModel(nn.Module):
         self.context_frames = context_frames
         self.tokens_per_frame = tokens_per_frame
         self.adaln = adaln
-        self.attention_pattern = attention_pattern
 
         # Death token indices (appended as 65th position per frame)
         self.ALIVE_TOKEN = vocab_size      # index for alive status
@@ -117,51 +115,12 @@ class WorldModel(nn.Module):
         self.register_buffer("rope_cos", rope_cos)
         self.register_buffer("rope_sin", rope_sin)
 
-        # Validate attention_pattern and its prerequisites before setting up
-        # any pattern-specific buffers so bad configs fail cleanly.
-        if attention_pattern == "full":
-            pass  # no extra validation, works with adaln true/false
-        elif attention_pattern == "space_time_sst_t":
-            assert adaln, "attention_pattern='space_time_sst_t' requires adaln=True"
-            assert n_layers % 4 == 0, (
-                f"attention_pattern='space_time_sst_t' requires n_layers divisible by 4 "
-                f"(got n_layers={n_layers})"
-            )
-        else:
-            raise ValueError(
-                f"Unknown attention_pattern: {attention_pattern!r} "
-                f"(expected 'full' or 'space_time_sst_t')"
-            )
-
-        # Per-axis RoPE slices for factorized attention (space/time patterns).
-        # Within a space layer all tokens share the same temporal angle, so
-        # its rotation cancels in Q.K^T; using frame 0's slice is exact.
-        # Within a time layer all tokens share the same spatial angle, so
-        # its rotation cancels; using spatial-position 0's slice is exact.
-        if attention_pattern != "full":
-            n_frames_total = context_frames + 1  # K context + 1 target
-            rope_cos_grid = rope_cos.view(n_frames_total, self.block_size, -1)
-            rope_sin_grid = rope_sin.view(n_frames_total, self.block_size, -1)
-            self.register_buffer("rope_cos_space", rope_cos_grid[0].contiguous())
-            self.register_buffer("rope_sin_space", rope_sin_grid[0].contiguous())
-            self.register_buffer("rope_cos_time", rope_cos_grid[:, 0].contiguous())
-            self.register_buffer("rope_sin_time", rope_sin_grid[:, 0].contiguous())
-
         # Transformer blocks
-        if attention_pattern == "full":
-            BlockClass = AdaLNTransformerBlock if adaln else TransformerBlock
-            self.blocks = nn.ModuleList([
-                BlockClass(embed_dim, n_heads, dropout)
-                for _ in range(n_layers)
-            ])
-        else:  # space_time_sst_t (validated above)
-            self.blocks = nn.ModuleList([
-                AdaLNSpaceTimeBlock(
-                    embed_dim, n_heads, dropout,
-                    axis="time" if (i + 1) % 4 == 0 else "space",
-                )
-                for i in range(n_layers)
-            ])
+        BlockClass = AdaLNTransformerBlock if adaln else TransformerBlock
+        self.blocks = nn.ModuleList([
+            BlockClass(embed_dim, n_heads, dropout)
+            for _ in range(n_layers)
+        ])
         self.ln_f = nn.LayerNorm(embed_dim)
         self.embed_drop = nn.Dropout(dropout)
         self.head = nn.Linear(embed_dim, self.full_vocab_size, bias=False)
@@ -201,37 +160,10 @@ class WorldModel(nn.Module):
                 nn.init.constant_(linear.bias[5*D:6*D], 1.0)  # gate2
 
     def _backbone_forward(self, x, cond=None):
-        """Run transformer blocks + final layernorm (compile-friendly hot path).
-
-        Handles both full attention (fixed seq_len) and factorized
-        space/time attention (seq_len must be a multiple of block_size).
-        """
-        if self.attention_pattern == "full":
-            T = x.shape[1]
-            attn_mask = self.attn_mask[:T, :T] if T != self.seq_len else self.attn_mask
-            rope_cos = self.rope_cos[:T] if T != self.seq_len else self.rope_cos
-            rope_sin = self.rope_sin[:T] if T != self.seq_len else self.rope_sin
-            for block in self.blocks:
-                x, _ = block(x, attn_mask, rope_cos, rope_sin, cond=cond)
-            return self.ln_f(x)
-
-        # Factorized space/time path.
-        T = x.shape[1]
-        assert T % self.block_size == 0, (
-            f"factorized attention requires seq_len divisible by block_size="
-            f"{self.block_size}, got seq_len={T}"
-        )
-        n_frames = T // self.block_size
-        rope_cos_time = self.rope_cos_time[:n_frames]
-        rope_sin_time = self.rope_sin_time[:n_frames]
+        """Run transformer blocks + final layernorm (compile-friendly hot path)."""
         for block in self.blocks:
-            x, _ = block(
-                x,
-                self.rope_cos_space, self.rope_sin_space,
-                rope_cos_time, rope_sin_time,
-                n_frames, self.block_size,
-                cond=cond,
-            )
+            x, _ = block(x, self.attn_mask, self.rope_cos, self.rope_sin,
+                         cond=cond)
         return self.ln_f(x)
 
     def _build_position_ids(self):
@@ -529,7 +461,14 @@ class WorldModel(nn.Module):
             ctx_len = K * (self.block_size + 1)
 
         x = torch.cat(parts, dim=1)
-        x = self._backbone_forward(x, cond=cond)
+        ctx_mask = self.attn_mask[:ctx_len, :ctx_len]
+        rope_cos_ctx = self.rope_cos[:ctx_len]
+        rope_sin_ctx = self.rope_sin[:ctx_len]
+
+        for block in self.blocks:
+            x, _ = block(x, ctx_mask, rope_cos_ctx, rope_sin_ctx,
+                         use_cache=False, cond=cond)
+        x = self.ln_f(x)
         return x[:, -1]  # h_t at last context position
 
     @torch.no_grad()
@@ -562,42 +501,7 @@ class WorldModel(nn.Module):
         device = frame_tokens.device
         n_tokens = self.block_size  # 65
 
-        if self.attention_pattern != "full":
-            # Factorized attention has no KV cache; run a single forward pass
-            # over (K+1) * block_size tokens, extract target predictions.
-            parts = []
-            cond = None
-            if self.adaln:
-                act_onehot = F.one_hot(actions, self.n_actions).float()
-                cond = self.action_cond(act_onehot.reshape(B, -1))
-                for i in range(K):
-                    parts.append(self.token_embed(frame_tokens[:, i]))
-                ctx_len = K * self.block_size
-            else:
-                for i in range(K):
-                    parts.append(self.token_embed(frame_tokens[:, i]))
-                    act = self.action_embed(actions[:, i])
-                    parts.append(act.unsqueeze(1))
-                ctx_len = K * (self.block_size + 1)
-            target_embed = self.mask_embed.expand(B, n_tokens, -1)
-            parts.append(target_embed)
-            x = torch.cat(parts, dim=1)
-            x = self._backbone_forward(x, cond=cond)
-            h_t = x[:, ctx_len - 1] if return_hidden else None
-            logits = self.head(x[:, -n_tokens:])
-            # Visual positions (0-63): mask out status tokens so they can't be sampled
-            logits[:, :TPF, self.ALIVE_TOKEN] = -float('inf')
-            logits[:, :TPF, self.DEATH_TOKEN] = -float('inf')
-            predicted = self._sample_token(
-                logits.reshape(-1, logits.size(-1)),
-                temperature, top_k, top_p,
-            ).reshape(B, n_tokens)
-            death_prob = F.softmax(logits[:, -1], dim=-1)[:, self.DEATH_TOKEN]
-            if return_hidden:
-                return predicted[:, :TPF], death_prob, h_t
-            return predicted[:, :TPF], death_prob
-
-        # --- Phase 1: Prefill context (full-attention path, KV-cached) ---
+        # --- Phase 1: Prefill context ---
         parts = []
         cond = None
 
@@ -807,142 +711,3 @@ class TransformerBlock(nn.Module):
         x = x + self.resid_drop(h)
         x = x + self.mlp(self.ln2(x))
         return x, present_kv
-
-
-class AdaLNSpaceTimeBlock(nn.Module):
-    """Factorized space-only or time-only attention block with AdaLN-Zero.
-
-    Dreamer 4 (arxiv 2509.24527) §3.4 pattern: alternating space and time
-    attention layers replace full cross-axis attention. Each block attends
-    along one axis only:
-      - 'space': bidirectional attention among the tokens of a single frame.
-      - 'time' : causal attention among the frames at a fixed spatial position.
-
-    A stack of (3 space + 1 time) repeated L/4 times gives a 2-hop
-    space-then-time crosstalk that matches the data's (spatial grid, causal
-    temporal sequence) factorization. This is the same module wiring as
-    AdaLNTransformerBlock (QKV, QK-Norm, AdaLN-Zero, GELU MLP) with only
-    the attention op's reshape + mask changing.
-
-    KV caching is not implemented for this block: call sites must use the
-    single-pass factorized path in WorldModel.predict_next_frame.
-    """
-
-    def __init__(self, embed_dim, n_heads, dropout, axis):
-        super().__init__()
-        assert axis in ("space", "time"), f"unknown axis: {axis!r}"
-        self.axis = axis
-        self.n_heads = n_heads
-        self.head_dim = embed_dim // n_heads
-
-        self.ln1 = nn.LayerNorm(embed_dim, elementwise_affine=False)
-        self.qkv = nn.Linear(embed_dim, 3 * embed_dim)
-        self.ln_q = RMSNorm(self.head_dim)
-        self.ln_k = RMSNorm(self.head_dim)
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
-        self.attn_drop = nn.Dropout(dropout)
-        self.resid_drop = nn.Dropout(dropout)
-
-        self.ln2 = nn.LayerNorm(embed_dim, elementwise_affine=False)
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
-            nn.GELU(),
-            nn.Linear(embed_dim * 4, embed_dim),
-            nn.Dropout(dropout),
-        )
-
-        self.adaln_proj = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(embed_dim, 6 * embed_dim),
-        )
-
-    def forward(self, x,
-                rope_cos_space, rope_sin_space,
-                rope_cos_time, rope_sin_time,
-                n_frames, n_per_frame,
-                cond=None, past_kv=None, use_cache=False):
-        if past_kv is not None or use_cache:
-            raise NotImplementedError(
-                "KV cache is not implemented for AdaLNSpaceTimeBlock; "
-                "WorldModel.predict_next_frame uses a single-pass path for "
-                "factorized attention."
-            )
-        B, T, D = x.shape
-        assert T == n_frames * n_per_frame, (
-            f"AdaLNSpaceTimeBlock expected T={n_frames * n_per_frame}, got T={T}"
-        )
-
-        # AdaLN-Zero modulation (identical to AdaLNTransformerBlock).
-        mods = self.adaln_proj(cond.float()).float()
-        scale1, shift1, gate1, scale2, shift2, gate2 = mods.chunk(6, dim=-1)
-        scale1 = scale1.unsqueeze(1)
-        shift1 = shift1.unsqueeze(1)
-        gate1 = gate1.unsqueeze(1)
-        scale2 = scale2.unsqueeze(1)
-        shift2 = shift2.unsqueeze(1)
-        gate2 = gate2.unsqueeze(1)
-
-        h = (self.ln1(x).float() * (1 + scale1) + shift1).to(x.dtype)
-
-        # Reshape h to (B_eff, T_attn, D) along the active axis.
-        if self.axis == "space":
-            # Group tokens by frame: (B, n_frames, n_per_frame, D) -> (B*n_frames, n_per_frame, D)
-            h_r = h.view(B, n_frames, n_per_frame, D).reshape(B * n_frames, n_per_frame, D)
-            rope_cos, rope_sin = rope_cos_space, rope_sin_space
-            T_attn = n_per_frame
-            is_causal = False
-        else:  # time
-            # Group tokens by spatial position: (B, n_frames, n_per_frame, D)
-            # permute to (B, n_per_frame, n_frames, D) -> (B*n_per_frame, n_frames, D)
-            h_r = (
-                h.view(B, n_frames, n_per_frame, D)
-                 .permute(0, 2, 1, 3)
-                 .contiguous()
-                 .reshape(B * n_per_frame, n_frames, D)
-            )
-            rope_cos, rope_sin = rope_cos_time, rope_sin_time
-            T_attn = n_frames
-            is_causal = True
-
-        B_eff = h_r.shape[0]
-        qkv = self.qkv(h_r).reshape(B_eff, T_attn, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4)
-        q, k = self.ln_q(q), self.ln_k(k)
-        q = apply_rope(q, rope_cos, rope_sin)
-        k = apply_rope(k, rope_cos, rope_sin)
-        # Keep V materialized so it has a standard stride pattern rather
-        # than a view into the fused QKV buffer.
-        v = v.contiguous()
-
-        drop_p = self.attn_drop.p if self.training else 0.0
-        # Skip the flash-attention SDPA backend. Its backward kernel crashes
-        # with "illegal memory access" under Inductor-compiled training when
-        # grad_out's physical layout (BTHD from transpose+reshape fusion)
-        # differs from Q/K/V's (BHTD after LN+RoPE materialization). CuDNN
-        # and memory-efficient attention tolerate the mismatch; the attention
-        # op is a small fraction of step time so the speed cost is minor.
-        with torch.nn.attention.sdpa_kernel([
-            torch.nn.attention.SDPBackend.CUDNN_ATTENTION,
-            torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION,
-            torch.nn.attention.SDPBackend.MATH,
-        ]):
-            out = F.scaled_dot_product_attention(
-                q, k, v, is_causal=is_causal, dropout_p=drop_p,
-            ).transpose(1, 2).reshape(B_eff, T_attn, D)
-        out = self.out_proj(out)
-
-        # Reshape back to (B, T, D).
-        if self.axis == "space":
-            out = out.view(B, n_frames, n_per_frame, D).reshape(B, T, D)
-        else:
-            out = (
-                out.view(B, n_per_frame, n_frames, D)
-                   .permute(0, 2, 1, 3)
-                   .contiguous()
-                   .reshape(B, T, D)
-            )
-
-        x = x + gate1 * self.resid_drop(out)
-        h2 = (self.ln2(x).float() * (1 + scale2) + shift2).to(x.dtype)
-        x = x + gate2 * self.mlp(h2)
-        return x, None

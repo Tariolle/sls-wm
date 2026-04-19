@@ -411,12 +411,6 @@ def main():
                              "(default: gaussian)")
     parser.add_argument("--fsq-dim-weights", type=float, nargs="+", default=None,
                         help="Per-dimension distance weights for structured smoothing")
-    parser.add_argument("--attention-pattern",
-                        choices=["full", "space_time_sst_t"],
-                        default=None,
-                        help="Transformer attention pattern. 'full' (default) = "
-                             "current V5 behavior. 'space_time_sst_t' = Dreamer 4 "
-                             "factorized (3 space + 1 causal time, repeated).")
     parser.add_argument("--focal-gamma", type=float, default=None)
     parser.add_argument("--death-oversample", type=int, default=None)
     parser.add_argument("--steps-per-epoch", type=int, default=None)
@@ -510,7 +504,6 @@ def main():
         dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
-        attention_pattern=(getattr(args, 'attention_pattern', None) or 'full'),
     ).to(device)
 
     # Pre-stack into contiguous tensors (avoids per-item numpy->torch overhead)
