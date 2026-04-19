@@ -36,6 +36,14 @@ os.environ.setdefault(
     "TORCHINDUCTOR_CACHE_DIR",
     str(Path.home() / ".cache" / "torchinductor"),
 )
+# Expandable CUDA allocator segments: reduces fragmentation between the
+# peak activation burst (big FFN intermediate + attention scores) and
+# later allocations. Essential on small-VRAM Turing cards where tight
+# batch sizes + fp16 GradScaler shuffle memory at each step. Harmless on
+# A100 (silently improves packing).
+os.environ.setdefault(
+    "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True",
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.wandb_utils import wandb_init, wandb_log, wandb_finish, wandb_run_id

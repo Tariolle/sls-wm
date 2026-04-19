@@ -29,9 +29,12 @@ transformer:
   episodes_dir: data/death_episodes
   expert_episodes_dir: data/expert_episodes
   epochs: 200
-  batch_size: 256           # 512 OOMs on 2060 SUPER 8 GB (FFN intermediate
-                            # B×T×4D fp16 = ~650 MB at B=512, T=325, D=512;
-                            # multiply by 8 layers + attention + FSQ)
+  batch_size: 128           # 2060 SUPER 8 GB peak activation budget:
+                            # per-layer attn-scores B×H×T×T fp16 ~ 87 MB and
+                            # FFN intermediate B×T×4D fp16 ~ 163 MB at B=128,
+                            # T=325, D=512 -> 8 layers ~ 2 GB activations +
+                            # FSQ encode/decode ~500 MB + weights/grads/opt
+                            # state ~2 GB. Headroom intact. Larger OOMs.
   lr: 0.004                 # peak LR identical to V5 / e6.1 (keep schedule shape)
   lr_min: 0.0002            # E6.1 tighter-tail floor
   weight_decay: 0.01
