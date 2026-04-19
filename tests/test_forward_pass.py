@@ -211,3 +211,78 @@ class TestDataSplit:
         from deepdash.data_split import get_val_episodes
         val = get_val_episodes("data/death_episodes", "data/expert_episodes")
         assert len(val) > 0, "Val set is empty"
+
+
+class TestLearnableGamma:
+    """E6.3: γ receives gradient from CE through the per-batch smoothed
+    target distribution, and exposes a sensible shape."""
+
+    def test_soft_targets_shape_and_normalization(self, device, seed):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from train_world_model import _build_soft_targets, _fsq_coords
+
+        levels = [5, 5, 5, 5]
+        vocab = 625
+        full_vocab = 627  # + ALIVE, DEATH
+        coords = _fsq_coords(levels).to(device)
+        gamma = torch.nn.Parameter(torch.zeros(4, device=device))
+        targets = torch.tensor([0, 312, 624, 625, 626], device=device, dtype=torch.long)
+        soft = _build_soft_targets(targets, coords, gamma, sigma=0.9,
+                                    smoothing=0.1, full_vocab_size=full_vocab,
+                                    vocab_size=vocab)
+        assert soft.shape == (5, full_vocab)
+        assert torch.allclose(soft.sum(dim=-1), torch.ones(5, device=device), atol=1e-4)
+        # Status rows (target >= vocab_size) are hard one-hot
+        assert soft[3, 625] > 0.99
+        assert soft[4, 626] > 0.99
+        # Visual rows: (1 - smoothing) at target
+        for i in range(3):
+            assert 1.0 - soft[i, targets[i]].item() < 0.11
+
+    def test_gamma_receives_gradient(self, device, seed):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from train_world_model import _build_soft_targets, _fsq_coords
+
+        torch.manual_seed(0)
+        levels = [5, 5, 5, 5]
+        vocab = 625
+        full_vocab = 627
+        coords = _fsq_coords(levels).to(device)
+        gamma = torch.nn.Parameter(torch.zeros(4, device=device))
+        targets = torch.randint(0, vocab, (32,), device=device)
+        soft = _build_soft_targets(targets, coords, gamma, sigma=0.9,
+                                    smoothing=0.1, full_vocab_size=full_vocab,
+                                    vocab_size=vocab)
+        logits = torch.randn(32, full_vocab, device=device, requires_grad=True)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        loss = -(soft * log_probs).sum(dim=-1).mean()
+        loss.backward()
+        assert gamma.grad is not None, "gamma got no gradient"
+        assert gamma.grad.abs().sum().item() > 0, "gamma gradient is exactly zero"
+
+
+class TestEMAUpdate:
+    def test_ema_follows_online(self, device, seed):
+        import sys
+        import copy
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from train_world_model import ema_update
+        from deepdash.fsq import FSQVAE
+
+        torch.manual_seed(0)
+        online = FSQVAE(levels=[5, 5, 5, 5]).to(device)
+        target = copy.deepcopy(online)
+        with torch.no_grad():
+            for p in online.parameters():
+                p.add_(torch.randn_like(p) * 0.1)
+        before = [p.clone() for p in target.parameters()]
+        ema_update(target, online, tau=0.9)
+        for p_t_new, p_t_old, p_o in zip(target.parameters(),
+                                          before, online.parameters()):
+            expected = 0.9 * p_t_old + 0.1 * p_o
+            assert torch.allclose(p_t_new, expected, atol=1e-5)

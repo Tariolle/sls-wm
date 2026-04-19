@@ -9,7 +9,7 @@ is applied on-the-fly per batch (shift_max config key).
 V5 legacy path (still works, for reproducing pre-joint results): trains
 the Transformer only on pre-tokenised episode data (tokens.npy files
 produced by a separate pipeline). This pipeline is no longer supported
-in-tree — the `tokenize_episodes.py` and `shift_episodes.py` scripts
+in-tree - the `tokenize_episodes.py` and `shift_episodes.py` scripts
 were removed 2026-04-19 in favour of on-the-fly encoding and shifting.
 
 Usage:
@@ -169,7 +169,7 @@ def build_structured_smooth_targets(levels, full_vocab_size, sigma=1.0, smoothin
     soft[:vocab_size, :vocab_size] = smoothing * weights
     diag_idx = torch.arange(vocab_size)
     soft[diag_idx, diag_idx] = 1 - smoothing
-    # Status tokens: hard targets (no smoothing — death prediction must be exact)
+    # Status tokens: hard targets (no smoothing - death prediction must be exact)
     for i in range(vocab_size, full_vocab_size):
         soft[i, i] = 1.0
 
@@ -177,20 +177,25 @@ def build_structured_smooth_targets(levels, full_vocab_size, sigma=1.0, smoothin
 
 
 def focal_cross_entropy(logits, targets, gamma=2.0, soft_target_matrix=None,
-                        label_smoothing=0.0):
+                        label_smoothing=0.0, soft_targets=None):
     """Focal loss with optional FSQ-structured soft targets.
 
-    If soft_target_matrix is provided, uses structured label smoothing
-    (Gaussian kernel over FSQ distance). Otherwise falls back to uniform
-    label smoothing via F.cross_entropy.
+    Target distribution source priority (first non-None wins):
+      1. `soft_targets` (N, C) - precomputed per-row distribution. Used
+         by the learnable-γ path in JointStep where the target kernel is
+         rebuilt per batch from γ.
+      2. `soft_target_matrix` (C, C) - V5 path: lookup by target index.
+      3. Fall back to standard F.cross_entropy with uniform smoothing.
 
     Reference: Lin et al., "Focal Loss for Dense Object Detection", ICCV 2017.
     """
-    if soft_target_matrix is not None:
-        # Look up soft target distributions for each target token
-        soft_targets = soft_target_matrix[targets]  # (N, C)
+    if soft_targets is not None:
         log_probs = F.log_softmax(logits, dim=-1)
         ce = -(soft_targets * log_probs).sum(dim=-1)  # (N,)
+    elif soft_target_matrix is not None:
+        soft_tgt = soft_target_matrix[targets]  # (N, C)
+        log_probs = F.log_softmax(logits, dim=-1)
+        ce = -(soft_tgt * log_probs).sum(dim=-1)
     else:
         ce = F.cross_entropy(logits, targets, reduction='none',
                              label_smoothing=label_smoothing)
@@ -211,8 +216,8 @@ def build_fsq_neighbor_table(levels):
         levels: list of ints, e.g. [8, 5, 5, 5].
 
     Returns:
-        neighbor_table: (codebook_size, max_neighbors) long — padded neighbor indices.
-        neighbor_counts: (codebook_size,) long — number of valid neighbors per token.
+        neighbor_table: (codebook_size, max_neighbors) long - padded neighbor indices.
+        neighbor_counts: (codebook_size,) long - number of valid neighbors per token.
     """
     import math
     codebook_size = math.prod(levels)
@@ -268,10 +273,10 @@ def apply_fsq_noise(tokens, neighbor_table, neighbor_counts, prob, device):
     boolean indexing used to trigger graph breaks and dynamic shapes.
 
     Args:
-        tokens: (*, T) long — token indices (visual tokens only).
+        tokens: (*, T) long - token indices (visual tokens only).
         neighbor_table: (codebook_size, max_neighbors) long.
         neighbor_counts: (codebook_size,) long.
-        prob: float — probability of replacing each token.
+        prob: float - probability of replacing each token.
         device: torch device.
 
     Returns:
@@ -283,6 +288,114 @@ def apply_fsq_noise(tokens, neighbor_table, neighbor_counts, prob, device):
     rand_idx = rand_idx.clamp(max=neighbor_table.shape[1] - 1)
     replacements = neighbor_table[tokens, rand_idx]  # (*, T)
     return torch.where(apply_mask, replacements, tokens)
+
+
+# -------------------------------------------------------------------------
+# E6.2+E6.3 helpers: EMA target update, FSQ coord table, learnable-γ targets
+# -------------------------------------------------------------------------
+
+@torch.no_grad()
+def ema_update(target_model: nn.Module, online_model: nn.Module, tau: float):
+    """Soft-update target params toward online: target = τ*target + (1-τ)*online.
+
+    Applied after each optimizer step when training the online encoder
+    with JEPA. τ close to 1 -> slow-moving target (stable labels); τ
+    close to 0 -> target tracks online closely (faster, more noise).
+    Buffers are also updated to keep BN / running-stat consistency if
+    any are present (FSQVAE currently has none, but this is safe).
+    """
+    for p_t, p_o in zip(target_model.parameters(), online_model.parameters()):
+        p_t.data.mul_(tau).add_(p_o.data, alpha=1.0 - tau)
+    for b_t, b_o in zip(target_model.buffers(), online_model.buffers()):
+        if b_t.dtype.is_floating_point:
+            b_t.data.mul_(tau).add_(b_o.data, alpha=1.0 - tau)
+        else:
+            b_t.data.copy_(b_o.data)
+
+
+def _fsq_coords(levels):
+    """Build the (vocab_size, D) table of FSQ coordinates.
+
+    Matches the decomposition used in `build_structured_smooth_targets`
+    so the learnable-γ path produces identical outputs to the fixed
+    precomputed path when γ = ln(dim_weights).
+    """
+    import math
+    vocab_size = math.prod(levels)
+    n_dims = len(levels)
+    divisors = []
+    acc = 1
+    for L in reversed(levels):
+        divisors.append(acc)
+        acc *= L
+    divisors.reverse()
+    coords = torch.zeros(vocab_size, n_dims)
+    for idx in range(vocab_size):
+        remainder = idx
+        for d in range(n_dims):
+            coords[idx, d] = remainder // divisors[d]
+            remainder = remainder % divisors[d]
+    return coords
+
+
+def _build_soft_targets(target_indices, coords, gamma, sigma, smoothing,
+                        full_vocab_size, vocab_size):
+    """On-the-fly kernel-smoothed target distribution with learnable γ.
+
+    Same semantics as the precomputed `build_structured_smooth_targets`
+    but recomputed per forward pass so γ receives gradient. Visual
+    target rows (< vocab_size) get the full SLS kernel over FSQ
+    coordinates; status rows (>= vocab_size) get hard one-hot (never
+    smoothed - death prediction must be exact, matches V5 convention).
+
+    Args:
+        target_indices: (N,) long - flattened target token indices.
+        coords: (vocab_size, D) buffer - precomputed FSQ coords.
+        gamma: (D,) nn.Parameter - per-dim log-precision; w = exp(γ).
+        sigma: float - kernel bandwidth.
+        smoothing: float - total mass redistributed to neighbours for
+            visual targets (V5 default 0.1).
+        full_vocab_size: int - visual codes + status tokens.
+        vocab_size: int - visual codes only.
+
+    Returns:
+        soft: (N, full_vocab_size) float - per-target distribution,
+            rows sum to 1.
+    """
+    N = target_indices.shape[0]
+    device = target_indices.device
+    dtype = gamma.dtype
+    w = gamma.exp()  # (D,)
+    # Clamped indices for coord lookup; bogus values on status rows will
+    # be overridden by the is_visual mask below.
+    safe_idx = target_indices.clamp(max=vocab_size - 1)
+    target_coords = coords[safe_idx]  # (N, D)
+    diff = coords.unsqueeze(0) - target_coords.unsqueeze(1)  # (N, V, D)
+    weighted_sq = ((diff * w.view(1, 1, -1)) ** 2).sum(dim=-1)
+    kernel = torch.exp(-weighted_sq / (2.0 * sigma * sigma))
+    # Zero the self position via multiplicative mask (avoids in-place
+    # op on `kernel` which is downstream of an autograd-tracked Exp).
+    self_mask = torch.zeros(N, vocab_size, device=device, dtype=dtype)
+    self_mask.scatter_(1, safe_idx.unsqueeze(1), 1.0)
+    kernel = kernel * (1.0 - self_mask)
+    row_sums = kernel.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+    neighbours = smoothing * kernel / row_sums  # (N, V)
+
+    # Mask: 1.0 for visual targets, 0.0 for status targets
+    is_visual = (target_indices < vocab_size).to(dtype).unsqueeze(1)  # (N, 1)
+    visual_part = neighbours * is_visual  # (N, vocab_size), zeros on status rows
+    status_part = torch.zeros(N, full_vocab_size - vocab_size,
+                              device=device, dtype=dtype)
+    soft = torch.cat([visual_part, status_part], dim=1)  # (N, full_vocab_size)
+
+    # Place target mass via out-of-place scatter (preserves autograd).
+    # Visual targets: 1 - smoothing (complement to the ε spread in
+    # neighbours). Status targets: 1.0 (hard one-hot).
+    target_mass = ((1.0 - smoothing) * is_visual.squeeze(1)
+                   + (1.0 - is_visual.squeeze(1)))  # (N,)
+    soft = soft.scatter(1, target_indices.unsqueeze(1),
+                         target_mass.unsqueeze(1))
+    return soft
 
 
 def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
@@ -432,18 +545,18 @@ def _encode_joint(fsq, raw_frames, K, tpf, D, fsq_dim_side=8):
 
     Args:
         fsq: FSQVAE module (in the same train/eval mode as the outer loop).
-        raw_frames: (B, K+1, 64, 64) uint8 — raw frame windows.
+        raw_frames: (B, K+1, 64, 64) uint8 - raw frame windows.
         K: context_frames.
         tpf: tokens_per_frame (== fsq_dim_side ** 2).
         D: FSQ latent dim (= len(levels)).
         fsq_dim_side: spatial side of the encoder output (8 for 64x64 -> 8x8).
 
     Returns:
-        z_e_all:   (B, K+1, D, side, side)  — continuous encoder output.
-        z_q_all:   (B, K+1, tpf, D)         — quantized codes (STE inside fsq).
-        indices_all: (B, K+1, tpf)          — discrete code indices.
-        recon_all: (B, K+1, 1, 64, 64)      — decoded frames (for recon loss).
-        frames_f:  (B, K+1, 1, 64, 64)      — normalized float [0, 1] frames
+        z_e_all:   (B, K+1, D, side, side)  - continuous encoder output.
+        z_q_all:   (B, K+1, tpf, D)         - quantized codes (STE inside fsq).
+        indices_all: (B, K+1, tpf)          - discrete code indices.
+        recon_all: (B, K+1, 1, 64, 64)      - decoded frames (for recon loss).
+        frames_f:  (B, K+1, 1, 64, 64)      - normalized float [0, 1] frames
                                               (matches what decoder targets).
     """
     B = raw_frames.size(0)
@@ -495,17 +608,30 @@ class JointStep(nn.Module):
 
     Construction stores fixed hparams (alpha_slow, cpc_weight, ...) so
     the compiled graph specialises on them. Changing any of these across
-    calls triggers recompilation, which is fine — they are constants.
+    calls triggers recompilation, which is fine - they are constants.
     """
 
     def __init__(self, fsq, wm, *, alpha_slow, alpha_uniform, cpc_weight,
                  label_smoothing, focal_gamma, token_noise, fsq_noise,
                  shift_max=0,
                  neighbor_table=None, neighbor_counts=None,
-                 soft_target_matrix=None):
+                 soft_target_matrix=None,
+                 ema_target_fsq=None,
+                 fsq_levels=None, fsq_sigma=0.9,
+                 alpha_view=0.0, encoder_recon=True):
         super().__init__()
         self.fsq = fsq
         self.wm = wm
+        # EMA target FSQ for JEPA (E6.2): separate frozen encoder, target
+        # indices for the transformer CE come from here (stop-grad), not
+        # from the online encoder. Outer loop calls ema_update() after
+        # each optimizer step. None -> E6.1 behavior (online encoder
+        # provides its own target indices).
+        self.ema_target_fsq = ema_target_fsq
+        if ema_target_fsq is not None:
+            for p in ema_target_fsq.parameters():
+                p.requires_grad_(False)
+            ema_target_fsq.eval()
         self.alpha_slow = float(alpha_slow)
         self.alpha_uniform = float(alpha_uniform)
         self.cpc_weight = float(cpc_weight)
@@ -513,6 +639,28 @@ class JointStep(nn.Module):
         self.focal_gamma = float(focal_gamma)
         self.token_noise = float(token_noise)
         self.fsq_noise = float(fsq_noise)
+        # E6.2 viewer-recon weight. When > 0 AND encoder_recon=False, the
+        # decoder is trained via `MSE(decoder(z_q.detach()), frame)`
+        # (gradient only to decoder params). Under pure JEPA the encoder
+        # is shaped by slow + unif + STE-from-transformer only; the
+        # decoder stays visualization-ready but doesn't feed pixel
+        # gradient back to the representation.
+        self.alpha_view = float(alpha_view)
+        # When True (E6.1 behavior): recon = fsqvae_loss(decoder(z_q), frame)
+        # with gradient flowing to the encoder.
+        # When False (E6.2 behavior): no encoder-side recon; use alpha_view
+        # detached viewer recon instead (if alpha_view > 0).
+        self.encoder_recon = bool(encoder_recon)
+        # Learnable γ parameters live on self.wm.sls_gamma (so they join
+        # the transformer optimizer group via wm.parameters()). We only
+        # need the coord table + sigma here for building targets on-the-fly.
+        self.fsq_sigma = float(fsq_sigma)
+        if fsq_levels is not None:
+            coords = _fsq_coords(fsq_levels)
+            self.register_buffer("sls_coords", coords, persistent=False)
+            self._has_coords = True
+        else:
+            self._has_coords = False
         # Vertical shift augmentation: per-batch random dy ∈ [-shift_max,
         # +shift_max]. Applied uniformly to all K+1 frames in a window so
         # the temporal consistency of the context->target pair is preserved.
@@ -541,11 +689,8 @@ class JointStep(nn.Module):
         vs = m.vocab_size
         alive_tok = m.ALIVE_TOKEN
         death_tok = m.DEATH_TOKEN
-        D = self.fsq.fsq.codebook_size  # not used; kept for clarity
-        D = len(self.fsq.fsq.levels) if hasattr(self.fsq.fsq, "levels") else None
-        # Reliable: FSQ latent dim is the output channels of the encoder
-        # conv, which is len(levels). We infer it from the quantizer's
-        # internal levels list.
+        B = raw_frames.size(0)
+        # FSQ latent dim inferred from the STE conduit's input size.
         fsq_dim = self.wm.fsq_grad_proj.in_features
 
         # On-the-fly vertical shift augmentation (replaces the V5 pre-
@@ -565,17 +710,61 @@ class JointStep(nn.Module):
 
         frame_last = frames_f[:, K - 1]
         frame_tgt = frames_f[:, K]
-        recon_last = recon_all[:, K - 1]
-        recon_tgt = recon_all[:, K]
         z_e_last = z_e_all[:, K - 1]
         z_e_tgt = z_e_all[:, K]
-        recon_loss = (fsqvae_loss(recon_last, frame_last)
-                      + fsqvae_loss(recon_tgt, frame_tgt)) / 2
         slow_loss = grwm_slowness(z_e_last, z_e_tgt)
         uniform_loss = grwm_uniformity(z_e_last)
 
+        # Reconstruction: either encoder-shaping (E6.1) or detached
+        # viewer-only (E6.2). encoder_recon=True uses the attached recon
+        # from _encode_joint so gradient flows to z_q -> z_e. =False
+        # recomputes with detached z_q so only decoder params are updated.
+        if self.encoder_recon:
+            recon_last = recon_all[:, K - 1]
+            recon_tgt = recon_all[:, K]
+            recon_loss = (fsqvae_loss(recon_last, frame_last)
+                          + fsqvae_loss(recon_tgt, frame_tgt)) / 2
+            recon_contribution = recon_loss
+        else:
+            # Un-reshape z_q for decoder input: z_q_all is (B, K+1, tpf, D);
+            # decoder expects (B, D, 8, 8).
+            side = 8
+            z_q_last = z_q_all[:, K - 1]  # (B, tpf, D)
+            z_q_tgt = z_q_all[:, K]
+            z_q_last_raw = z_q_last.permute(0, 2, 1).contiguous().view(
+                B, fsq_dim, side, side)
+            z_q_tgt_raw = z_q_tgt.permute(0, 2, 1).contiguous().view(
+                B, fsq_dim, side, side)
+            view_last = self.fsq.decoder(z_q_last_raw.detach())
+            view_tgt = self.fsq.decoder(z_q_tgt_raw.detach())
+            recon_loss = (fsqvae_loss(view_last, frame_last)
+                          + fsqvae_loss(view_tgt, frame_tgt)) / 2
+            recon_contribution = self.alpha_view * recon_loss
+
+        # Build frame_tokens from ONLINE indices for the context path
+        # (these feed the transformer's token_embed and the z_q_ste
+        # correction). Target-frame indices (position K) are overridden
+        # with EMA teacher indices below when ema_target_fsq is present;
+        # otherwise E6.1 behavior (online encoder supplies its own target).
         frame_tokens = _build_frame_tokens_joint(
             indices_all, is_death, alive_tok, death_tok)
+
+        if self.ema_target_fsq is not None:
+            # JEPA: target indices from the EMA teacher. Encode just the
+            # target frame (no context frames needed on the teacher side).
+            # Stop-grad: teacher params are frozen AND we run under no_grad.
+            target_frame_uint8 = raw_frames[:, K]  # (B, 64, 64) uint8
+            with torch.no_grad():
+                target_frame_f = target_frame_uint8.float().mul(
+                    1.0 / 255.0).unsqueeze(1)  # (B, 1, 64, 64)
+                target_indices_ema = self.ema_target_fsq.encode(
+                    target_frame_f)  # (B, side, side)
+            target_indices_ema = target_indices_ema.view(B, tpf)
+            # Override target frame's visual columns (status column stays,
+            # driven by is_death).
+            frame_tokens = frame_tokens.clone()
+            frame_tokens[:, K, :tpf] = target_indices_ema
+
         target = frame_tokens[:, -1]
 
         # Noise on context visual tokens (branch-free). Cost when noise=0
@@ -597,14 +786,32 @@ class JointStep(nn.Module):
         z_q_ste_ctx = z_q_all[:, :K]
         logits, cpc_loss = self.wm(
             frame_tokens, actions, z_q_ste_context=z_q_ste_ctx)
-        token_loss = focal_cross_entropy(
-            logits.reshape(-1, logits.size(-1)),
-            target.reshape(-1),
-            gamma=self.focal_gamma,
-            soft_target_matrix=(self.soft_target_matrix if self._has_soft else None),
-            label_smoothing=self.label_smoothing,
-        )
-        loss = (recon_loss
+
+        # Build smoothed target distribution. Learnable γ path (E6.3) if
+        # self.wm.sls_gamma is set AND we have the coords table; else
+        # fall back to the precomputed soft_target_matrix (V5 / E6.1).
+        flat_target = target.reshape(-1)
+        flat_logits = logits.reshape(-1, logits.size(-1))
+        if self._has_coords and self.wm.sls_gamma is not None:
+            soft_per_batch = _build_soft_targets(
+                flat_target, self.sls_coords, self.wm.sls_gamma,
+                self.fsq_sigma, self.label_smoothing,
+                flat_logits.size(-1), vs)
+            token_loss = focal_cross_entropy(
+                flat_logits, flat_target,
+                gamma=self.focal_gamma,
+                soft_target_matrix=None,
+                label_smoothing=self.label_smoothing,
+                soft_targets=soft_per_batch,
+            )
+        else:
+            token_loss = focal_cross_entropy(
+                flat_logits, flat_target,
+                gamma=self.focal_gamma,
+                soft_target_matrix=(self.soft_target_matrix if self._has_soft else None),
+                label_smoothing=self.label_smoothing,
+            )
+        loss = (recon_contribution
                 + self.alpha_slow * slow_loss
                 + self.alpha_uniform * uniform_loss
                 + token_loss
@@ -641,7 +848,7 @@ class JointStep(nn.Module):
 
 
 def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
-                      amp_dtype=torch.bfloat16):
+                      amp_dtype=torch.bfloat16, ema_tau=None):
     """Run one training epoch by calling the compiled JointStep per batch.
 
     The joint_step module (typically torch.compile-wrapped) captures
@@ -696,6 +903,11 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
 
         scaler.step(optimizer)
         scaler.update()
+
+        # EMA update of the target FSQ encoder (JEPA, E6.2). No-op when
+        # ema_target_fsq is None (E6.1 path) or ema_tau is None.
+        if ema_tau is not None and js.ema_target_fsq is not None:
+            ema_update(js.ema_target_fsq, js.fsq, ema_tau)
 
         total_token_loss += metrics["token_loss"].item() * B
         total_cpc += metrics["cpc_loss"].item() * B
@@ -833,12 +1045,12 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     # Mixed precision + compile (mirrors train_fsq.py conventions).
     # A100 defaults: bfloat16 + reduce-overhead. RTX 2060 SUPER (Turing) has
-    # no native bf16 — it emulates at ~12x slower. Use float16 + default
+    # no native bf16 - it emulates at ~12x slower. Use float16 + default
     # compile mode on Turing; see configs/*-local.yaml.
     parser.add_argument("--amp-dtype", choices=["bfloat16", "float16"],
                         default=None,
                         help="AMP dtype. Default bfloat16 (A100). Use float16 "
-                             "on Turing (RTX 20xx) — no native bf16 there.")
+                             "on Turing (RTX 20xx) - no native bf16 there.")
     parser.add_argument("--compile-mode",
                         choices=["reduce-overhead", "default", "none"],
                         default=None,
@@ -864,6 +1076,28 @@ def main():
                              "the-fly data augmentation. One random dy in "
                              "[-shift_max, +shift_max] applied per batch. "
                              "0 disables. 4 matches the V5 pre-shift ladder.")
+    # E6.2+E6.3 knobs. Default values preserve E6.1 behavior when unset.
+    parser.add_argument("--use-cpc", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Include AC-CPC in the joint loss. Default True "
+                             "(V5/E6.1); pass --no-use-cpc for E6.2+ (JEPA).")
+    parser.add_argument("--ema-tau", type=float, default=None,
+                        help="EMA decay for the target FSQ encoder (E6.2). "
+                             "Only active if --no-use-cpc. Typical 0.996.")
+    parser.add_argument("--alpha-view", type=float, default=None,
+                        help="Weight on the detached-decoder viewer recon "
+                             "(E6.2). Only used when --no-encoder-recon.")
+    parser.add_argument("--encoder-recon", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="When True (V5/E6.1): recon shapes the encoder. "
+                             "When False (E6.2): detached viewer recon only, "
+                             "encoder is shaped by JEPA + slow + unif.")
+    parser.add_argument("--learnable-gamma", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="When True (E6.3): gamma is an nn.Parameter, target "
+                             "distribution rebuilt per forward. When False "
+                             "(V5/E6.1): fixed dim_weights via precomputed "
+                             "soft_target_matrix.")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
@@ -890,7 +1124,7 @@ def main():
     val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
 
     # Joint mode loads raw frames (frames.npy) and encodes on-the-fly.
-    # V5 mode loads pre-tokenized data (tokens.npy) — legacy path, no
+    # V5 mode loads pre-tokenized data (tokens.npy) - legacy path, no
     # longer actively supported; the tokenize step is expected to be done
     # externally if you really need it.
     joint = bool(getattr(args, "joint", False))
@@ -981,6 +1215,33 @@ def main():
                     train_weights.append(
                         float(args.death_oversample) if is_death_frame else 1.0)
 
+    # Resolve E6.2+E6.3 flags with E6.1-compatible defaults.
+    use_cpc = bool(getattr(args, "use_cpc", True) if getattr(args, "use_cpc", None) is not None else True)
+    encoder_recon = bool(getattr(args, "encoder_recon", True) if getattr(args, "encoder_recon", None) is not None else True)
+    learnable_gamma = bool(getattr(args, "learnable_gamma", False) if getattr(args, "learnable_gamma", None) is not None else False)
+    ema_tau = float(args.ema_tau) if getattr(args, "ema_tau", None) is not None else 0.996
+    alpha_view = float(args.alpha_view) if getattr(args, "alpha_view", None) is not None else 0.0
+
+    # gamma init: capacity-ratio normalised so uniform codebooks give
+    # w = 1 per dim (matching V5's isotropic kernel scale). Formula:
+    #     w_d = L_d / mean(L) = D * L_d / sum(L)
+    #     gamma_d = ln(w_d)
+    # Closed-form, data-independent, and scale-preserving: anyone using
+    # SLS on any FSQ codebook gets a reproducible init from the `levels`
+    # list alone. On uniform codebooks (e.g. [5,5,5,5]) this starts at
+    # gamma = 0 (w = 1, identical to V5's kernel scale); gamma then
+    # differentiates per-dim via data-driven gradients since per-dim
+    # data distribution isn't symmetric. On non-uniform codebooks
+    # (e.g. [8,5,5,5]) it starts with a structural prior: higher-L dims
+    # get heavier w to compensate their finer-grained bin structure.
+    # (Raw L/sum(L) without the mean-normalisation would give w < 1
+    # everywhere and silently widen the kernel ~1/mean(w)x.)
+    sls_gamma_init = None
+    if learnable_gamma and args.fsq_levels is not None:
+        levels_t = torch.tensor(args.fsq_levels, dtype=torch.float32)
+        w = levels_t * len(args.fsq_levels) / levels_t.sum()
+        sls_gamma_init = torch.log(w)
+
     # Create model (joint mode wires fsq_dim so fsq_grad_proj is instantiated)
     fsq_dim = len(args.fsq_levels) if joint else None
     model = WorldModel(
@@ -994,6 +1255,8 @@ def main():
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
         fsq_dim=fsq_dim,
+        use_cpc=use_cpc,
+        sls_gamma_init=sls_gamma_init,
     ).to(device)
 
     # Pre-stack into contiguous tensors (avoids per-item numpy->torch overhead)
@@ -1012,8 +1275,21 @@ def main():
         val_dataset = TensorDataset(val_frames_t, val_actions_t, val_death_t)
         # Fresh FSQ init (no warm-start from checkpoints_v5_fsq)
         fsq = FSQVAE(levels=args.fsq_levels).to(device)
+        # EMA target FSQ for JEPA (E6.2): same architecture, weights
+        # initialised as a copy of the online encoder, frozen and updated
+        # via soft EMA after each optimizer step. Created only when
+        # use_cpc=False (JEPA mode); otherwise kept None for E6.1 path.
+        if not use_cpc:
+            import copy
+            ema_target_fsq = copy.deepcopy(fsq).to(device).eval()
+            for p in ema_target_fsq.parameters():
+                p.requires_grad_(False)
+            print(f"EMA target FSQ initialized (tau={ema_tau})")
+        else:
+            ema_target_fsq = None
     else:
         fsq = None
+        ema_target_fsq = None
         train_frames_t = torch.from_numpy(np.stack(train_frames))
         train_actions_t = torch.from_numpy(np.stack(train_actions))
         val_frames_t = torch.from_numpy(np.stack(val_frames))
@@ -1083,6 +1359,8 @@ def main():
             model.load_state_dict(resume_state["model"])
             if joint and "fsq" in resume_state:
                 fsq.load_state_dict(resume_state["fsq"])
+            if joint and ema_target_fsq is not None and "ema_fsq" in resume_state:
+                ema_target_fsq.load_state_dict(resume_state["ema_fsq"])
             optimizer.load_state_dict(resume_state["optimizer"])
             if "scaler" in resume_state:
                 scaler.load_state_dict(resume_state["scaler"])
@@ -1141,7 +1419,11 @@ def main():
     else:
         neighbor_table, neighbor_counts = None, None
 
-    # Build structured label smoothing matrix
+    # Build structured label smoothing matrix.
+    # Under learnable γ (E6.3) the target distribution is rebuilt per
+    # forward pass inside JointStep, so precomputing the matrix is dead
+    # work; skip it and log a different message so the run logs reflect
+    # what's actually happening.
     kernel = args.fsq_kernel or "gaussian"
     if kernel == "aniso_gaussian":
         sigma_arg = args.fsq_sigma_d
@@ -1149,21 +1431,40 @@ def main():
     else:
         sigma_arg = args.fsq_sigma
         has_bandwidth = sigma_arg is not None and sigma_arg > 0
-    if has_bandwidth and args.label_smoothing > 0:
+
+    if learnable_gamma:
+        soft_target_matrix = None
+        if args.label_smoothing > 0 and sls_gamma_init is not None:
+            levels_str = args.fsq_levels
+            mean_levels = sum(args.fsq_levels) / len(args.fsq_levels)
+            w_init = [round(v, 4) for v in
+                      (sls_gamma_init.exp().tolist())]
+            g_init = [round(v, 4) for v in sls_gamma_init.tolist()]
+            print(f"Learnable-gamma SLS: kernel=gaussian, sigma={args.fsq_sigma}, "
+                  f"epsilon={args.label_smoothing}")
+            print(f"  gamma_init = ln(levels / mean(levels)) = "
+                  f"ln({levels_str} / {mean_levels:.2f}) = {g_init}  "
+                  f"(w_init = {w_init})")
+            print(f"  Target distribution rebuilt per forward pass from "
+                  f"self.wm.sls_gamma; per-epoch values logged to sls/gamma_* "
+                  f"and CSV.")
+        else:
+            print("Learnable-gamma SLS enabled but label_smoothing=0 or "
+                  "fsq_levels=None; CE will be hard one-hot.")
+    elif has_bandwidth and args.label_smoothing > 0:
         soft_target_matrix = build_structured_smooth_targets(
             args.fsq_levels, model.full_vocab_size,
             sigma=sigma_arg, smoothing=args.label_smoothing,
             dim_weights=args.fsq_dim_weights,
             kernel=kernel,
         ).to(device)
-        # Check how concentrated the smoothing mass is
         visual_row = soft_target_matrix[0, :model.vocab_size]
         top5 = visual_row.topk(6).values  # includes self
         w_str = f", dim_weights={args.fsq_dim_weights}" if args.fsq_dim_weights else ""
         sigma_str = (f"[{', '.join(f'{s:.3f}' for s in sigma_arg)}]"
                      if kernel == "aniso_gaussian" else f"{sigma_arg}")
-        print(f"Structured label smoothing: kernel={kernel}, σ={sigma_str}, "
-              f"ε={args.label_smoothing}{w_str}")
+        print(f"Structured label smoothing: kernel={kernel}, sigma={sigma_str}, "
+              f"epsilon={args.label_smoothing}{w_str}")
         print(f"  Top-6 target probs for token 0: {top5.tolist()}")
     else:
         soft_target_matrix = None
@@ -1175,6 +1476,16 @@ def main():
     joint_step_val = None
     if joint:
         shift_max = int(getattr(args, "shift_max", 0) or 0)
+        # Under learnable γ the soft_target_matrix is irrelevant (rebuilt
+        # per forward). Pass None to save the buffer copy.
+        soft_tm_for_joint = None if learnable_gamma else soft_target_matrix
+        joint_kwargs_common = dict(
+            ema_target_fsq=ema_target_fsq,
+            fsq_levels=args.fsq_levels if learnable_gamma else None,
+            fsq_sigma=float(args.fsq_sigma) if args.fsq_sigma else 0.9,
+            alpha_view=alpha_view,
+            encoder_recon=encoder_recon,
+        )
         joint_step_train = JointStep(
             fsq=fsq, wm=model,
             alpha_slow=args.alpha_slow, alpha_uniform=args.alpha_uniform,
@@ -1184,7 +1495,8 @@ def main():
             token_noise=args.token_noise, fsq_noise=args.fsq_noise,
             shift_max=shift_max,
             neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
-            soft_target_matrix=soft_target_matrix,
+            soft_target_matrix=soft_tm_for_joint,
+            **joint_kwargs_common,
         ).to(device)
         joint_step_val = JointStep(
             fsq=fsq, wm=model,
@@ -1195,7 +1507,8 @@ def main():
             token_noise=0.0, fsq_noise=0.0,          # no noise at eval
             shift_max=0,                              # no shift at eval
             neighbor_table=None, neighbor_counts=None,
-            soft_target_matrix=soft_target_matrix,
+            soft_target_matrix=soft_tm_for_joint,
+            **joint_kwargs_common,
         ).to(device)
         if compile_mode == "none":
             print("JointStep compile disabled (--compile-mode none)")
@@ -1258,6 +1571,11 @@ def main():
             "encoder_grad_rms", "transformer_grad_rms",
             "fsq_lr",
         ]
+        # E6.3 learnable γ: one column per FSQ dim with per-epoch value.
+        # The per-dim trajectory is the headline paper plot.
+        if model.sls_gamma is not None:
+            for i in range(model.sls_gamma.shape[0]):
+                log_header.append(f"gamma_{i}")
 
     # On resume: keep all rows up to start_epoch-1, then append
     if log_path.exists() and start_epoch > 1:
@@ -1293,7 +1611,8 @@ def main():
             if joint:
                 train_metrics = train_epoch_joint(
                     joint_step_train, train_loader, optimizer, scaler, device,
-                    amp_dtype=amp_dtype)
+                    amp_dtype=amp_dtype,
+                    ema_tau=(ema_tau if ema_target_fsq is not None else None))
                 val_metrics = val_epoch_joint(
                     joint_step_val, val_loader, device, amp_dtype=amp_dtype)
                 train_loss = train_metrics["loss"]
@@ -1352,14 +1671,18 @@ def main():
                                  + a_u * val_metrics["unif"])
                 fsq_gap = fsq_val_total - fsq_train_total
 
+            # Suppress cpc= column when AC-CPC is disabled (E6.2+); logging
+            # a hardcoded zero is just noise.
+            train_cpc_str = f"cpc={train_cpc:.3f} | " if use_cpc else ""
+            val_cpc_str = f"cpc={val_cpc:.3f} | " if use_cpc else ""
             print(
                 f"Epoch {epoch:3d}/{args.epochs} ({dt:.1f}s) | "
                 f"Train: total={train_total:.4f} loss={train_loss:.4f} acc={train_acc:.3f} "
                 f"death[P={train_d_prec:.3f} R={train_d_rec:.3f} F1={train_d_f1:.3f}] "
-                f"cpc={train_cpc:.3f} | "
+                f"{train_cpc_str}"
                 f"Val: total={val_total:.4f} loss={val_loss:.4f} acc={val_acc:.3f} "
                 f"death[P={val_d_prec:.3f} R={val_d_rec:.3f} F1={val_d_f1:.3f}] "
-                f"cpc={val_cpc:.3f} | "
+                f"{val_cpc_str}"
                 f"gap={gap:+.4f} | LR: {lr:.1e}"
                 + (f" fsq_LR: {fsq_lr_now:.1e}" if fsq_lr_now is not None else "")
             )
@@ -1399,6 +1722,9 @@ def main():
                     f"{train_metrics['tr_grad_rms']:.6e}",
                     f"{fsq_lr_now:.1e}" if fsq_lr_now is not None else "",
                 ]
+                if model.sls_gamma is not None:
+                    for v in model.sls_gamma.detach().cpu().tolist():
+                        row.append(f"{v:.6f}")
             log_writer.writerow(row)
             log_file.flush()
 
@@ -1408,15 +1734,16 @@ def main():
                 "transformer/train/loss": train_loss,
                 "transformer/train/acc": train_acc,
                 "transformer/train/death_f1": train_d_f1,
-                "transformer/train/cpc": train_cpc,
                 "transformer/val/total": val_total,
                 "transformer/val/loss": val_loss,
                 "transformer/val/acc": val_acc,
                 "transformer/val/death_f1": val_d_f1,
-                "transformer/val/cpc": val_cpc,
                 "transformer/gap": gap,
                 "transformer/lr": lr,
             }
+            if use_cpc:
+                wandb_payload["transformer/train/cpc"] = train_cpc
+                wandb_payload["transformer/val/cpc"] = val_cpc
             if joint:
                 # FSQ namespace mirrors transformer: train/total, val/total,
                 # gap, lr, grad_rms + per-component raw losses. Same shape
@@ -1436,6 +1763,13 @@ def main():
                     "fsq/lr": fsq_lr_now,
                     "transformer/train/grad_rms": train_metrics["tr_grad_rms"],
                 })
+                # Learnable γ trajectory - one key per dim. Headline paper
+                # plot shows how the network reweights FSQ dimensions over
+                # training.
+                if model.sls_gamma is not None:
+                    gamma_vals = model.sls_gamma.detach().cpu().tolist()
+                    for i, v in enumerate(gamma_vals):
+                        wandb_payload[f"sls/gamma_{i}"] = v
             wandb_log(wandb_payload)
 
             # Save full state
@@ -1450,6 +1784,8 @@ def main():
             }
             if joint:
                 state_dict["fsq"] = fsq.state_dict()
+                if ema_target_fsq is not None:
+                    state_dict["ema_fsq"] = ema_target_fsq.state_dict()
             torch.save(state_dict, ckpt_dir / "transformer_state.pt")
 
             if val_total < best_val_loss:
@@ -1458,6 +1794,9 @@ def main():
                 torch.save(_unwrap(model).state_dict(), ckpt_dir / "transformer_best.pt")
                 if joint:
                     torch.save(fsq.state_dict(), ckpt_dir / "fsq_best.pt")
+                    if ema_target_fsq is not None:
+                        torch.save(ema_target_fsq.state_dict(),
+                                   ckpt_dir / "ema_fsq_best.pt")
             else:
                 patience_counter += 1
                 if args.patience > 0 and patience_counter >= args.patience:
@@ -1469,7 +1808,7 @@ def main():
                 torch.cuda.empty_cache()
 
     except (KeyboardInterrupt, SystemExit):
-        print("\nInterrupted — saving checkpoint...")
+        print("\nInterrupted - saving checkpoint...")
         interrupt_state = {
             "epoch": epoch,
             "model": _unwrap(model).state_dict(),
@@ -1481,6 +1820,8 @@ def main():
         }
         if joint:
             interrupt_state["fsq"] = fsq.state_dict()
+            if ema_target_fsq is not None:
+                interrupt_state["ema_fsq"] = ema_target_fsq.state_dict()
         torch.save(interrupt_state, ckpt_dir / "transformer_state.pt")
 
     log_file.close()
@@ -1488,6 +1829,8 @@ def main():
     torch.save(_unwrap(model).state_dict(), ckpt_dir / "transformer_final.pt")
     if joint:
         torch.save(fsq.state_dict(), ckpt_dir / "fsq_final.pt")
+        if ema_target_fsq is not None:
+            torch.save(ema_target_fsq.state_dict(), ckpt_dir / "ema_fsq_final.pt")
     print(f"\nTraining complete. Best val total loss: {best_val_loss:.4f}")
     print(f"Checkpoints saved to {ckpt_dir}/")
 

@@ -72,8 +72,20 @@ class WorldModel(nn.Module):
         tokens_per_frame: int = 64,
         adaln: bool = False,
         fsq_dim: int | None = None,
+        use_cpc: bool = True,
+        sls_gamma_init: torch.Tensor | None = None,
     ):
         super().__init__()
+        self.use_cpc = use_cpc
+        # Learnable per-dim SLS precision γ (E6.3). Stored on WorldModel so
+        # it ends up in the transformer optimizer param group (it's a
+        # loss-side parameter that drives CE target smoothing, not an
+        # encoder parameter). If None, the SLS smoothing uses fixed
+        # dim_weights via the V5 precomputed soft_target_matrix path.
+        if sls_gamma_init is not None:
+            self.sls_gamma = nn.Parameter(sls_gamma_init.clone())
+        else:
+            self.sls_gamma = None
         self.vocab_size = vocab_size
         self.n_actions = n_actions
         self.embed_dim = embed_dim
@@ -434,7 +446,12 @@ class WorldModel(nn.Module):
         predict_positions = x[:, ctx_end:ctx_end + self.block_size]  # (B, 65, D)
         logits = self.head(predict_positions)  # (B, 65, full_vocab_size)
 
-        cpc_loss = self._compute_cpc_loss(x, actions)
+        if self.use_cpc:
+            cpc_loss = self._compute_cpc_loss(x, actions)
+        else:
+            # JEPA path (E6.2+): AC-CPC removed, transformer CE against
+            # EMA teacher tokens replaces the contrastive objective.
+            cpc_loss = torch.zeros((), device=x.device, dtype=x.dtype)
 
         return logits, cpc_loss
 

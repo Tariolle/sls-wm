@@ -11,12 +11,13 @@
 #SBATCH --signal=B:USR1@300
 
 # Train the world model (FSQ + Transformer) on A100 via
-# scripts/train_world_model.py. Joint mode (configs/e6.1-joint.yaml) is
-# the default going forward; FSQ is trained jointly, no pre-tokenisation
-# required. V5 tokenised-input mode is legacy — tokenize_episodes.py was
-# removed 2026-04-19.
-# Auto-resumes: SLURM sends USR1 5 min before time limit,
-# the trap saves checkpoint and resubmits the job.
+# scripts/train_world_model.py. Joint mode is the forward path; FSQ is
+# trained jointly with the transformer, no pre-tokenisation required.
+# Current E6.x candidate is configs/e6.2-jepa.yaml (JEPA EMA target +
+# learnable γ + detached decoder viewer). Fallback to e6.1-joint.yaml
+# (AC-CPC retained) if E6.2 fails. V5 tokenised-input mode is legacy.
+# Auto-resumes: SLURM sends USR1 5 min before time limit, the trap
+# saves checkpoint and resubmits the job.
 #
 # Submit:  sbatch slurm/train_world_model.sl [config]
 # Example: sbatch slurm/train_world_model.sl configs/v5.yaml
