@@ -38,6 +38,38 @@ def _unwrap(model):
     return model._orig_mod if hasattr(model, "_orig_mod") else model
 
 
+def build_optimizer(transformer, args, fsq_encoder=None, fsq_lr=None):
+    """AdamW with one or two param groups.
+
+    Single-group (default, matches V5 behavior byte-for-byte):
+        build_optimizer(transformer, args) -> AdamW(transformer.params,
+                                                    lr=args.lr,
+                                                    weight_decay=args.weight_decay)
+
+    Two-group (E6.1 joint training): pass an FSQ encoder module and a
+    separate peak LR for it. The transformer group keeps args.weight_decay;
+    the encoder group uses weight_decay=0.0 to match V5 FSQ (Adam, no WD).
+    Both groups are driven by the same LambdaLR factor; different peak LRs
+    come from each group's base_lr.
+    """
+    groups = [{
+        "params": list(transformer.parameters()),
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "name": "transformer",
+    }]
+    if fsq_encoder is not None:
+        if fsq_lr is None:
+            raise ValueError("fsq_lr is required when fsq_encoder is provided")
+        groups.append({
+            "params": list(fsq_encoder.parameters()),
+            "lr": fsq_lr,
+            "weight_decay": 0.0,
+            "name": "fsq_encoder",
+        })
+    return torch.optim.AdamW(groups)
+
+
 def build_structured_smooth_targets(levels, full_vocab_size, sigma=1.0, smoothing=0.1,
                                     dim_weights=None, kernel="gaussian"):
     """Precompute FSQ-structured soft target distributions.
@@ -544,8 +576,7 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
                             shuffle=True, num_workers=0, pin_memory=True)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                   weight_decay=args.weight_decay)
+    optimizer = build_optimizer(model, args)
     # bf16 doesn't need loss scaling; GradScaler with enabled=False is a no-op passthrough
     scaler = torch.GradScaler(device.type, enabled=False)
 

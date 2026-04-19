@@ -1,0 +1,103 @@
+# E6.1 joint-AC-CPC (WM + FSQ co-trained, AC-CPC retained).
+#
+# Single-knob experiment from V5 baseline: unfreeze the FSQ encoder and
+# train it simultaneously with the transformer from fresh init (no FSQ
+# pretraining). Everything else held constant: AC-CPC retained, SLS
+# with V5 calibrated dim_weights [1.02, 0.94, 0.83, 1.20] frozen during
+# the run, unif/slow regularizers kept at V5 weights, dropout unchanged,
+# same warmup-cosine shape.
+#
+# Loss composition (plain sum, no rescaling):
+#   L = [recon + 0.1*slow + 0.01*unif] + [token_CE + 1.0*cpc_loss]
+#
+# LR: shared LambdaLR factor (linear warmup 5ep -> cosine decay) applied
+# to both param groups. Peak LRs match V5 exactly (FSQ 1e-3, transformer
+# 4e-3). Floor LR for the transformer is lowered from V5's 5e-4 to 2e-4
+# (slightly tighter tail); the FSQ floor is derived automatically via
+# the shared factor (2e-4 * 0.25 = 5e-5).
+#
+# Gradient balance is governed by the peak-LR ratio (encoder peak is
+# 0.25 * transformer peak, not the /10 heuristic from project_state.md).
+# If codebook utilization or reconstruction regresses, revisit the
+# encoder peak LR, not the loss weights.
+
+# Shared model architecture (identical to V5)
+model:
+  vocab_size: 625
+  embed_dim: 512
+  n_heads: 8
+  n_layers: 8
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [5, 5, 5, 5]
+  dropout: 0.15
+  adaln: true
+
+# FSQ-VAE joint-training knobs (consumed inside the joint transformer loop)
+fsq:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  lr: 0.001             # peak LR for the encoder param group (V5 FSQ peak)
+  alpha_slow: 0.1       # V5
+  alpha_uniform: 0.01   # V5
+  k_shifts: 1           # V5: 1 shift augmentation pair per sample
+
+# Transformer + joint training
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 200
+  batch_size: 512
+  lr: 0.004             # peak LR for the transformer param group (V5 transformer peak)
+  lr_min: 0.0002        # tighter tail than V5's 5e-4; FSQ floor derived via shared factor -> 5e-5
+  weight_decay: 0.01    # V5: transformer group only; encoder group stays at 0.0
+  cpc_weight: 1.0
+  token_noise: 0.05
+  fsq_noise: 0.05
+  label_smoothing: 0.1
+  fsq_sigma: 0.9
+  fsq_dim_weights: [1.02, 0.94, 0.83, 1.20]  # V5 calibrated, frozen during E6.1
+  focal_gamma: 2.0
+  death_oversample: 4
+  steps_per_epoch: 500
+  patience: 60
+  seed: 42
+  checkpoint_dir: checkpoints_e6.1
+  joint: true           # unfreeze FSQ encoder, train simultaneously, merge aux losses
+
+# Controller sections inherit V5 PPO defaults; they point at the E6.1
+# transformer that this run produces. Not exercised until after the joint
+# WM training completes.
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_e6.1/transformer_best.pt
+  epochs: 50
+  batch_size: 512
+  lr: 0.001
+  weight_decay: 0.0001
+  val_ratio: 0.1
+  seed: 42
+  checkpoint_dir: checkpoints_e6.1
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_e6.1/transformer_best.pt
+  pretrained: checkpoints_e6.1/controller_bc_best.pt
+  amp_dtype: bfloat16
+  n_iterations: 50000
+  n_episodes: 512
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 512
+  entropy_coeff: 0.01
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 45
+  death_threshold: 0.5
+  mlp_hidden: 512
+  n_eval_episodes: 512
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_e6.1
