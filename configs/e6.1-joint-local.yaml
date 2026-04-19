@@ -29,7 +29,9 @@ transformer:
   episodes_dir: data/death_episodes
   expert_episodes_dir: data/expert_episodes
   epochs: 200
-  batch_size: 512           # max VRAM on 2060 SUPER 8 GB for the probe
+  batch_size: 256           # 512 OOMs on 2060 SUPER 8 GB (FFN intermediate
+                            # B×T×4D fp16 = ~650 MB at B=512, T=325, D=512;
+                            # multiply by 8 layers + attention + FSQ)
   lr: 0.004                 # peak LR identical to V5 / e6.1 (keep schedule shape)
   lr_min: 0.0002            # E6.1 tighter-tail floor
   weight_decay: 0.01
