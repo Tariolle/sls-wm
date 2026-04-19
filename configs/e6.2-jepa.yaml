@@ -36,14 +36,7 @@ transformer:
   episodes_dir: data/death_episodes
   expert_episodes_dir: data/expert_episodes
   epochs: 200
-  batch_size: 896       # ~67 GB live on A100 80GB (~75 MB per-sample
-                        # activation + ~1.5 GB fixed weights/opt state).
-                        # Prior B=512 run used only ~40 GB. LR kept at V5
-                        # 4e-3 (not sqrt-B scaled to ~5.3e-3) because
-                        # larger batch already reduces gradient noise and
-                        # our bf16 safety margin at this dim is thin
-                        # (feedback_lr_scaling.md: 4e-3 overflowed at
-                        # 768d fp16; bf16 on A100 is fine but don't push).
+  batch_size: 512
   lr: 0.004             # transformer peak (V5)
   lr_min: 0.0002        # E6.1 tighter-tail floor (shared schedule)
   weight_decay: 0.01
