@@ -29,17 +29,12 @@ transformer:
   episodes_dir: data/death_episodes
   expert_episodes_dir: data/expert_episodes
   epochs: 200
-  batch_size: 32            # 2060 SUPER 8 GB. At B=64 the first MLP GELU
-                            # tipped over with 7.04 GB already live (clean
-                            # OOM at 82 MB ask). Eager autograd caches more
-                            # activations than compile, and 8 transformer
-                            # layers × (attn B·H·T² ~108 MB + FFN B·T·4D
-                            # ~81 MB + LN/AdaLN fp32 cast) ~ 500 MB/layer
-                            # ~ 4 GB just for backward-stored activations.
-                            # Plus FSQ encode on (B · 5) frames, weights
-                            # + Adam state, etc. 32 halves all activations
-                            # ~ 2 GB headroom. Use gradient checkpointing
-                            # (not wired yet) to go higher.
+  batch_size: 48            # 2060 SUPER 8 GB. B=32 observed steady-state
+                            # 4.9 GB -> ~3 GB headroom. Activations scale
+                            # linearly with batch: B=48 ~7.3 GB (1.5x).
+                            # B=64 OOMs (7.04 GB live before the first MLP
+                            # GELU's 82 MB ask). Use gradient checkpointing
+                            # (not wired yet) to go higher than 48.
   lr: 0.004                 # peak LR identical to V5 / e6.1 (keep schedule shape)
   lr_min: 0.0002            # E6.1 tighter-tail floor
   weight_decay: 0.01
