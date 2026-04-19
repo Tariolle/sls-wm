@@ -1085,7 +1085,14 @@ def main():
         with open(ckpt_dir / "transformer_args.json", "w") as f:
             json.dump(vars(args), f, indent=2)
 
-    wandb_init(project="deepdash", name=f"transformer-{args.embed_dim}d",
+    # Derive run name from checkpoint_dir slug (post-"checkpoints_" prefix).
+    # This trains the whole world model (FSQ + Transformer in joint mode,
+    # Transformer only in V5 mode), so a single "wm-<experiment>" label
+    # matches the script name and reflects all metrics logged.
+    _ckpt_name = Path(args.checkpoint_dir).name
+    _slug = re.sub(r"^checkpoints[_-]?", "", _ckpt_name) or _ckpt_name
+    run_name = f"wm-{_slug}"
+    wandb_init(project="deepdash", name=run_name,
                config=vars(args), resume_id=wandb_resume_id)
 
     # torch.compile the model. In V5 mode we compile WorldModel alone.
@@ -1226,12 +1233,15 @@ def main():
                   "val_cpc",
                   "gap", "lr", "time_s"]
     if joint:
-        # E6.1: merged CSV carries the FSQ aux losses (formerly written to
-        # fsq_log.csv by train_fsq.py) and the per-source grad-norm diagnostic
-        # used to validate the encoder-LR / transformer-LR ratio.
+        # Joint CSV: symmetric FSQ block mirroring the transformer block
+        # (total, per-component, gap, grad_rms, lr). All per-component
+        # losses are the raw (unweighted) values logged separately from
+        # the aggregated fsq_train_total / fsq_val_total so nothing is
+        # lost.
         log_header += [
-            "train_recon", "train_slow", "train_unif",
-            "val_recon", "val_slow", "val_unif",
+            "fsq_train_total", "train_recon", "train_slow", "train_unif",
+            "fsq_val_total", "val_recon", "val_slow", "val_unif",
+            "fsq_gap",
             "encoder_grad_rms", "transformer_grad_rms",
             "fsq_lr",
         ]
@@ -1314,6 +1324,20 @@ def main():
             val_total = val_loss + cpc_w * val_cpc
             gap = val_total - train_total
 
+            # Joint-mode FSQ-side totals mirror the transformer's per-
+            # component aggregate so the wandb overview and console line
+            # are symmetric.
+            if joint:
+                a_s = args.alpha_slow
+                a_u = args.alpha_uniform
+                fsq_train_total = (train_metrics["recon"]
+                                   + a_s * train_metrics["slow"]
+                                   + a_u * train_metrics["unif"])
+                fsq_val_total = (val_metrics["recon"]
+                                 + a_s * val_metrics["slow"]
+                                 + a_u * val_metrics["unif"])
+                fsq_gap = fsq_val_total - fsq_train_total
+
             print(
                 f"Epoch {epoch:3d}/{args.epochs} ({dt:.1f}s) | "
                 f"Train: total={train_total:.4f} loss={train_loss:.4f} acc={train_acc:.3f} "
@@ -1327,12 +1351,14 @@ def main():
             )
             if joint:
                 print(
-                    f"  FSQ: train[recon={train_metrics['recon']:.4f} "
-                    f"slow={train_metrics['slow']:.4f} unif={train_metrics['unif']:.4f}] "
-                    f"val[recon={val_metrics['recon']:.4f} "
-                    f"slow={val_metrics['slow']:.4f} unif={val_metrics['unif']:.4f}] "
-                    f"| grad_rms enc={train_metrics['enc_grad_rms']:.3e} "
-                    f"tr={train_metrics['tr_grad_rms']:.3e}"
+                    f"  FSQ | "
+                    f"Train: total={fsq_train_total:.4f} recon={train_metrics['recon']:.4f} "
+                    f"slow={train_metrics['slow']:.4f} unif={train_metrics['unif']:.4f} | "
+                    f"Val: total={fsq_val_total:.4f} recon={val_metrics['recon']:.4f} "
+                    f"slow={val_metrics['slow']:.4f} unif={val_metrics['unif']:.4f} | "
+                    f"gap={fsq_gap:+.4f} | "
+                    f"grad_rms[enc={train_metrics['enc_grad_rms']:.2e} "
+                    f"tr={train_metrics['tr_grad_rms']:.2e}]"
                 )
 
             row = [
@@ -1346,12 +1372,15 @@ def main():
             ]
             if joint:
                 row += [
+                    f"{fsq_train_total:.6f}",
                     f"{train_metrics['recon']:.6f}",
                     f"{train_metrics['slow']:.6f}",
                     f"{train_metrics['unif']:.6f}",
+                    f"{fsq_val_total:.6f}",
                     f"{val_metrics['recon']:.6f}",
                     f"{val_metrics['slow']:.6f}",
                     f"{val_metrics['unif']:.6f}",
+                    f"{fsq_gap:.4f}",
                     f"{train_metrics['enc_grad_rms']:.6e}",
                     f"{train_metrics['tr_grad_rms']:.6e}",
                     f"{fsq_lr_now:.1e}" if fsq_lr_now is not None else "",
@@ -1375,16 +1404,23 @@ def main():
                 "transformer/lr": lr,
             }
             if joint:
+                # FSQ namespace mirrors transformer: train/total, val/total,
+                # gap, lr, grad_rms + per-component raw losses. Same shape
+                # as the transformer block so the wandb overview lines up
+                # side-by-side.
                 wandb_payload.update({
+                    "fsq/train/total": fsq_train_total,
                     "fsq/train/recon": train_metrics["recon"],
                     "fsq/train/slow": train_metrics["slow"],
                     "fsq/train/unif": train_metrics["unif"],
+                    "fsq/train/grad_rms": train_metrics["enc_grad_rms"],
+                    "fsq/val/total": fsq_val_total,
                     "fsq/val/recon": val_metrics["recon"],
                     "fsq/val/slow": val_metrics["slow"],
                     "fsq/val/unif": val_metrics["unif"],
+                    "fsq/gap": fsq_gap,
                     "fsq/lr": fsq_lr_now,
-                    "grad/encoder_rms": train_metrics["enc_grad_rms"],
-                    "grad/transformer_rms": train_metrics["tr_grad_rms"],
+                    "transformer/train/grad_rms": train_metrics["tr_grad_rms"],
                 })
             wandb_log(wandb_payload)
 
