@@ -71,6 +71,7 @@ class WorldModel(nn.Module):
         cpc_dim: int = 64,
         tokens_per_frame: int = 64,
         adaln: bool = False,
+        fsq_dim: int | None = None,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -99,6 +100,17 @@ class WorldModel(nn.Module):
         self.token_embed = nn.Embedding(self.full_vocab_size, embed_dim)
         if not adaln:
             self.action_embed = nn.Embedding(n_actions, embed_dim)
+
+        # Joint training gradient conduit (E6.1+): a learnable Linear that
+        # contributes zero to the forward value but routes gradient from
+        # transformer losses through STE back to the FSQ encoder. See
+        # forward() for the zero-sum STE correction pattern. Only created
+        # when fsq_dim is provided; None in V5 behavior.
+        self.fsq_dim = fsq_dim
+        if fsq_dim is not None:
+            self.fsq_grad_proj = nn.Linear(fsq_dim, embed_dim)
+        else:
+            self.fsq_grad_proj = None
 
         # AdaLN: action conditioning MLP
         if adaln:
@@ -342,7 +354,7 @@ class WorldModel(nn.Module):
 
         return total_loss / max(n_pairs, 1)
 
-    def forward(self, frame_tokens, actions):
+    def forward(self, frame_tokens, actions, z_q_ste_context=None):
         """Forward pass: predict all target tokens from context.
 
         All target positions are replaced with mask_embed (no ground truth
@@ -352,6 +364,16 @@ class WorldModel(nn.Module):
             frame_tokens: (B, K+1, tokens_per_frame+1) long — K context + 1 target.
                           Last column is the status token (ALIVE or DEATH).
             actions: (B, K) long — action for each context frame.
+            z_q_ste_context: optional (B, K, tokens_per_frame, fsq_dim) continuous
+                STE-routed FSQ codes for context frames' VISUAL positions only.
+                When provided (joint training), a zero-sum correction term
+                `fsq_grad_proj(z_q_ste) - fsq_grad_proj(z_q_ste).detach()` is
+                added to each context frame's visual-token embedding; the
+                forward value is unchanged (term cancels to 0), but gradient
+                flows from downstream losses through fsq_grad_proj and STE
+                back to the FSQ encoder. Status position (index
+                tokens_per_frame) receives no correction. When None, V5
+                behavior is byte-identical.
 
         Returns:
             logits: (B, block_size, full_vocab_size) — predictions for all target positions.
@@ -359,6 +381,28 @@ class WorldModel(nn.Module):
         """
         B = frame_tokens.size(0)
         K = self.context_frames
+        use_ste = z_q_ste_context is not None
+        if use_ste and self.fsq_grad_proj is None:
+            raise RuntimeError(
+                "z_q_ste_context passed but fsq_grad_proj not initialized; "
+                "construct WorldModel with fsq_dim=<int> for joint training."
+            )
+
+        def embed_ctx_frame(i):
+            """Embed context frame i with optional zero-sum STE correction
+            on visual positions. Status (last) position is unchanged."""
+            hard = self.token_embed(frame_tokens[:, i])  # (B, TPF+1, D)
+            if not use_ste:
+                return hard
+            z = z_q_ste_context[:, i]                     # (B, TPF, fsq_dim)
+            corr_vis = self.fsq_grad_proj(z)              # (B, TPF, D)
+            # Zero-sum: forward value = 0, backward grad routes through z
+            corr_vis = corr_vis - corr_vis.detach()
+            # Pad the status position with zeros (no z for that position)
+            pad = torch.zeros(B, 1, self.embed_dim,
+                              device=hard.device, dtype=hard.dtype)
+            corr = torch.cat([corr_vis, pad], dim=1)      # (B, TPF+1, D)
+            return hard + corr
 
         parts = []
         cond = None
@@ -368,12 +412,12 @@ class WorldModel(nn.Module):
             act_onehot = F.one_hot(actions, self.n_actions).float()
             cond = self.action_cond(act_onehot.reshape(B, -1))  # (B, D)
             for i in range(K):
-                parts.append(self.token_embed(frame_tokens[:, i]))
+                parts.append(embed_ctx_frame(i))
             ctx_end = K * self.block_size
         else:
             # Standard: interleaved [f0(65) a0 f1(65) a1 ... fK-1(65) aK-1]
             for i in range(K):
-                parts.append(self.token_embed(frame_tokens[:, i]))
+                parts.append(embed_ctx_frame(i))
                 act = self.action_embed(actions[:, i])
                 parts.append(act.unsqueeze(1))
             ctx_end = K * (self.block_size + 1)

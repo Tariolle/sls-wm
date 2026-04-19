@@ -117,6 +117,66 @@ class TestWorldModel:
         assert h_t.shape == (1, 512)
 
 
+class TestWorldModelJoint:
+    """STE-coupled joint-training path (E6.1)."""
+
+    def _make(self, device, fsq_dim=None):
+        from deepdash.world_model import WorldModel
+        return WorldModel(
+            vocab_size=625, embed_dim=512, n_heads=8, n_layers=8,
+            context_frames=4, tokens_per_frame=64, adaln=True,
+            fsq_dim=fsq_dim,
+        ).to(device).eval()
+
+    def _inputs(self, device, B=2, fsq_dim=4):
+        tokens = torch.randint(0, 625, (B, 5, 65), device=device)
+        tokens[:, :, -1] = 625  # ALIVE
+        actions = torch.randint(0, 2, (B, 4), device=device)
+        z_q_ste = torch.randn(B, 4, 64, fsq_dim, device=device)
+        return tokens, actions, z_q_ste
+
+    def test_ste_forward_value_is_byte_identical(self, device, seed):
+        """Zero-sum correction must not alter forward outputs."""
+        torch.manual_seed(0)
+        model = self._make(device, fsq_dim=4)
+        tokens, actions, z_q_ste = self._inputs(device)
+        with torch.no_grad():
+            logits_plain, cpc_plain = model(tokens, actions)
+            logits_ste, cpc_ste = model(tokens, actions,
+                                         z_q_ste_context=z_q_ste)
+        assert torch.allclose(logits_plain, logits_ste, atol=1e-5), (
+            "STE correction changed forward logits; zero-sum violated"
+        )
+        assert torch.allclose(cpc_plain, cpc_ste, atol=1e-5), (
+            "STE correction changed CPC loss; zero-sum violated"
+        )
+
+    def test_ste_routes_gradient_to_z_q(self, device, seed):
+        """Gradient from output must reach z_q_ste via fsq_grad_proj."""
+        torch.manual_seed(0)
+        model = self._make(device, fsq_dim=4).train()
+        tokens, actions, z_q_ste = self._inputs(device)
+        z_q_ste = z_q_ste.requires_grad_(True)
+        logits, _ = model(tokens, actions, z_q_ste_context=z_q_ste)
+        logits.sum().backward()
+        assert z_q_ste.grad is not None, "No gradient reached z_q_ste_context"
+        assert z_q_ste.grad.abs().sum() > 0, (
+            "Zero gradient to z_q_ste_context; STE path is broken"
+        )
+
+    def test_fsq_dim_none_has_no_grad_proj(self, device, seed):
+        """V5 default: no STE module instantiated."""
+        model = self._make(device, fsq_dim=None)
+        assert model.fsq_grad_proj is None
+
+    def test_fsq_dim_none_rejects_z_q_kwarg(self, device, seed):
+        """Passing z_q_ste_context without fsq_dim raises."""
+        model = self._make(device, fsq_dim=None)
+        tokens, actions, z_q_ste = self._inputs(device)
+        with pytest.raises(RuntimeError, match="fsq_grad_proj"):
+            model(tokens, actions, z_q_ste_context=z_q_ste)
+
+
 class TestMLPPolicy:
     """Tests use V4 architecture: h_dim=512 matching world model embed_dim."""
 
