@@ -50,6 +50,7 @@ transformer:
   fsq_lr: 0.001
   alpha_slow: 0.1
   alpha_uniform: 0.01
+  shift_max: 4          # on-the-fly vertical shift aug
   # Turing hardware overrides
   amp_dtype: float16
   compile_mode: default

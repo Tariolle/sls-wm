@@ -1,19 +1,18 @@
 """Train the world model (FSQ tokenizer + Transformer dynamics).
 
-Two modes:
-  - V5 / standard: train only the Transformer on pre-tokenized episode
-    data. FSQ is trained separately by scripts/train_fsq.py first, then
-    scripts/tokenize_episodes.py materialises tokens.npy files.
-  - E6.1+ joint: --joint trains FSQ and Transformer simultaneously from
-    raw frames, with gradient from transformer losses routed back to the
-    FSQ encoder via STE (see JointStep / WorldModel.fsq_grad_proj).
+E6.1+ joint path (default going forward): --joint trains the FSQ and
+Transformer simultaneously from raw frames, with gradient from the
+transformer losses routed back to the FSQ encoder via STE
+(see JointStep / WorldModel.fsq_grad_proj). Vertical shift augmentation
+is applied on-the-fly per batch (shift_max config key).
+
+V5 legacy path (still works, for reproducing pre-joint results): trains
+the Transformer only on pre-tokenised episode data (tokens.npy files
+produced by a separate pipeline). This pipeline is no longer supported
+in-tree — the `tokenize_episodes.py` and `shift_episodes.py` scripts
+were removed 2026-04-19 in favour of on-the-fly encoding and shifting.
 
 Usage:
-    # V5 (tokenised-input) training:
-    python scripts/tokenize_episodes.py --model fsq   # must run first
-    python scripts/train_world_model.py --config configs/v5.yaml
-
-    # E6.1 joint training (no pretokenisation):
     python scripts/train_world_model.py --config configs/e6.1-joint.yaml
 
 Historical note: this file used to be named scripts/train_transformer.py
@@ -494,6 +493,7 @@ class JointStep(nn.Module):
 
     def __init__(self, fsq, wm, *, alpha_slow, alpha_uniform, cpc_weight,
                  label_smoothing, focal_gamma, token_noise, fsq_noise,
+                 shift_max=0,
                  neighbor_table=None, neighbor_counts=None,
                  soft_target_matrix=None):
         super().__init__()
@@ -506,6 +506,13 @@ class JointStep(nn.Module):
         self.focal_gamma = float(focal_gamma)
         self.token_noise = float(token_noise)
         self.fsq_noise = float(fsq_noise)
+        # Vertical shift augmentation: per-batch random dy ∈ [-shift_max,
+        # +shift_max]. Applied uniformly to all K+1 frames in a window so
+        # the temporal consistency of the context->target pair is preserved.
+        # Edge-padded (rows outside the range clamp to the nearest edge).
+        # Replaces the pre-computed `_s+0_+dy` episode directories used in
+        # V5. 0 disables; 4 matches the V5 shift ladder.
+        self.shift_max = int(shift_max)
         if neighbor_table is not None:
             self.register_buffer("neighbor_table", neighbor_table, persistent=False)
             self.register_buffer("neighbor_counts", neighbor_counts, persistent=False)
@@ -533,6 +540,18 @@ class JointStep(nn.Module):
         # conv, which is len(levels). We infer it from the quantizer's
         # internal levels list.
         fsq_dim = self.wm.fsq_grad_proj.in_features
+
+        # On-the-fly vertical shift augmentation (replaces the V5 pre-
+        # computed `_s+0_+dy/` episode ladder). One random dy per batch
+        # applied to all K+1 frames of every window, edge-padded via
+        # clamp. Compile-friendly: index_select with a gpu-sampled int
+        # tensor, no .item() sync.
+        if self.training and self.shift_max > 0:
+            H = raw_frames.shape[-2]
+            dy = torch.randint(-self.shift_max, self.shift_max + 1, (1,),
+                               device=raw_frames.device)
+            row_idx = (torch.arange(H, device=raw_frames.device) - dy).clamp(0, H - 1)
+            raw_frames = raw_frames.index_select(-2, row_idx)
 
         z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
             self.fsq, raw_frames, K, tpf, fsq_dim)
@@ -827,6 +846,11 @@ def main():
                         help="GRWM temporal slowness weight (joint mode).")
     parser.add_argument("--alpha-uniform", type=float, default=None,
                         help="GRWM uniformity weight (joint mode).")
+    parser.add_argument("--shift-max", type=int, default=None,
+                        help="Max per-batch vertical shift (pixels) for on-"
+                             "the-fly data augmentation. One random dy in "
+                             "[-shift_max, +shift_max] applied per batch. "
+                             "0 disables. 4 matches the V5 pre-shift ladder.")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
@@ -853,20 +877,31 @@ def main():
     val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
 
     # Joint mode loads raw frames (frames.npy) and encodes on-the-fly.
-    # V5 mode loads pre-tokenized data (tokens.npy) produced by
-    # scripts/tokenize_episodes.py.
+    # V5 mode loads pre-tokenized data (tokens.npy) — legacy path, no
+    # longer actively supported; the tokenize step is expected to be done
+    # externally if you really need it.
     joint = bool(getattr(args, "joint", False))
     source_file = "frames.npy" if joint else "tokens.npy"
 
+    def _has_data(ep):
+        """Skip episodes missing or with zero-byte actions.npy / source_file.
+        Shift-augmented episodes use a symlinked actions.npy; if that symlink
+        was stripped during a filesystem copy (e.g. robocopy HDD -> SSD
+        without /SL), the file becomes 0 bytes and np.load raises EOFError.
+        This guard makes the loader robust to such broken copies.
+        """
+        src = ep / source_file
+        act = ep / "actions.npy"
+        return (src.exists() and src.stat().st_size > 0
+                and act.exists() and act.stat().st_size > 0)
+
     episodes_dir = Path(args.episodes_dir)
-    all_episodes = sorted(ep for ep in episodes_dir.glob("*")
-                          if (ep / source_file).exists())
+    all_episodes = sorted(ep for ep in episodes_dir.glob("*") if _has_data(ep))
     death_episodes = set(ep.name for ep in all_episodes)
 
     expert_dir = Path(args.expert_episodes_dir)
     if expert_dir.exists():
-        expert_eps = sorted(ep for ep in expert_dir.glob("*")
-                            if (ep / source_file).exists())
+        expert_eps = sorted(ep for ep in expert_dir.glob("*") if _has_data(ep))
         all_episodes.extend(expert_eps)
 
     n_train = sum(1 for ep in all_episodes if not is_val_episode(ep.name, val_set))
@@ -1114,6 +1149,7 @@ def main():
     joint_step_train = None
     joint_step_val = None
     if joint:
+        shift_max = int(getattr(args, "shift_max", 0) or 0)
         joint_step_train = JointStep(
             fsq=fsq, wm=model,
             alpha_slow=args.alpha_slow, alpha_uniform=args.alpha_uniform,
@@ -1121,6 +1157,7 @@ def main():
             label_smoothing=args.label_smoothing,
             focal_gamma=args.focal_gamma,
             token_noise=args.token_noise, fsq_noise=args.fsq_noise,
+            shift_max=shift_max,
             neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
             soft_target_matrix=soft_target_matrix,
         ).to(device)
@@ -1131,6 +1168,7 @@ def main():
             label_smoothing=args.label_smoothing,
             focal_gamma=args.focal_gamma,
             token_noise=0.0, fsq_noise=0.0,          # no noise at eval
+            shift_max=0,                              # no shift at eval
             neighbor_table=None, neighbor_counts=None,
             soft_target_matrix=soft_target_matrix,
         ).to(device)

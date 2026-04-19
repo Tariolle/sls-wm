@@ -10,10 +10,11 @@
 #SBATCH --time=08:00:00
 #SBATCH --signal=B:USR1@300
 
-# Train the world model (FSQ + Transformer) on A100. Config picks the
-# mode: e6.1-joint.yaml (joint FSQ+Transformer) vs v5.yaml (Transformer
-# only, tokenised input; requires prior FSQ + tokenize_episodes step,
-# triggered below).
+# Train the world model (FSQ + Transformer) on A100 via
+# scripts/train_world_model.py. Joint mode (configs/e6.1-joint.yaml) is
+# the default going forward; FSQ is trained jointly, no pre-tokenisation
+# required. V5 tokenised-input mode is legacy — tokenize_episodes.py was
+# removed 2026-04-19.
 # Auto-resumes: SLURM sends USR1 5 min before time limit,
 # the trap saves checkpoint and resubmits the job.
 #
@@ -23,15 +24,11 @@
 
 CONFIG=${1:-configs/v5.yaml}
 
-# Extract checkpoint_dir and FSQ settings from config
+# Extract checkpoint_dir from the transformer section of the config.
 CKPT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG')).get('transformer',{}).get('checkpoint_dir','checkpoints'))")
-FSQ_CKPT=$(python -c "import yaml; c=yaml.safe_load(open('$CONFIG')); print(c.get('fsq',{}).get('checkpoint_dir', c.get('transformer',{}).get('checkpoint_dir','checkpoints')) + '/fsq_best.pt')")
-LEVELS=$(python -c "import yaml; print(' '.join(map(str, yaml.safe_load(open('$CONFIG')).get('model',{}).get('levels',[8,5,5,5]))))")
 
 echo "=== Config: $CONFIG ==="
 echo "=== Checkpoint dir: $CKPT_DIR ==="
-echo "=== FSQ checkpoint: $FSQ_CKPT ==="
-echo "=== FSQ levels: $LEVELS ==="
 
 # Auto-resume: the trap creates a sentinel file before requeuing.
 RESUME_FLAG="$CKPT_DIR/.resume_transformer"
@@ -61,23 +58,6 @@ export PATH="$HOME/.local/bin:$PATH"
 # module ships protobuf 6.31, so upgrade it here on the compute node.
 pip install --user --upgrade wandb "protobuf>=6.32" 2>/dev/null
 
-# Tokenization is idempotent (skips already-tokenized episodes)
-echo "=== Step 1a: Tokenize death episodes ==="
-python -u scripts/tokenize_episodes.py \
-    --model fsq \
-    --checkpoint "$FSQ_CKPT" \
-    --episodes-dir data/death_episodes \
-    --batch-size 512 \
-    --levels $LEVELS
-
-echo "=== Step 1b: Tokenize expert episodes ==="
-python -u scripts/tokenize_episodes.py \
-    --model fsq \
-    --checkpoint "$FSQ_CKPT" \
-    --episodes-dir data/expert_episodes \
-    --batch-size 512 \
-    --levels $LEVELS
-
 RESUME_ARG=""
 if [ -f "$RESUME_FLAG" ]; then
     RESUME_ARG="--resume"
@@ -85,7 +65,7 @@ if [ -f "$RESUME_FLAG" ]; then
     echo "=== Resuming from checkpoint ==="
 fi
 
-echo "=== Step 2: Train Transformer ($(date)) ==="
+echo "=== Train world model ($(date)) ==="
 python -u scripts/train_world_model.py \
     --config "$CONFIG" \
     $RESUME_ARG &

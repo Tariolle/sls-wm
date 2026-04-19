@@ -25,11 +25,8 @@ pip install --user --upgrade wandb "protobuf>=6.32" 2>/dev/null
 
 echo "=== Config: $CONFIG ==="
 
-echo "=== Step 0: Pre-compute shift augmentation ==="
-python -u scripts/shift_episodes.py \
-    --episodes-dir data/death_episodes \
-    --expert-episodes-dir data/expert_episodes \
-    --shifts-v -4 -2 0 2 4
+# Shift augmentation moved on-the-fly inside scripts/train_world_model.py
+# (joint mode). Pre-shift step removed 2026-04-19.
 
 # Auto-resume: extract checkpoint_dir from config, check for fsq_state.pt
 CKPT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG')).get('fsq',{}).get('checkpoint_dir','checkpoints'))")

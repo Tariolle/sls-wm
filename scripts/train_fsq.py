@@ -289,21 +289,10 @@ def main():
     import re
     shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
 
-    # Verify shift directories exist (created by shift_episodes.py)
-    has_shifts = False
-    for ep_dir in [args.episodes_dir, args.expert_episodes_dir]:
-        p = Path(ep_dir)
-        if p.exists():
-            for ep in p.glob("*"):
-                if ep.is_dir() and shift_re.search(ep.name):
-                    has_shifts = True
-                    break
-        if has_shifts:
-            break
-    if not has_shifts:
-        print("ERROR: No shift augmentation found. "
-              "Run scripts/shift_episodes.py first.")
-        sys.exit(1)
+    # Shift augmentation is now on-the-fly inside JointStep (2026-04-19;
+    # see scripts/train_world_model.py). Pre-shifted episode dirs and
+    # scripts/shift_episodes.py have been removed. This standalone FSQ
+    # trainer runs on base episodes only — no shift aug here.
 
     # Delete tokens.npy from all episodes (will be re-created after FSQ)
     for ep_dir in [args.episodes_dir, args.expert_episodes_dir]:

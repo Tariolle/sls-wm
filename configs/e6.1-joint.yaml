@@ -60,6 +60,7 @@ transformer:
   fsq_lr: 0.001         # V5 FSQ peak LR (derived ratio: transformer_peak * 0.25)
   alpha_slow: 0.1       # V5 FSQ slow weight
   alpha_uniform: 0.01   # V5 FSQ uniformity weight
+  shift_max: 4          # on-the-fly vertical shift aug (replaces V5 pre-shifted dirs)
 
 # Controller sections inherit V5 PPO defaults; they point at the E6.1
 # transformer that this run produces. Not exercised until after the joint
