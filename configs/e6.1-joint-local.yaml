@@ -1,0 +1,91 @@
+# E6.1 joint training, RTX 2060 SUPER / Windows / Turing overrides.
+#
+# Same E6.1 pipeline as configs/e6.1-joint.yaml with hardware-specific
+# deltas for local probing on the 2060 SUPER (8 GB, Turing):
+#   - amp_dtype: float16   (Turing has no native bf16; emulation is ~12x slower)
+#   - compile_mode: default (reduce-overhead's CUDA graphs are tricky on small
+#                            SMs; v5-local already uses default)
+#   - batch_size: 256       (fits 8 GB VRAM with comfortable headroom vs 512)
+#
+# Everything else (lr, lr_min, dropout, SLS weights, cpc_weight, etc.) is
+# inherited from e6.1-joint.yaml semantics and kept byte-identical so the
+# local probe reflects A100 behaviour as faithfully as possible.
+# See feedback_training_compute.md and feedback_compile_mode.md in memory.
+
+# Shared model architecture (identical to v5/e6.1)
+model:
+  vocab_size: 625
+  embed_dim: 512
+  n_heads: 8
+  n_layers: 8
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [5, 5, 5, 5]
+  dropout: 0.15
+  adaln: true
+
+# Transformer + joint training
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 200
+  batch_size: 256           # halved from 512 for 8 GB Turing
+  lr: 0.004                 # peak LR identical to V5 / e6.1 (keep schedule shape)
+  lr_min: 0.0002            # E6.1 tighter-tail floor
+  weight_decay: 0.01
+  cpc_weight: 1.0
+  token_noise: 0.05
+  fsq_noise: 0.05
+  label_smoothing: 0.1
+  fsq_sigma: 0.9
+  fsq_dim_weights: [1.02, 0.94, 0.83, 1.20]
+  focal_gamma: 2.0
+  death_oversample: 4
+  steps_per_epoch: 500
+  patience: 60
+  seed: 42
+  checkpoint_dir: checkpoints_e6.1_local
+  # Joint training
+  joint: true
+  fsq_lr: 0.001
+  alpha_slow: 0.1
+  alpha_uniform: 0.01
+  # Turing hardware overrides
+  amp_dtype: float16
+  compile_mode: default
+
+# Controller sections (not exercised by the probe, but kept so the config
+# validates and future local controller runs inherit the right checkpoint dir).
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_e6.1_local/transformer_best.pt
+  epochs: 50
+  batch_size: 256
+  lr: 0.001
+  weight_decay: 0.0001
+  val_ratio: 0.1
+  seed: 42
+  checkpoint_dir: checkpoints_e6.1_local
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_e6.1_local/transformer_best.pt
+  pretrained: checkpoints_e6.1_local/controller_bc_best.pt
+  amp_dtype: float16
+  n_iterations: 50000
+  n_episodes: 128           # local PPO default, ~4x fewer episodes/iter vs A100
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 256
+  entropy_coeff: 0.01
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 45
+  death_threshold: 0.5
+  mlp_hidden: 512
+  n_eval_episodes: 128
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_e6.1_local

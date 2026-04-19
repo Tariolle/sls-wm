@@ -267,7 +267,7 @@ def apply_fsq_noise(tokens, neighbor_table, neighbor_counts, prob, device):
 def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
                 token_noise=0.0, fsq_noise=0.0, neighbor_table=None,
                 neighbor_counts=None, label_smoothing=0.0, focal_gamma=2.0,
-                soft_target_matrix=None):
+                soft_target_matrix=None, amp_dtype=torch.bfloat16):
     model.train()
     m = _unwrap(model)
     tpf = m.tokens_per_frame
@@ -301,7 +301,7 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
             ctx[:, :, :tpf] = visual
             frame_tokens = torch.cat([ctx, frame_tokens[:, -1:]], dim=1)
 
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+        with torch.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
             logits, cpc_loss = model(frame_tokens, actions)
             token_loss = focal_cross_entropy(
                 logits.reshape(-1, logits.size(-1)),  # (B*65, vocab)
@@ -348,7 +348,7 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
 
 @torch.no_grad()
 def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
-              soft_target_matrix=None):
+              soft_target_matrix=None, amp_dtype=torch.bfloat16):
     model.eval()
     m = _unwrap(model)
     tpf = m.tokens_per_frame
@@ -364,7 +364,7 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
 
         target = frame_tokens[:, -1]
 
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+        with torch.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
             logits, cpc_loss = model(frame_tokens, actions)
 
             token_loss = focal_cross_entropy(
@@ -599,7 +599,8 @@ class JointStep(nn.Module):
         return loss, metrics
 
 
-def train_epoch_joint(joint_step, loader, optimizer, scaler, device):
+def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
+                      amp_dtype=torch.bfloat16):
     """Run one training epoch by calling the compiled JointStep per batch.
 
     The joint_step module (typically torch.compile-wrapped) captures
@@ -629,7 +630,7 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device):
         is_death = is_death.to(device, non_blocking=True).bool()
         B = raw_frames.size(0)
 
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+        with torch.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
             loss, metrics = joint_step(raw_frames, actions, is_death)
 
         optimizer.zero_grad()
@@ -681,7 +682,7 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device):
 
 
 @torch.no_grad()
-def val_epoch_joint(joint_step, loader, device):
+def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
     """Validation: same compiled JointStep, eval mode, no backward.
 
     The caller should pass a joint_step instance constructed with
@@ -708,7 +709,7 @@ def val_epoch_joint(joint_step, loader, device):
         actions = actions.to(device, non_blocking=True)
         is_death = is_death.to(device, non_blocking=True).bool()
         B = raw_frames.size(0)
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+        with torch.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
             _, metrics = joint_step(raw_frames, actions, is_death)
         total_token_loss += metrics["token_loss"].item() * B
         total_cpc += metrics["cpc_loss"].item() * B
@@ -783,6 +784,21 @@ def main():
     parser.add_argument("--death-oversample", type=int, default=None)
     parser.add_argument("--steps-per-epoch", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
+    # Mixed precision + compile (mirrors train_fsq.py conventions).
+    # A100 defaults: bfloat16 + reduce-overhead. RTX 2060 SUPER (Turing) has
+    # no native bf16 — it emulates at ~12x slower. Use float16 + default
+    # compile mode on Turing; see configs/*-local.yaml.
+    parser.add_argument("--amp-dtype", choices=["bfloat16", "float16"],
+                        default=None,
+                        help="AMP dtype. Default bfloat16 (A100). Use float16 "
+                             "on Turing (RTX 20xx) — no native bf16 there.")
+    parser.add_argument("--compile-mode",
+                        choices=["reduce-overhead", "default", "none"],
+                        default=None,
+                        help="torch.compile mode. Default reduce-overhead "
+                             "(A100 + modern CUDA). Use 'default' on Turing "
+                             "to avoid CUDA-graph issues, or 'none' to disable "
+                             "compile entirely (eager).")
     # E6.1 joint training: unfreeze FSQ, train simultaneously, STE-routed
     # gradient from transformer losses back to the encoder via
     # WorldModel.fsq_grad_proj. When --joint is off, the script runs in
@@ -973,8 +989,21 @@ def main():
         optimizer = build_optimizer(model, args, fsq_encoder=fsq, fsq_lr=fsq_lr_val)
     else:
         optimizer = build_optimizer(model, args)
-    # bf16 doesn't need loss scaling; GradScaler with enabled=False is a no-op passthrough
-    scaler = torch.GradScaler(device.type, enabled=False)
+
+    # Resolve AMP dtype and compile mode with A100 defaults; local configs
+    # (RTX 2060 SUPER / Turing) override via --amp-dtype float16 and
+    # --compile-mode default, since Turing emulates bf16 at ~12x slower
+    # and reduce-overhead's CUDA graphs have extra pitfalls on smaller SMs.
+    amp_dtype_name = getattr(args, "amp_dtype", None) or "bfloat16"
+    amp_dtype = {"bfloat16": torch.bfloat16,
+                 "float16": torch.float16}[amp_dtype_name]
+    compile_mode = getattr(args, "compile_mode", None) or "reduce-overhead"
+    # GradScaler is only needed for float16 (bfloat16 has enough range to
+    # skip scaling).
+    scaler_enabled = (amp_dtype == torch.float16) and device.type == "cuda"
+    scaler = torch.GradScaler(device.type, enabled=scaler_enabled)
+    print(f"AMP: {amp_dtype_name} | GradScaler: "
+          f"{'on' if scaler_enabled else 'off'} | compile: {compile_mode}")
 
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(exist_ok=True)
@@ -1015,12 +1044,15 @@ def main():
     # capture spans encode -> STE -> transformer -> losses.
     if joint:
         print("Joint mode: model compile deferred to JointStep below")
+    elif compile_mode == "none":
+        print("torch.compile disabled (--compile-mode none)")
     else:
         try:
             import torch._inductor.config as inductor_cfg
             inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
-            model = torch.compile(model, mode="reduce-overhead")
-            print(f"torch.compile enabled (full model, {inductor_cfg.compile_threads} compile threads)")
+            model = torch.compile(model, mode=compile_mode)
+            print(f"torch.compile enabled (mode={compile_mode}, "
+                  f"{inductor_cfg.compile_threads} compile threads)")
         except Exception as e:
             print(f"torch.compile not available, running eager: {e}")
 
@@ -1087,14 +1119,17 @@ def main():
             neighbor_table=None, neighbor_counts=None,
             soft_target_matrix=soft_target_matrix,
         ).to(device)
-        try:
-            import torch._inductor.config as inductor_cfg
-            inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
-            joint_step_train = torch.compile(joint_step_train, mode="reduce-overhead")
-            joint_step_val = torch.compile(joint_step_val, mode="reduce-overhead")
-            print("JointStep compiled (reduce-overhead, train + val)")
-        except Exception as e:
-            print(f"JointStep compile failed, running eager: {e}")
+        if compile_mode == "none":
+            print("JointStep compile disabled (--compile-mode none)")
+        else:
+            try:
+                import torch._inductor.config as inductor_cfg
+                inductor_cfg.compile_threads = min(os.cpu_count() or 1, 8)
+                joint_step_train = torch.compile(joint_step_train, mode=compile_mode)
+                joint_step_val = torch.compile(joint_step_val, mode=compile_mode)
+                print(f"JointStep compiled (mode={compile_mode}, train + val)")
+            except Exception as e:
+                print(f"JointStep compile failed, running eager: {e}")
 
     # Closed-form LR factor: linear warmup followed by cosine decay to
     # eta_min. Implemented as a single LambdaLR so resume is state-
@@ -1171,9 +1206,10 @@ def main():
             t0 = time.time()
             if joint:
                 train_metrics = train_epoch_joint(
-                    joint_step_train, train_loader, optimizer, scaler, device)
+                    joint_step_train, train_loader, optimizer, scaler, device,
+                    amp_dtype=amp_dtype)
                 val_metrics = val_epoch_joint(
-                    joint_step_val, val_loader, device)
+                    joint_step_val, val_loader, device, amp_dtype=amp_dtype)
                 train_loss = train_metrics["loss"]
                 train_acc = train_metrics["acc"]
                 train_d_prec = train_metrics["death_prec"]
@@ -1194,12 +1230,14 @@ def main():
                     neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
                     label_smoothing=args.label_smoothing,
                     focal_gamma=args.focal_gamma,
-                    soft_target_matrix=soft_target_matrix)
+                    soft_target_matrix=soft_target_matrix,
+                    amp_dtype=amp_dtype)
                 val_loss, val_acc, val_d_prec, val_d_rec, val_d_f1, val_cpc = val_epoch(
                     model, val_loader, device,
                     label_smoothing=args.label_smoothing,
                     focal_gamma=args.focal_gamma,
-                    soft_target_matrix=soft_target_matrix)
+                    soft_target_matrix=soft_target_matrix,
+                    amp_dtype=amp_dtype)
             scheduler.step()
             dt = time.time() - t0
             # In joint mode both param groups are driven by the same factor
