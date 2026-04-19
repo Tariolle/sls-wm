@@ -29,13 +29,14 @@ transformer:
   episodes_dir: data/death_episodes
   expert_episodes_dir: data/expert_episodes
   epochs: 200
-  batch_size: 60            # 2060 SUPER 8 GB. Observed steady-state:
-                            # B=32 -> 4.9 GB, B=48 -> 6.5 GB, B=56 -> 7.1 GB.
-                            # Marginal cost tapers to ~75 MB/sample near
-                            # the ceiling (allocator bucketing + shared
-                            # buffers). B=60 projects ~7.4 GB with ~500 MB
-                            # margin. B=64 OOMed earlier (first MLP GELU
-                            # at 7.04 GB live, 82 MB ask unallocatable).
+  batch_size: 56            # 2060 SUPER 8 GB. Calibrated against observed
+                            # steady state: B=32 -> 4.9 GB, B=48 -> 6.5 GB,
+                            # B=56 -> 7.1 GB (fits in VRAM), B=60 -> 7.6 GB
+                            # reported but observed paging to shared memory
+                            # (Windows still routes some of it to sysRAM
+                            # at this margin). B=56 is the pure-VRAM ceiling.
+                            # B=64 OOMed (first MLP GELU tipped over at
+                            # 7.04 GB live, 82 MB ask unallocatable).
                             # Gradient checkpointing (not wired yet) would
                             # unlock bigger batches.
   lr: 0.004                 # peak LR identical to V5 / e6.1 (keep schedule shape)
@@ -61,12 +62,15 @@ transformer:
   shift_max: 4          # on-the-fly vertical shift aug
   # Turing hardware overrides
   amp_dtype: float16
-  # Inductor's autotune leaks scratch buffers during first-epoch trace
-  # on Turing + Windows torch 2.10 (reports 14 GB allocated on an 8 GB
-  # card and OOMs at the first FFN intermediate). Eager is the cheapest
-  # correct mode for this hardware; compile is for A100 only via
-  # configs/e6.1-joint.yaml (reduce-overhead there).
-  compile_mode: none
+  # Earlier "eager only" fallback was because the big-batch compile path
+  # paged to system RAM (Windows CUDA sysmem fallback, since disabled).
+  # At B=60 with ~400 MB eager headroom, compile trace should survive
+  # the autotune peak (~500 MB – 1 GB transient). On Turing (34 SMs) the
+  # CUDA-graph benefit of reduce-overhead is modest — Inductor itself
+  # prints "Not enough SMs to use max_autotune_gemm mode". Expect
+  # 10–20% speedup vs eager, not 1.5–2x. If trace OOMs, fall back to
+  # compile_mode: none.
+  compile_mode: reduce-overhead
 
 # Controller sections (not exercised by the probe, but kept so the config
 # validates and future local controller runs inherit the right checkpoint dir).
