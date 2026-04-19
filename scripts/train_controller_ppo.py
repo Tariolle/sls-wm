@@ -349,8 +349,7 @@ def evaluate_fixed(model, controller, ctx_tokens_np, ctx_actions_np,
 def main():
     parser = argparse.ArgumentParser(
         description="Train controller via PPO in dream rollouts")
-    parser.add_argument("--transformer-checkpoint",
-                        default="checkpoints/transformer_best.pt")
+    parser.add_argument("--transformer-checkpoint", default=None)
     parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
     # PPO
