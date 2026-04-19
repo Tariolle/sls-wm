@@ -1,7 +1,7 @@
 # DeepDash V5 baseline (current headline, 2026-04-18).
 # FSQ [5,5,5,5] + Transformer with calibrated dim_weights
 # [1.02, 0.94, 0.83, 1.20] measured by scripts/fsq_sensitivity.py on 5000
-# val frames of checkpoints_v5_baseline/fsq_best.pt (~50 perturbations, 500
+# val frames of checkpoints_v5_fsq/fsq_best.pt (~50 perturbations, 500
 # bootstrap samples, 3 seeds).
 #
 # Promoted from the former isotropic-dim-weights baseline (now
@@ -10,7 +10,7 @@
 # rollouts at parity or marginally better, earlier convergence
 # (epoch 168 vs 194).
 #
-# Shared FSQ lives in checkpoints_v5_baseline/ (unchanged). Transformer +
+# Shared FSQ lives in checkpoints_v5_fsq/ (unchanged). Transformer +
 # controller weights for this baseline live in checkpoints_v5_dimweights/.
 # Kernel gaussian, sigma 0.9, epsilon 0.1 (unchanged from V5 conventions).
 
@@ -39,7 +39,7 @@ fsq:
   seed: 42
   amp: true
   compile: true
-  checkpoint_dir: checkpoints_v5_baseline
+  checkpoint_dir: checkpoints_v5_fsq
 
 # Transformer world-model training
 transformer:

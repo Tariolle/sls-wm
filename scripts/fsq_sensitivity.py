@@ -8,7 +8,7 @@ and --fsq-dim-weights.
 
 Usage:
     python scripts/fsq_sensitivity.py \
-        --checkpoint checkpoints_v5_baseline/fsq_best.pt --levels 5 5 5 5
+        --checkpoint checkpoints_v5_fsq/fsq_best.pt --levels 5 5 5 5
 """
 
 import argparse

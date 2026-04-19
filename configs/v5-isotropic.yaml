@@ -5,7 +5,7 @@
 # training, and parity-or-better dream rollouts. This config is kept for
 # the paper's SLS ablation row (calibrated vs isotropic dim_weights on the
 # [5,5,5,5] codebook).
-# Checkpoints in checkpoints_v5_baseline/ (shared FSQ + isotropic transformer).
+# Checkpoints in checkpoints_v5_fsq/ (shared FSQ + isotropic transformer).
 
 # Shared model architecture
 model:
@@ -32,7 +32,7 @@ fsq:
   seed: 42
   amp: true
   compile: true
-  checkpoint_dir: checkpoints_v5_baseline
+  checkpoint_dir: checkpoints_v5_fsq
 
 # Transformer world-model training
 transformer:
@@ -54,24 +54,24 @@ transformer:
   steps_per_epoch: 500
   patience: 60
   seed: 42
-  checkpoint_dir: checkpoints_v5_baseline
+  checkpoint_dir: checkpoints_v5_fsq
 
 # Controller -- behavioral cloning pretraining
 controller_bc:
   expert_episodes_dir: data/expert_episodes
-  transformer_checkpoint: checkpoints_v5_baseline/transformer_best.pt
+  transformer_checkpoint: checkpoints_v5_fsq/transformer_best.pt
   epochs: 50
   batch_size: 512
   lr: 0.001
   weight_decay: 0.0001
   val_ratio: 0.1
   seed: 42
-  checkpoint_dir: checkpoints_v5_baseline
+  checkpoint_dir: checkpoints_v5_fsq
 
 # Controller -- PPO fine-tuning
 controller_ppo:
-  transformer_checkpoint: checkpoints_v5_baseline/transformer_best.pt
-  pretrained: checkpoints_v5_baseline/controller_bc_best.pt
+  transformer_checkpoint: checkpoints_v5_fsq/transformer_best.pt
+  pretrained: checkpoints_v5_fsq/controller_bc_best.pt
   amp_dtype: bfloat16
   n_iterations: 50000
   n_episodes: 512
@@ -90,4 +90,4 @@ controller_ppo:
   n_eval_episodes: 512
   eval_interval: 10
   seed: 42
-  checkpoint_dir: checkpoints_v5_baseline
+  checkpoint_dir: checkpoints_v5_fsq

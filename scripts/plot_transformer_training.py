@@ -1,7 +1,7 @@
 """Plot transformer training curves from one or more CSV logs.
 
 Compare multiple runs by passing multiple logs. Labels default to the parent
-directory name of each log (e.g. `checkpoints_v5_baseline/transformer_log.csv`
+directory name of each log (e.g. `checkpoints_v5_fsq/transformer_log.csv`
 is labelled `v5_baseline`).
 
 Usage:
@@ -10,7 +10,7 @@ Usage:
 
     # compare two runs
     python scripts/plot_transformer_training.py \
-        --log checkpoints_v5_baseline/transformer_log.csv \
+        --log checkpoints_v5_fsq/transformer_log.csv \
               checkpoints_v5_dimweights/transformer_log.csv \
         --output plots/v5_baseline_vs_dimweights.png
 

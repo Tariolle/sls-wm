@@ -26,9 +26,9 @@ corresponding navigation.
 Usage:
     python scripts/compare_dreams.py \
         --config configs/v5.yaml \
-        --vae-checkpoint checkpoints_v5_baseline/fsq_best.pt \
+        --vae-checkpoint checkpoints_v5_fsq/fsq_best.pt \
         --transformer-checkpoint \
-            checkpoints_v5_baseline/transformer_best.pt \
+            checkpoints_v5_fsq/transformer_best.pt \
             checkpoints_v5_dimweights/transformer_best.pt \
         --episodes-dir "C:/Users/Florent/sls-wm-data/death_episodes" \
         --expert-episodes-dir "C:/Users/Florent/sls-wm-data/expert_episodes"
