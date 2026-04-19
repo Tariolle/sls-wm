@@ -403,6 +403,318 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
             total_cpc_loss / n_samples)
 
 
+# -------------------------------------------------------------------------
+# Joint training helpers (E6.1: unfreeze FSQ, train simultaneously)
+# -------------------------------------------------------------------------
+
+def _encode_joint(fsq, raw_frames, K, tpf, D, fsq_dim_side=8):
+    """Run raw frame windows through the FSQ encoder and produce everything
+    the transformer + aux losses need.
+
+    Args:
+        fsq: FSQVAE module (in the same train/eval mode as the outer loop).
+        raw_frames: (B, K+1, 64, 64) uint8 — raw frame windows.
+        K: context_frames.
+        tpf: tokens_per_frame (== fsq_dim_side ** 2).
+        D: FSQ latent dim (= len(levels)).
+        fsq_dim_side: spatial side of the encoder output (8 for 64x64 -> 8x8).
+
+    Returns:
+        z_e_all:   (B, K+1, D, side, side)  — continuous encoder output.
+        z_q_all:   (B, K+1, tpf, D)         — quantized codes (STE inside fsq).
+        indices_all: (B, K+1, tpf)          — discrete code indices.
+        recon_all: (B, K+1, 1, 64, 64)      — decoded frames (for recon loss).
+        frames_f:  (B, K+1, 1, 64, 64)      — normalized float [0, 1] frames
+                                              (matches what decoder targets).
+    """
+    B = raw_frames.size(0)
+    frames_f = raw_frames.float().mul_(1.0 / 255.0).unsqueeze(2)  # (B, K+1, 1, 64, 64)
+    flat = frames_f.view(B * (K + 1), 1, 64, 64)
+    z_e = fsq.encoder(flat)                         # (B*(K+1), D, side, side)
+    z_q, indices = fsq.fsq(z_e)                     # (B*(K+1), D, side, side), (B*(K+1), side, side)
+    recon = fsq.decoder(z_q)                        # (B*(K+1), 1, 64, 64)
+    side = fsq_dim_side
+    z_e_all = z_e.view(B, K + 1, D, side, side)
+    # (B*(K+1), D, side, side) -> (B, K+1, side*side, D) for transformer consumption
+    z_q_all = z_q.view(B, K + 1, D, side * side).permute(0, 1, 3, 2).contiguous()
+    indices_all = indices.view(B, K + 1, side * side)
+    recon_all = recon.view(B, K + 1, 1, 64, 64)
+    return z_e_all, z_q_all, indices_all, recon_all, frames_f
+
+
+def _build_frame_tokens_joint(indices_all, is_death, alive_tok, death_tok):
+    """Append the status column (last position of each frame block).
+
+    Context frames are always ALIVE. The target frame's status is DEATH iff
+    the window's target is a death frame in a death episode.
+    """
+    B, K1, TPF = indices_all.shape
+    status = torch.full((B, K1, 1), alive_tok, dtype=torch.long,
+                        device=indices_all.device)
+    # Target frame is index K (last of K+1)
+    target_status = torch.where(is_death, death_tok * torch.ones_like(is_death,
+                                                                      dtype=torch.long),
+                                 alive_tok * torch.ones_like(is_death,
+                                                             dtype=torch.long))
+    status[:, -1, 0] = target_status
+    return torch.cat([indices_all, status], dim=-1)  # (B, K+1, TPF+1)
+
+
+def train_epoch_joint(model, fsq, loader, optimizer, scaler, cpc_weight, device,
+                      alpha_slow, alpha_uniform, D,
+                      token_noise=0.0, fsq_noise=0.0, neighbor_table=None,
+                      neighbor_counts=None, label_smoothing=0.0, focal_gamma=2.0,
+                      soft_target_matrix=None):
+    """Joint training step: FSQ + transformer, one backward per batch.
+
+    Loss:
+        L = recon + alpha_slow * slow + alpha_uniform * unif
+            + token_CE + cpc_weight * cpc_loss
+
+    All terms flow gradient into both the transformer and the FSQ encoder
+    (the latter via the WorldModel's fsq_grad_proj STE conduit for the
+    transformer losses, and directly for the aux losses).
+    """
+    from deepdash.fsq import fsqvae_loss, grwm_slowness, grwm_uniformity
+
+    model.train()
+    fsq.train()
+    m = _unwrap(model)
+    K = m.context_frames
+    tpf = m.tokens_per_frame
+    vs = m.vocab_size
+    alive_tok = m.ALIVE_TOKEN
+    death_tok = m.DEATH_TOKEN
+    use_amp = device.type == "cuda"
+
+    total_loss = 0.0
+    total_correct = 0
+    total_tokens = 0
+    total_cpc_loss = 0.0
+    total_recon = 0.0
+    total_slow = 0.0
+    total_unif = 0.0
+    death_tp = death_fp = death_fn = 0
+    enc_grad_sq = 0.0
+    tr_grad_sq = 0.0
+    enc_grad_n = tr_grad_n = 0
+
+    for raw_frames, actions, is_death in loader:
+        raw_frames = raw_frames.to(device, non_blocking=True)
+        actions = actions.to(device, non_blocking=True)
+        is_death = is_death.to(device, non_blocking=True).bool()
+        B = raw_frames.size(0)
+
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+            z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
+                fsq, raw_frames, K, tpf, D)
+
+            # FSQ aux losses on the last pair (K-1, K), matching V5 train_fsq
+            # semantics (a pair of consecutive frames per sample).
+            frame_last = frames_f[:, K - 1]  # (B, 1, 64, 64)
+            frame_tgt = frames_f[:, K]
+            recon_last = recon_all[:, K - 1]
+            recon_tgt = recon_all[:, K]
+            z_e_last = z_e_all[:, K - 1]     # (B, D, side, side)
+            z_e_tgt = z_e_all[:, K]
+            recon_loss = (fsqvae_loss(recon_last, frame_last)
+                          + fsqvae_loss(recon_tgt, frame_tgt)) / 2
+            slow_loss = grwm_slowness(z_e_last, z_e_tgt)
+            uniform_loss = grwm_uniformity(z_e_last)
+
+            # Build frame_tokens and z_q_ste_context (context frames only)
+            frame_tokens = _build_frame_tokens_joint(indices_all, is_death,
+                                                     alive_tok, death_tok)
+            target = frame_tokens[:, -1]  # (B, TPF+1)
+
+            # Noise on context visual tokens (matches V5 train_epoch logic)
+            if token_noise > 0 or fsq_noise > 0:
+                ctx = frame_tokens[:, :-1].clone()
+                visual = ctx[:, :, :tpf]
+                if token_noise > 0:
+                    mask = torch.rand_like(visual, dtype=torch.float) < token_noise
+                    random_tokens = torch.randint(0, vs, visual.shape, device=device)
+                    visual = torch.where(mask, random_tokens, visual)
+                if fsq_noise > 0 and neighbor_table is not None:
+                    visual = apply_fsq_noise(
+                        visual, neighbor_table, neighbor_counts, fsq_noise, device)
+                ctx[:, :, :tpf] = visual
+                frame_tokens = torch.cat([ctx, frame_tokens[:, -1:]], dim=1)
+
+            z_q_ste_ctx = z_q_all[:, :K]  # (B, K, TPF, D)
+
+            logits, cpc_loss = model(frame_tokens, actions,
+                                      z_q_ste_context=z_q_ste_ctx)
+            token_loss = focal_cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                target.reshape(-1),
+                gamma=focal_gamma,
+                soft_target_matrix=soft_target_matrix,
+                label_smoothing=label_smoothing,
+            )
+            loss = (recon_loss
+                    + alpha_slow * slow_loss
+                    + alpha_uniform * uniform_loss
+                    + token_loss
+                    + cpc_weight * cpc_loss)
+
+        optimizer.zero_grad()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        # Global clip across both transformer and encoder params (matches V5
+        # transformer clip of 1.0; FSQ-side params are a small fraction of
+        # total, so a shared clip is simpler than per-group).
+        all_params = list(model.parameters()) + list(fsq.parameters())
+        torch.nn.utils.clip_grad_norm_(all_params, 1.0)
+        # Record per-source grad norms for the LR/0.25 balance diagnostic.
+        with torch.no_grad():
+            e = sum(p.grad.detach().pow(2).sum().item()
+                    for p in fsq.parameters() if p.grad is not None)
+            t = sum(p.grad.detach().pow(2).sum().item()
+                    for p in model.parameters() if p.grad is not None)
+            enc_grad_sq += e
+            tr_grad_sq += t
+            enc_grad_n += 1
+            tr_grad_n += 1
+        scaler.step(optimizer)
+        scaler.update()
+
+        with torch.no_grad():
+            visual_preds = logits[:, :tpf].argmax(dim=-1)
+            visual_target = target[:, :tpf]
+            total_correct += (visual_preds == visual_target).sum().item()
+            total_tokens += B * tpf
+            total_loss += token_loss.item() * B
+            total_cpc_loss += cpc_loss.item() * B
+            total_recon += recon_loss.item() * B
+            total_slow += slow_loss.item() * B
+            total_unif += uniform_loss.item() * B
+
+            status_target = target[:, tpf]
+            status_pred = logits[:, tpf].argmax(dim=-1)
+            is_d = status_target == death_tok
+            pred_d = status_pred == death_tok
+            death_tp += (pred_d & is_d).sum().item()
+            death_fp += (pred_d & ~is_d).sum().item()
+            death_fn += (~pred_d & is_d).sum().item()
+
+    n_samples = max(1, total_tokens // tpf)
+    death_prec = death_tp / (death_tp + death_fp + 1e-8)
+    death_rec = death_tp / (death_tp + death_fn + 1e-8)
+    death_f1 = 2 * death_prec * death_rec / (death_prec + death_rec + 1e-8)
+    enc_grad_rms = (enc_grad_sq / max(1, enc_grad_n)) ** 0.5
+    tr_grad_rms = (tr_grad_sq / max(1, tr_grad_n)) ** 0.5
+    return {
+        "loss": total_loss / n_samples,
+        "acc": total_correct / max(1, total_tokens),
+        "death_prec": death_prec,
+        "death_rec": death_rec,
+        "death_f1": death_f1,
+        "cpc": total_cpc_loss / n_samples,
+        "recon": total_recon / n_samples,
+        "slow": total_slow / n_samples,
+        "unif": total_unif / n_samples,
+        "enc_grad_rms": enc_grad_rms,
+        "tr_grad_rms": tr_grad_rms,
+    }
+
+
+@torch.no_grad()
+def val_epoch_joint(model, fsq, loader, device, D,
+                    label_smoothing=0.0, focal_gamma=2.0,
+                    soft_target_matrix=None):
+    """Validation: same forward as train but no noise, no grad, no opt."""
+    from deepdash.fsq import fsqvae_loss, grwm_slowness, grwm_uniformity
+
+    model.eval()
+    fsq.eval()
+    m = _unwrap(model)
+    K = m.context_frames
+    tpf = m.tokens_per_frame
+    alive_tok = m.ALIVE_TOKEN
+    death_tok = m.DEATH_TOKEN
+    use_amp = device.type == "cuda"
+
+    total_loss = 0.0
+    total_correct = 0
+    total_tokens = 0
+    total_cpc_loss = 0.0
+    total_recon = 0.0
+    total_slow = 0.0
+    total_unif = 0.0
+    death_tp = death_fp = death_fn = 0
+
+    for raw_frames, actions, is_death in loader:
+        raw_frames = raw_frames.to(device, non_blocking=True)
+        actions = actions.to(device, non_blocking=True)
+        is_death = is_death.to(device, non_blocking=True).bool()
+        B = raw_frames.size(0)
+
+        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+            z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
+                fsq, raw_frames, K, tpf, D)
+            frame_last = frames_f[:, K - 1]
+            frame_tgt = frames_f[:, K]
+            recon_last = recon_all[:, K - 1]
+            recon_tgt = recon_all[:, K]
+            z_e_last = z_e_all[:, K - 1]
+            z_e_tgt = z_e_all[:, K]
+            recon_loss = (fsqvae_loss(recon_last, frame_last)
+                          + fsqvae_loss(recon_tgt, frame_tgt)) / 2
+            slow_loss = grwm_slowness(z_e_last, z_e_tgt)
+            uniform_loss = grwm_uniformity(z_e_last)
+
+            frame_tokens = _build_frame_tokens_joint(indices_all, is_death,
+                                                     alive_tok, death_tok)
+            target = frame_tokens[:, -1]
+            z_q_ste_ctx = z_q_all[:, :K]
+
+            logits, cpc_loss = model(frame_tokens, actions,
+                                      z_q_ste_context=z_q_ste_ctx)
+            token_loss = focal_cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                target.reshape(-1),
+                gamma=focal_gamma,
+                soft_target_matrix=soft_target_matrix,
+                label_smoothing=label_smoothing,
+            )
+
+        total_loss += token_loss.item() * B
+        total_cpc_loss += cpc_loss.item() * B
+        total_recon += recon_loss.item() * B
+        total_slow += slow_loss.item() * B
+        total_unif += uniform_loss.item() * B
+
+        visual_preds = logits[:, :tpf].argmax(dim=-1)
+        visual_target = target[:, :tpf]
+        total_correct += (visual_preds == visual_target).sum().item()
+        total_tokens += B * tpf
+
+        status_target = target[:, tpf]
+        status_pred = logits[:, tpf].argmax(dim=-1)
+        is_d = status_target == death_tok
+        pred_d = status_pred == death_tok
+        death_tp += (pred_d & is_d).sum().item()
+        death_fp += (pred_d & ~is_d).sum().item()
+        death_fn += (~pred_d & is_d).sum().item()
+
+    n_samples = max(1, total_tokens // tpf)
+    death_prec = death_tp / (death_tp + death_fp + 1e-8)
+    death_rec = death_tp / (death_tp + death_fn + 1e-8)
+    death_f1 = 2 * death_prec * death_rec / (death_prec + death_rec + 1e-8)
+    return {
+        "loss": total_loss / n_samples,
+        "acc": total_correct / max(1, total_tokens),
+        "death_prec": death_prec,
+        "death_rec": death_rec,
+        "death_f1": death_f1,
+        "cpc": total_cpc_loss / n_samples,
+        "recon": total_recon / n_samples,
+        "slow": total_slow / n_samples,
+        "unif": total_unif / n_samples,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train Transformer world model")
     parser.add_argument("--episodes-dir", default="data/death_episodes")
@@ -448,6 +760,19 @@ def main():
     parser.add_argument("--death-oversample", type=int, default=None)
     parser.add_argument("--steps-per-epoch", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
+    # E6.1 joint training: unfreeze FSQ, train simultaneously, STE-routed
+    # gradient from transformer losses back to the encoder via
+    # WorldModel.fsq_grad_proj. When --joint is off, the script runs in
+    # V5 mode on pre-tokenized episodes (unchanged).
+    parser.add_argument("--joint", action="store_true", default=None,
+                        help="Enable joint FSQ+Transformer training (E6.1).")
+    parser.add_argument("--fsq-lr", type=float, default=None,
+                        help="Peak LR for the FSQ encoder param group in joint "
+                             "mode. Default: V5 FSQ peak (1e-3).")
+    parser.add_argument("--alpha-slow", type=float, default=None,
+                        help="GRWM temporal slowness weight (joint mode).")
+    parser.add_argument("--alpha-uniform", type=float, default=None,
+                        help="GRWM uniformity weight (joint mode).")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
@@ -473,60 +798,89 @@ def main():
     from deepdash.data_split import get_val_episodes, is_val_episode
     val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
 
+    # Joint mode loads raw frames (frames.npy) and encodes on-the-fly.
+    # V5 mode loads pre-tokenized data (tokens.npy) produced by
+    # scripts/tokenize_episodes.py.
+    joint = bool(getattr(args, "joint", False))
+    source_file = "frames.npy" if joint else "tokens.npy"
+
     episodes_dir = Path(args.episodes_dir)
     all_episodes = sorted(ep for ep in episodes_dir.glob("*")
-                          if (ep / "tokens.npy").exists())
+                          if (ep / source_file).exists())
     death_episodes = set(ep.name for ep in all_episodes)
 
     expert_dir = Path(args.expert_episodes_dir)
     if expert_dir.exists():
         expert_eps = sorted(ep for ep in expert_dir.glob("*")
-                            if (ep / "tokens.npy").exists())
+                            if (ep / source_file).exists())
         all_episodes.extend(expert_eps)
 
     n_train = sum(1 for ep in all_episodes if not is_val_episode(ep.name, val_set))
     n_val = sum(1 for ep in all_episodes if is_val_episode(ep.name, val_set))
-    print(f"Total tokenized episodes: {len(all_episodes)} ({n_train} train, {n_val} val)")
+    label = "raw-frame" if joint else "tokenized"
+    print(f"Total {label} episodes: {len(all_episodes)} ({n_train} train, {n_val} val)")
 
     K = args.context_frames
     TPF = args.tokens_per_frame
-    train_frames, train_actions, train_weights = [], [], []
-    val_frames, val_actions = [], []
 
     n_deaths = 0
-    for ep in all_episodes:
-        tokens = np.load(ep / "tokens.npy")  # (T, TPF)
-        actions = np.load(ep / "actions.npy")  # (T,)
-        T = len(tokens)
-        if T < K + 1:
-            continue
+    if joint:
+        # Raw-frame windows: (T, 64, 64) uint8 + (T,) actions per episode
+        train_rframes, train_actions_l, train_death, train_weights = [], [], [], []
+        val_rframes, val_actions_l, val_death = [], [], []
+        for ep in all_episodes:
+            frames_np = np.load(ep / "frames.npy")    # (T, 64, 64) uint8
+            actions_np = np.load(ep / "actions.npy")  # (T,)
+            T = len(frames_np)
+            if T < K + 1:
+                continue
+            is_val = is_val_episode(ep.name, val_set)
+            rf_list = val_rframes if is_val else train_rframes
+            a_list = val_actions_l if is_val else train_actions_l
+            d_list = val_death if is_val else train_death
+            is_death_ep = ep.name in death_episodes
+            for i in range(T - K):
+                frame_window = frames_np[i:i + K + 1]            # (K+1, 64, 64)
+                action_window = actions_np[i:i + K].astype(np.int64)
+                is_death_frame = is_death_ep and (i + K == T - 1)
+                rf_list.append(frame_window)
+                a_list.append(action_window)
+                d_list.append(bool(is_death_frame))
+                n_deaths += int(is_death_frame)
+                if not is_val:
+                    train_weights.append(
+                        float(args.death_oversample) if is_death_frame else 1.0)
+    else:
+        # V5 tokenized path (unchanged)
+        train_frames, train_actions, train_weights = [], [], []
+        val_frames, val_actions = [], []
+        for ep in all_episodes:
+            tokens = np.load(ep / "tokens.npy")
+            actions = np.load(ep / "actions.npy")
+            T = len(tokens)
+            if T < K + 1:
+                continue
+            is_val = is_val_episode(ep.name, val_set)
+            f_list = val_frames if is_val else train_frames
+            a_list = val_actions if is_val else train_actions
+            for i in range(T - K):
+                frame_window = tokens[i:i + K + 1].astype(np.int64)
+                action_window = actions[i:i + K].astype(np.int64)
+                status = np.full((K + 1, 1), 0, dtype=np.int64)
+                is_death_episode = ep.name in death_episodes
+                is_death_frame = is_death_episode and (i + K == T - 1)
+                if is_death_frame:
+                    status[K] = 1  # remapped to DEATH_TOKEN below
+                n_deaths += int(is_death_frame)
+                frame_with_status = np.concatenate([frame_window, status], axis=1)
+                f_list.append(frame_with_status)
+                a_list.append(action_window)
+                if not is_val:
+                    train_weights.append(
+                        float(args.death_oversample) if is_death_frame else 1.0)
 
-        is_val = is_val_episode(ep.name, val_set)
-        f_list = val_frames if is_val else train_frames
-        a_list = val_actions if is_val else train_actions
-
-        for i in range(T - K):
-            frame_window = tokens[i:i + K + 1].astype(np.int64)  # (K+1, TPF)
-            action_window = actions[i:i + K].astype(np.int64)
-
-            # Append status token to each frame
-            # Target frame (index K in window): DEATH if last frame of a death episode
-            status = np.full((K + 1, 1), 0, dtype=np.int64)
-            is_death_episode = ep.name in death_episodes
-            is_death_frame = is_death_episode and (i + K == T - 1)
-            if is_death_frame:
-                status[K] = 1  # will be mapped to DEATH_TOKEN
-            n_deaths += int(is_death_frame)
-
-            # Pack: (K+1, TPF+1) where last col is status
-            frame_with_status = np.concatenate([frame_window, status], axis=1)
-            f_list.append(frame_with_status)
-            a_list.append(action_window)
-            if not is_val:
-                train_weights.append(
-                    float(args.death_oversample) if is_death_frame else 1.0)
-
-    # Create model first to get token indices
+    # Create model (joint mode wires fsq_dim so fsq_grad_proj is instantiated)
+    fsq_dim = len(args.fsq_levels) if joint else None
     model = WorldModel(
         vocab_size=args.vocab_size,
         n_actions=2,
@@ -537,25 +891,40 @@ def main():
         dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
+        fsq_dim=fsq_dim,
     ).to(device)
 
     # Pre-stack into contiguous tensors (avoids per-item numpy->torch overhead)
     print("Stacking into tensors...")
-    train_frames_t = torch.from_numpy(np.stack(train_frames))
-    train_actions_t = torch.from_numpy(np.stack(train_actions))
-    val_frames_t = torch.from_numpy(np.stack(val_frames))
-    val_actions_t = torch.from_numpy(np.stack(val_actions))
-    del train_frames, train_actions
-    del val_frames, val_actions
+    if joint:
+        from deepdash.fsq import FSQVAE
+        train_frames_t = torch.from_numpy(np.stack(train_rframes))   # uint8 (N, K+1, 64, 64)
+        train_actions_t = torch.from_numpy(np.stack(train_actions_l))
+        train_death_t = torch.from_numpy(np.array(train_death, dtype=np.bool_))
+        val_frames_t = torch.from_numpy(np.stack(val_rframes))
+        val_actions_t = torch.from_numpy(np.stack(val_actions_l))
+        val_death_t = torch.from_numpy(np.array(val_death, dtype=np.bool_))
+        del train_rframes, train_actions_l, train_death
+        del val_rframes, val_actions_l, val_death
+        train_dataset = TensorDataset(train_frames_t, train_actions_t, train_death_t)
+        val_dataset = TensorDataset(val_frames_t, val_actions_t, val_death_t)
+        # Fresh FSQ init (no warm-start from checkpoints_v5_fsq)
+        fsq = FSQVAE(levels=args.fsq_levels).to(device)
+    else:
+        fsq = None
+        train_frames_t = torch.from_numpy(np.stack(train_frames))
+        train_actions_t = torch.from_numpy(np.stack(train_actions))
+        val_frames_t = torch.from_numpy(np.stack(val_frames))
+        val_actions_t = torch.from_numpy(np.stack(val_actions))
+        del train_frames, train_actions
+        del val_frames, val_actions
+        for t in (train_frames_t, val_frames_t):
+            status = t[:, :, -1]
+            status[status == 0] = model.ALIVE_TOKEN
+            status[status == 1] = model.DEATH_TOKEN
+        train_dataset = TensorDataset(train_frames_t, train_actions_t)
+        val_dataset = TensorDataset(val_frames_t, val_actions_t)
 
-    # Remap status column upfront: 0 -> ALIVE_TOKEN, 1 -> DEATH_TOKEN
-    for t in (train_frames_t, val_frames_t):
-        status = t[:, :, -1]
-        status[status == 0] = model.ALIVE_TOKEN
-        status[status == 1] = model.DEATH_TOKEN
-
-    train_dataset = TensorDataset(train_frames_t, train_actions_t)
-    val_dataset = TensorDataset(val_frames_t, val_actions_t)
     print(f"Train samples: {len(train_dataset)} unique, Val samples: {len(val_dataset)}")
     print(f"Death frames: {n_deaths} unique, weighted {args.death_oversample}x via sampler")
 
@@ -576,7 +945,11 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
                             shuffle=True, num_workers=0, pin_memory=True)
 
-    optimizer = build_optimizer(model, args)
+    if joint:
+        fsq_lr_val = args.fsq_lr if args.fsq_lr is not None else 1e-3
+        optimizer = build_optimizer(model, args, fsq_encoder=fsq, fsq_lr=fsq_lr_val)
+    else:
+        optimizer = build_optimizer(model, args)
     # bf16 doesn't need loss scaling; GradScaler with enabled=False is a no-op passthrough
     scaler = torch.GradScaler(device.type, enabled=False)
 
@@ -593,6 +966,8 @@ def main():
         if resume_path.exists():
             resume_state = torch.load(resume_path, map_location=device, weights_only=False)
             model.load_state_dict(resume_state["model"])
+            if joint and "fsq" in resume_state:
+                fsq.load_state_dict(resume_state["fsq"])
             optimizer.load_state_dict(resume_state["optimizer"])
             if "scaler" in resume_state:
                 scaler.load_state_dict(resume_state["scaler"])
@@ -692,6 +1067,16 @@ def main():
                   "val_death_prec", "val_death_rec", "val_death_f1",
                   "val_cpc",
                   "gap", "lr", "time_s"]
+    if joint:
+        # E6.1: merged CSV carries the FSQ aux losses (formerly written to
+        # fsq_log.csv by train_fsq.py) and the per-source grad-norm diagnostic
+        # used to validate the encoder-LR / transformer-LR ratio.
+        log_header += [
+            "train_recon", "train_slow", "train_unif",
+            "val_recon", "val_slow", "val_unif",
+            "encoder_grad_rms", "transformer_grad_rms",
+            "fsq_lr",
+        ]
 
     # On resume: keep all rows up to start_epoch-1, then append
     if log_path.exists() and start_epoch > 1:
@@ -723,22 +1108,56 @@ def main():
     try:
         for epoch in range(start_epoch, args.epochs + 1):
             t0 = time.time()
-            train_loss, train_acc, train_d_prec, train_d_rec, train_d_f1, train_cpc = train_epoch(
-                model, train_loader, optimizer, scaler,
-                args.cpc_weight, device, token_noise=args.token_noise,
-                fsq_noise=args.fsq_noise,
-                neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
-                label_smoothing=args.label_smoothing,
-                focal_gamma=args.focal_gamma,
-                soft_target_matrix=soft_target_matrix)
-            val_loss, val_acc, val_d_prec, val_d_rec, val_d_f1, val_cpc = val_epoch(
-                model, val_loader, device,
-                label_smoothing=args.label_smoothing,
-                focal_gamma=args.focal_gamma,
-                soft_target_matrix=soft_target_matrix)
+            if joint:
+                train_metrics = train_epoch_joint(
+                    model, fsq, train_loader, optimizer, scaler,
+                    args.cpc_weight, device,
+                    args.alpha_slow, args.alpha_uniform, fsq_dim,
+                    token_noise=args.token_noise,
+                    fsq_noise=args.fsq_noise,
+                    neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
+                    label_smoothing=args.label_smoothing,
+                    focal_gamma=args.focal_gamma,
+                    soft_target_matrix=soft_target_matrix)
+                val_metrics = val_epoch_joint(
+                    model, fsq, val_loader, device, fsq_dim,
+                    label_smoothing=args.label_smoothing,
+                    focal_gamma=args.focal_gamma,
+                    soft_target_matrix=soft_target_matrix)
+                train_loss = train_metrics["loss"]
+                train_acc = train_metrics["acc"]
+                train_d_prec = train_metrics["death_prec"]
+                train_d_rec = train_metrics["death_rec"]
+                train_d_f1 = train_metrics["death_f1"]
+                train_cpc = train_metrics["cpc"]
+                val_loss = val_metrics["loss"]
+                val_acc = val_metrics["acc"]
+                val_d_prec = val_metrics["death_prec"]
+                val_d_rec = val_metrics["death_rec"]
+                val_d_f1 = val_metrics["death_f1"]
+                val_cpc = val_metrics["cpc"]
+            else:
+                train_loss, train_acc, train_d_prec, train_d_rec, train_d_f1, train_cpc = train_epoch(
+                    model, train_loader, optimizer, scaler,
+                    args.cpc_weight, device, token_noise=args.token_noise,
+                    fsq_noise=args.fsq_noise,
+                    neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
+                    label_smoothing=args.label_smoothing,
+                    focal_gamma=args.focal_gamma,
+                    soft_target_matrix=soft_target_matrix)
+                val_loss, val_acc, val_d_prec, val_d_rec, val_d_f1, val_cpc = val_epoch(
+                    model, val_loader, device,
+                    label_smoothing=args.label_smoothing,
+                    focal_gamma=args.focal_gamma,
+                    soft_target_matrix=soft_target_matrix)
             scheduler.step()
             dt = time.time() - t0
+            # In joint mode both param groups are driven by the same factor
+            # but have different base_lrs; log both.
             lr = optimizer.param_groups[0]["lr"]
+            fsq_lr_now = (optimizer.param_groups[1]["lr"]
+                          if joint and len(optimizer.param_groups) > 1
+                          else None)
 
             cpc_w = args.cpc_weight
             train_total = train_loss + cpc_w * train_cpc
@@ -754,20 +1173,43 @@ def main():
                 f"death[P={val_d_prec:.3f} R={val_d_rec:.3f} F1={val_d_f1:.3f}] "
                 f"cpc={val_cpc:.3f} | "
                 f"gap={gap:+.4f} | LR: {lr:.1e}"
+                + (f" fsq_LR: {fsq_lr_now:.1e}" if fsq_lr_now is not None else "")
             )
+            if joint:
+                print(
+                    f"  FSQ: train[recon={train_metrics['recon']:.4f} "
+                    f"slow={train_metrics['slow']:.4f} unif={train_metrics['unif']:.4f}] "
+                    f"val[recon={val_metrics['recon']:.4f} "
+                    f"slow={val_metrics['slow']:.4f} unif={val_metrics['unif']:.4f}] "
+                    f"| grad_rms enc={train_metrics['enc_grad_rms']:.3e} "
+                    f"tr={train_metrics['tr_grad_rms']:.3e}"
+                )
 
-            log_writer.writerow([
+            row = [
                 epoch, f"{train_total:.6f}", f"{train_loss:.6f}", f"{train_acc:.4f}",
                 f"{train_d_prec:.4f}", f"{train_d_rec:.4f}", f"{train_d_f1:.4f}",
                 f"{train_cpc:.4f}",
                 f"{val_total:.6f}", f"{val_loss:.6f}", f"{val_acc:.4f}",
                 f"{val_d_prec:.4f}", f"{val_d_rec:.4f}", f"{val_d_f1:.4f}",
                 f"{val_cpc:.4f}",
-                f"{gap:.4f}", f"{lr:.1e}", f"{dt:.1f}"
-            ])
+                f"{gap:.4f}", f"{lr:.1e}", f"{dt:.1f}",
+            ]
+            if joint:
+                row += [
+                    f"{train_metrics['recon']:.6f}",
+                    f"{train_metrics['slow']:.6f}",
+                    f"{train_metrics['unif']:.6f}",
+                    f"{val_metrics['recon']:.6f}",
+                    f"{val_metrics['slow']:.6f}",
+                    f"{val_metrics['unif']:.6f}",
+                    f"{train_metrics['enc_grad_rms']:.6e}",
+                    f"{train_metrics['tr_grad_rms']:.6e}",
+                    f"{fsq_lr_now:.1e}" if fsq_lr_now is not None else "",
+                ]
+            log_writer.writerow(row)
             log_file.flush()
 
-            wandb_log({
+            wandb_payload = {
                 "epoch": epoch,
                 "transformer/train/total": train_total,
                 "transformer/train/loss": train_loss,
@@ -781,10 +1223,23 @@ def main():
                 "transformer/val/cpc": val_cpc,
                 "transformer/gap": gap,
                 "transformer/lr": lr,
-            })
+            }
+            if joint:
+                wandb_payload.update({
+                    "fsq/train/recon": train_metrics["recon"],
+                    "fsq/train/slow": train_metrics["slow"],
+                    "fsq/train/unif": train_metrics["unif"],
+                    "fsq/val/recon": val_metrics["recon"],
+                    "fsq/val/slow": val_metrics["slow"],
+                    "fsq/val/unif": val_metrics["unif"],
+                    "fsq/lr": fsq_lr_now,
+                    "grad/encoder_rms": train_metrics["enc_grad_rms"],
+                    "grad/transformer_rms": train_metrics["tr_grad_rms"],
+                })
+            wandb_log(wandb_payload)
 
             # Save full state
-            torch.save({
+            state_dict = {
                 "epoch": epoch,
                 "model": _unwrap(model).state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -792,12 +1247,17 @@ def main():
                 "scaler": scaler.state_dict(),
                 "best_val_loss": best_val_loss,
                 "wandb_run_id": wandb_run_id(),
-            }, ckpt_dir / "transformer_state.pt")
+            }
+            if joint:
+                state_dict["fsq"] = fsq.state_dict()
+            torch.save(state_dict, ckpt_dir / "transformer_state.pt")
 
             if val_total < best_val_loss:
                 best_val_loss = val_total
                 patience_counter = 0
                 torch.save(_unwrap(model).state_dict(), ckpt_dir / "transformer_best.pt")
+                if joint:
+                    torch.save(fsq.state_dict(), ckpt_dir / "fsq_best.pt")
             else:
                 patience_counter += 1
                 if args.patience > 0 and patience_counter >= args.patience:
@@ -810,7 +1270,7 @@ def main():
 
     except (KeyboardInterrupt, SystemExit):
         print("\nInterrupted — saving checkpoint...")
-        torch.save({
+        interrupt_state = {
             "epoch": epoch,
             "model": _unwrap(model).state_dict(),
             "optimizer": optimizer.state_dict(),
@@ -818,11 +1278,16 @@ def main():
             "scaler": scaler.state_dict(),
             "best_val_loss": best_val_loss,
             "wandb_run_id": wandb_run_id(),
-        }, ckpt_dir / "transformer_state.pt")
+        }
+        if joint:
+            interrupt_state["fsq"] = fsq.state_dict()
+        torch.save(interrupt_state, ckpt_dir / "transformer_state.pt")
 
     log_file.close()
     wandb_finish()
     torch.save(_unwrap(model).state_dict(), ckpt_dir / "transformer_final.pt")
+    if joint:
+        torch.save(fsq.state_dict(), ckpt_dir / "fsq_final.pt")
     print(f"\nTraining complete. Best val total loss: {best_val_loss:.4f}")
     print(f"Checkpoints saved to {ckpt_dir}/")
 
