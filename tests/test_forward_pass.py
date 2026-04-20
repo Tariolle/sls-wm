@@ -265,24 +265,50 @@ class TestLearnableGamma:
         assert gamma.grad.abs().sum().item() > 0, "gamma gradient is exactly zero"
 
 
-class TestEMAUpdate:
-    def test_ema_follows_online(self, device, seed):
-        import sys
-        import copy
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-        from train_world_model import ema_update
-        from deepdash.fsq import FSQVAE
-
+class TestFSQMarginalUniformReg:
+    def test_uniform_input_gives_near_zero_loss(self, device, seed):
+        """Samples drawn exactly from Uniform[-half_d, +half_d] should
+        produce a CvM statistic ~ O(1/M) which is tiny for large M.
+        """
+        from deepdash.fsq import fsq_marginal_uniform_reg
         torch.manual_seed(0)
-        online = FSQVAE(levels=[5, 5, 5, 5]).to(device)
-        target = copy.deepcopy(online)
-        with torch.no_grad():
-            for p in online.parameters():
-                p.add_(torch.randn_like(p) * 0.1)
-        before = [p.clone() for p in target.parameters()]
-        ema_update(target, online, tau=0.9)
-        for p_t_new, p_t_old, p_o in zip(target.parameters(),
-                                          before, online.parameters()):
-            expected = 0.9 * p_t_old + 0.1 * p_o
-            assert torch.allclose(p_t_new, expected, atol=1e-5)
+        levels = [5, 5, 5, 5]
+        half_levels = torch.tensor([L // 2 for L in levels],
+                                    dtype=torch.float32, device=device)
+        D = 4
+        M = 10000
+        # Draw U[-half, +half] per dim
+        z = torch.empty(M, D, 1, 1, device=device)
+        for d in range(D):
+            z[:, d, 0, 0].uniform_(-float(half_levels[d]), float(half_levels[d]))
+        loss = fsq_marginal_uniform_reg(z, half_levels)
+        # CvM on ~10k uniform samples should be well below 1e-3
+        assert loss.item() < 1e-3, f"uniform input gave CvM={loss.item()}"
+
+    def test_concentrated_input_gives_high_loss(self, device, seed):
+        """All-zero samples collapse the empirical CDF to a step at 0,
+        far from Uniform[-half, +half]. CvM should be non-trivial.
+        """
+        from deepdash.fsq import fsq_marginal_uniform_reg
+        levels = [5, 5, 5, 5]
+        half_levels = torch.tensor([L // 2 for L in levels],
+                                    dtype=torch.float32, device=device)
+        D = 4
+        M = 1000
+        z = torch.zeros(M, D, 1, 1, device=device)
+        loss = fsq_marginal_uniform_reg(z, half_levels)
+        # Collapsed samples: CvM >= ~0.08 (analytic for step vs uniform)
+        assert loss.item() > 0.05, f"collapsed input gave CvM={loss.item()}"
+
+    def test_gradient_flows_through(self, device, seed):
+        """Gradient w.r.t. z should be non-zero on non-uniform input."""
+        from deepdash.fsq import fsq_marginal_uniform_reg
+        torch.manual_seed(0)
+        levels = [5, 5, 5, 5]
+        half_levels = torch.tensor([L // 2 for L in levels],
+                                    dtype=torch.float32, device=device)
+        z = torch.randn(500, 4, 1, 1, device=device, requires_grad=True)
+        loss = fsq_marginal_uniform_reg(z, half_levels)
+        loss.backward()
+        assert z.grad is not None
+        assert z.grad.abs().sum().item() > 0

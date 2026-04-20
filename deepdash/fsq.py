@@ -42,6 +42,14 @@ class FSQQuantizer(nn.Module):
         self.register_buffer("half_levels",
                              torch.tensor([L // 2 for L in levels], dtype=torch.float32))
 
+    def bound(self, z_e):
+        """Bound raw encoder output to [-half_d, +half_d] per channel.
+
+        Exposed for regularizers that need the pre-round bounded representation.
+        """
+        half = self.half_levels.view(1, -1, 1, 1)
+        return (2.0 * torch.sigmoid(1.6 * z_e) - 1.0) * half
+
     def forward(self, z_e):
         """Quantize encoder output via iFSQ bounding + round.
 
@@ -60,7 +68,7 @@ class FSQQuantizer(nn.Module):
         # Even L: values in {-L/2+1, ..., L/2}  then shift by -0.5 to center
         # Following the FSQ paper's approach for even levels.
         half = self.half_levels.view(1, -1, 1, 1)  # (1, D, 1, 1)
-        z_bounded = (2.0 * torch.sigmoid(1.6 * z_e) - 1.0) * half
+        z_bounded = self.bound(z_e)
         z_q = z_bounded.round()
         # Clamp to valid range to handle even levels correctly
         levels = self.levels.float().view(1, -1, 1, 1)
@@ -215,3 +223,39 @@ def grwm_uniformity(z_e, t=2.0):
     # Pairwise squared distances
     sq_dists = torch.cdist(z_flat, z_flat).pow(2)  # (B, B)
     return sq_dists.mul(-t).exp().mean().log()
+
+
+def fsq_marginal_uniform_reg(z_bounded, half_levels):
+    """Anti-collapse regularizer: per-dim Cramér-von Mises distance from
+    Uniform[-half_d, +half_d].
+
+    FSQ dimensions are factorized by construction (each dim quantized
+    independently). The joint target Uniform([-half_1, half_1] x ... x
+    [-half_D, half_D]) factorizes into D independent 1D uniforms, so we
+    can test each 1D marginal directly — no Cramér-Wold sketching needed
+    (unlike SIGReg for continuous embeddings with non-factorized targets).
+
+    Cramér-von Mises is used instead of KS because it's smooth throughout
+    (no sup), giving better gradients. For sorted samples h_(1) <= ... <=
+    h_(M) with target CDF F, CvM = mean_i (F(h_(i)) - (i-0.5)/M)^2.
+
+    Args:
+        z_bounded: (..., D, H, W) tensor with values in [-half_d, +half_d]
+                   per channel d (post-sigmoid-bound, pre-round).
+        half_levels: (D,) float tensor of per-dim half-levels.
+
+    Returns:
+        scalar CvM statistic averaged across D dims.
+    """
+    # Flatten all non-channel dims to (D, M)
+    D = z_bounded.shape[-3]
+    z_flat = z_bounded.transpose(0, -3).reshape(D, -1)  # (D, M_total)
+    M = z_flat.shape[1]
+    # Empirical CDF evaluation points for sorted samples: (i-0.5)/M
+    i_emp = (torch.arange(M, device=z_flat.device, dtype=z_flat.dtype) + 0.5) / M
+    h_sorted, _ = z_flat.sort(dim=1)  # (D, M)
+    half = half_levels.to(z_flat.device, dtype=z_flat.dtype).view(D, 1)
+    # Target CDF of Uniform[-half_d, +half_d] evaluated at sorted samples
+    cdf_target = ((h_sorted + half) / (2.0 * half)).clamp(0.0, 1.0)
+    cvm = (cdf_target - i_emp.unsqueeze(0)).pow(2).mean(dim=1)  # (D,)
+    return cvm.mean()

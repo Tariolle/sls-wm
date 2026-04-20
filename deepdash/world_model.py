@@ -366,7 +366,8 @@ class WorldModel(nn.Module):
 
         return total_loss / max(n_pairs, 1)
 
-    def forward(self, frame_tokens, actions, z_q_ste_context=None):
+    def forward(self, frame_tokens, actions, z_q_ste_context=None,
+                return_dense_logits=False):
         """Forward pass: predict all target tokens from context.
 
         All target positions are replaced with mask_embed (no ground truth
@@ -386,10 +387,20 @@ class WorldModel(nn.Module):
                 back to the FSQ encoder. Status position (index
                 tokens_per_frame) receives no correction. When None, V5
                 behavior is byte-identical.
+            return_dense_logits: if True (AdaLN only), also returns logits
+                at every context block position so callers can apply dense
+                next-frame-prediction CE. Ignored in non-AdaLN mode.
 
         Returns:
-            logits: (B, block_size, full_vocab_size) — predictions for all target positions.
+            logits: (B, block_size, full_vocab_size) — predictions for the
+                masked target block (frame K). Shape unchanged across modes
+                so downstream callers keep working.
             cpc_loss: scalar — AC-CPC contrastive loss.
+            dense_logits: only returned when return_dense_logits=True and
+                AdaLN is enabled; shape (B, K, block_size, full_vocab_size)
+                — logits at each context block's positions for predicting
+                the NEXT frame's tokens (block i -> frame i+1). None in
+                non-AdaLN mode.
         """
         B = frame_tokens.size(0)
         K = self.context_frames
@@ -446,6 +457,17 @@ class WorldModel(nn.Module):
         predict_positions = x[:, ctx_end:ctx_end + self.block_size]  # (B, 65, D)
         logits = self.head(predict_positions)  # (B, 65, full_vocab_size)
 
+        # Dense next-frame-prediction logits: block i (i<K) -> frame i+1.
+        # Only defined for AdaLN mode where context blocks are contiguous
+        # (non-AdaLN interleaves actions and would need skip-indexing).
+        dense_logits = None
+        if return_dense_logits and self.adaln:
+            # Context blocks occupy positions [0, K*block_size).
+            ctx_positions = x[:, :K * self.block_size]  # (B, K*block_size, D)
+            ctx_logits = self.head(ctx_positions)
+            dense_logits = ctx_logits.view(
+                B, K, self.block_size, -1)  # (B, K, block_size, V)
+
         if self.use_cpc:
             cpc_loss = self._compute_cpc_loss(x, actions)
         else:
@@ -453,6 +475,8 @@ class WorldModel(nn.Module):
             # EMA teacher tokens replaces the contrastive objective.
             cpc_loss = torch.zeros((), device=x.device, dtype=x.dtype)
 
+        if return_dense_logits:
+            return logits, cpc_loss, dense_logits
         return logits, cpc_loss
 
     @staticmethod

@@ -60,6 +60,7 @@ def encode_all(model, frames, batch_size, device):
     """Encode frames to quantized codes; keep images for later reconstruction."""
     all_z_q = []
     all_imgs = []
+    all_indices = []
     with torch.no_grad():
         for i in range(0, len(frames), batch_size):
             batch = torch.from_numpy(
@@ -67,9 +68,32 @@ def encode_all(model, frames, batch_size, device):
             ).unsqueeze(1).to(device)
             z_e = model.encoder(batch)
             z_q, _ = model.fsq(z_e)
+            indices = model.encode(batch)  # (B, side, side) flat code ids
             all_z_q.append(z_q.cpu())
             all_imgs.append(batch.cpu())
-    return torch.cat(all_z_q), torch.cat(all_imgs)
+            all_indices.append(indices.cpu())
+    return torch.cat(all_z_q), torch.cat(all_imgs), torch.cat(all_indices)
+
+
+def codebook_usage(indices, levels):
+    """Compute codebook usage % and perplexity over a tensor of flat code ids.
+
+    indices: long tensor of any shape, values in [0, prod(levels)).
+    Returns (usage_pct, perplexity, n_used, vocab_size).
+    """
+    vocab_size = int(np.prod(levels))
+    flat = indices.reshape(-1).long()
+    counts = torch.zeros(vocab_size, dtype=torch.long)
+    counts.scatter_add_(0, flat, torch.ones_like(flat, dtype=torch.long))
+    n_used = int((counts > 0).sum().item())
+    usage_pct = 100.0 * n_used / vocab_size
+    total = int(counts.sum().item())
+    if total == 0:
+        return usage_pct, 0.0, n_used, vocab_size
+    p = counts.to(torch.float64) / float(total)
+    p_nz = p[p > 0]
+    entropy = float(-(p_nz * p_nz.log()).sum().item())
+    return usage_pct, float(np.exp(entropy)), n_used, vocab_size
 
 
 # -------- Perturbation specs --------
@@ -369,7 +393,16 @@ def run_analysis(args, device):
     print(f"Loaded {len(frames)} frames", flush=True)
 
     print("Encoding...", flush=True)
-    all_z_q, all_imgs = encode_all(model, frames, args.batch_size, device)
+    all_z_q, all_imgs, all_indices = encode_all(
+        model, frames, args.batch_size, device)
+
+    usage_pct, ppl, n_used, vocab_size = codebook_usage(
+        all_indices, args.levels)
+    print(f"\n== Codebook usage ==", flush=True)
+    print(f"  codes used: {n_used}/{vocab_size} "
+          f"({usage_pct:.2f}%)")
+    print(f"  perplexity: {ppl:.2f} "
+          f"(max={vocab_size} uniform, 1=single-code collapse)")
 
     specs = generate_perturbations(args.levels)
     print(f"Generated {len(specs)} perturbations", flush=True)
@@ -509,6 +542,12 @@ def run_analysis(args, device):
         'levels': args.levels,
         'n_frames': int(len(all_z_q)),
         'n_perturbations': len(specs),
+        'codebook': {
+            'n_used': n_used,
+            'vocab_size': vocab_size,
+            'usage_pct': float(usage_pct),
+            'perplexity': float(ppl),
+        },
         'dim_weights': [float(w) for w in dim_weights],
         'perturbations': {
             spec.name: {

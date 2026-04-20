@@ -13,9 +13,9 @@
 # Train the world model (FSQ + Transformer) on A100 via
 # scripts/train_world_model.py. Joint mode is the forward path; FSQ is
 # trained jointly with the transformer, no pre-tokenisation required.
-# Current E6.x candidate is configs/e6.2-jepa.yaml (JEPA EMA target +
-# learnable γ + detached decoder viewer). Fallback to e6.1-joint.yaml
-# (AC-CPC retained) if E6.2 fails. V5 tokenised-input mode is legacy.
+# Current E6.x candidate is configs/e6.4-cwureg.yaml (joint + per-dim
+# CvM uniform-marginal regularizer + encoder recon; SLS disabled pending
+# stable codebook geometry). V5 tokenised-input mode is legacy.
 # Auto-resumes: SLURM sends USR1 5 min before time limit, the trap
 # saves checkpoint and resubmits the job.
 #
