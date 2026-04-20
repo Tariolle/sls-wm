@@ -52,7 +52,7 @@ V5 baseline = FSQ [5,5,5,5] + Transformer with calibrated SLS (`sigma=0.9`, `dim
 | Val accuracy | 0.3215 |
 | Val death P/R/F1 | 0.666 / 0.885 / 0.760 |
 | Controller params | ~265K |
-| Controller / deployment | pending (controller gate run in progress) |
+| Controller (PPO on V5 dreams) | underperforming — not dream-bounded (dreams improved over V4) but controller / hidden-state-bounded: the MLP head on `h_t` could not master the richer V5 dynamics. Motivates the post-V5 work (joint encoder/transformer training + Dreamer-style AC replacing PPO). |
 
 Full V0 -> V5 evolution with per-version decisions and ablation trails is in [VERSIONS.md](VERSIONS.md).
 
@@ -94,26 +94,25 @@ Full V0 -> V5 evolution with per-version decisions and ablation trails is in [VE
 
 ### Training Throughput (A100)
 
-Benchmarked 11 configurations (all `torch.compile` modes × precisions) with subprocess isolation to prevent CUDA allocator fragmentation. Winning config applied to all training scripts:
+Benchmarked all `torch.compile` modes × precisions with subprocess isolation to prevent CUDA allocator fragmentation. Winning config applied to all training scripts:
 
 | Config | ms/step | Speedup |
 |--------|---------|---------|
 | Eager FP32 (baseline) | ~2036ms | 1.00x |
 | Compile default + BF16 | ~317ms | 6.42x |
 | **Compile reduce-overhead + BF16** | **~314ms** | **6.48x** |
-| Compile max-autotune + BF16 | ~311ms | 6.55x |
 
-`reduce-overhead` is our default -- best of both worlds: faster than `default` and without the ~10-minute autotune phase `max-autotune` adds at startup for only ~1% more steady-state throughput.
+`reduce-overhead` + BF16 is the default at our scale: best of both worlds — faster than `default`, and without the long autotune startup of `max-autotune` which at our model size only yields ~1% more steady-state throughput.
 
 ### Controller
 - **BC**: death + expert episodes, class-weighted BCE (1.5x jumps), early stopping
 - **PPO**: clipped surrogate, jump penalty 0.2/jump, percentile-based advantage normalization, EMA target critic (0.98), 45-step dream rollouts, constant LR 1e-4
-- **BC ablation (V4)**: cold-start PPO converges to the same plateau as BC-initialized PPO but needs ~2,000 extra iterations (~6h on A100). BC itself takes ~5 min. ROI: 5 min saves 6 hours.
+- **BC ablation (V4)**: cold-start PPO converges to the same plateau as BC-initialized PPO but needs ~2,000 extra iterations (~6h on A100). BC itself takes ~5 min. ROI: 5 min saves 6 hours. Not re-run post-V4 — literature and this ablation agree that BC init is a clear win; BC is kept in the pipeline.
 
 ### Deployment
 - Screen capture (dxcam), Sobel (7ms, GPU), FSQ encode (4ms), Transformer h_t (14ms), Controller (1ms), keyboard input
 - GPU token ring buffer (no CPU round-trip), CUDA Graph for encode_context, pinned memory transfer
-- torch.compile on all platforms (PyTorch 2.11+)
+- torch.compile on all platforms (PyTorch 2.10)
 - 30 FPS real-time
 
 ## Version History
