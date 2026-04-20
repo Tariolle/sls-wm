@@ -520,7 +520,7 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
 # Joint training helpers (E6.1: unfreeze FSQ, train simultaneously)
 # -------------------------------------------------------------------------
 
-def _encode_joint(fsq, raw_frames, K, tpf, D, fsq_dim_side=8):
+def _encode_joint(fsq, raw_frames, K, tpf, D, fsq_dim_side=8, run_decoder=True):
     """Run raw frame windows through the FSQ encoder and produce everything
     the transformer + aux losses need.
 
@@ -531,12 +531,15 @@ def _encode_joint(fsq, raw_frames, K, tpf, D, fsq_dim_side=8):
         tpf: tokens_per_frame (== fsq_dim_side ** 2).
         D: FSQ latent dim (= len(levels)).
         fsq_dim_side: spatial side of the encoder output (8 for 64x64 -> 8x8).
+        run_decoder: if False, skip the decoder forward and return recon_all=None.
+            Used by E6.5 pure-JEPA where the decoder is not part of training.
 
     Returns:
         z_e_all:   (B, K+1, D, side, side)  - continuous encoder output.
         z_q_all:   (B, K+1, tpf, D)         - quantized codes (STE inside fsq).
         indices_all: (B, K+1, tpf)          - discrete code indices.
-        recon_all: (B, K+1, 1, 64, 64)      - decoded frames (for recon loss).
+        recon_all: (B, K+1, 1, 64, 64) or None  - decoded frames (None if
+                   run_decoder=False).
         frames_f:  (B, K+1, 1, 64, 64)      - normalized float [0, 1] frames
                                               (matches what decoder targets).
     """
@@ -545,13 +548,16 @@ def _encode_joint(fsq, raw_frames, K, tpf, D, fsq_dim_side=8):
     flat = frames_f.view(B * (K + 1), 1, 64, 64)
     z_e = fsq.encoder(flat)                         # (B*(K+1), D, side, side)
     z_q, indices = fsq.fsq(z_e)                     # (B*(K+1), D, side, side), (B*(K+1), side, side)
-    recon = fsq.decoder(z_q)                        # (B*(K+1), 1, 64, 64)
     side = fsq_dim_side
     z_e_all = z_e.view(B, K + 1, D, side, side)
     # (B*(K+1), D, side, side) -> (B, K+1, side*side, D) for transformer consumption
     z_q_all = z_q.view(B, K + 1, D, side * side).permute(0, 1, 3, 2).contiguous()
     indices_all = indices.view(B, K + 1, side * side)
-    recon_all = recon.view(B, K + 1, 1, 64, 64)
+    if run_decoder:
+        recon = fsq.decoder(z_q)                    # (B*(K+1), 1, 64, 64)
+        recon_all = recon.view(B, K + 1, 1, 64, 64)
+    else:
+        recon_all = None
     return z_e_all, z_q_all, indices_all, recon_all, frames_f
 
 
@@ -594,7 +600,7 @@ class JointStep(nn.Module):
 
     def __init__(self, fsq, wm, *, alpha_uniform, cpc_weight,
                  label_smoothing, focal_gamma, token_noise, fsq_noise,
-                 shift_max=0,
+                 shift_max=0, use_recon=True,
                  neighbor_table=None, neighbor_counts=None,
                  soft_target_matrix=None,
                  fsq_levels=None, fsq_sigma=0.9):
@@ -613,6 +619,10 @@ class JointStep(nn.Module):
         self.focal_gamma = float(focal_gamma)
         self.token_noise = float(token_noise)
         self.fsq_noise = float(fsq_noise)
+        # E6.5 pure-JEPA: skip decoder forward + recon loss entirely.
+        # Anti-collapse falls to CWU-reg alone; encoder is shaped purely
+        # by prediction-CE via STE. See configs/e6.5-jepa.yaml.
+        self.use_recon = bool(use_recon)
         # Learnable γ parameters live on self.wm.sls_gamma (so they join
         # the transformer optimizer group via wm.parameters()). We only
         # need the coord table + sigma here for building targets on-the-fly.
@@ -672,7 +682,8 @@ class JointStep(nn.Module):
             raw_frames = raw_frames.index_select(-2, row_idx)
 
         z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
-            self.fsq, raw_frames, K, tpf, fsq_dim)
+            self.fsq, raw_frames, K, tpf, fsq_dim,
+            run_decoder=self.use_recon)
 
         frame_last = frames_f[:, K - 1]
         frame_tgt = frames_f[:, K]
@@ -696,13 +707,18 @@ class JointStep(nn.Module):
         ]).mean()
 
         # Reconstruction anchor: full FSQ recon loss with gradient to the
-        # encoder. Required for joint training to preserve the codebook's
-        # information content (detached-viewer-only proved insufficient,
-        # see E6.2 diagnostic).
-        recon_last = recon_all[:, K - 1]
-        recon_tgt = recon_all[:, K]
-        recon_loss = (fsqvae_loss(recon_last, frame_last)
-                      + fsqvae_loss(recon_tgt, frame_tgt)) / 2
+        # encoder. E6.4 retains this as the pixel anchor; E6.5 drops it
+        # (use_recon=False) so the encoder is shaped purely by prediction-
+        # CE via STE + CWU-reg, with a post-hoc decoder trained on frozen
+        # z afterwards for visualization only.
+        if self.use_recon:
+            recon_last = recon_all[:, K - 1]
+            recon_tgt = recon_all[:, K]
+            recon_loss = (fsqvae_loss(recon_last, frame_last)
+                          + fsqvae_loss(recon_tgt, frame_tgt)) / 2
+        else:
+            recon_loss = torch.zeros((), device=raw_frames.device,
+                                     dtype=frames_f.dtype)
 
         # Target indices come from the online encoder on the target frame.
         # CE against discrete targets is non-differentiable at the argmax
@@ -1094,6 +1110,15 @@ def main():
                         help="Include AC-CPC in the joint loss. V5/E6.1 used "
                              "True; E6.2+ (JEPA-style CE-against-online) uses "
                              "False.")
+    parser.add_argument("--use-recon", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Include the FSQ recon loss (decoder + MSE) in "
+                             "the joint training loss. V5/E6.1/E6.4 set True; "
+                             "E6.5 pure-JEPA sets False to drop the decoder "
+                             "from training and let CWU-reg carry anti-"
+                             "collapse alone. When False, a post-hoc decoder "
+                             "must be trained on the frozen encoder z for "
+                             "visualization (scripts/train_posthoc_decoder.py).")
     parser.add_argument("--learnable-gamma", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="When True (E6.3): gamma is an nn.Parameter, target "
@@ -1223,6 +1248,7 @@ def main():
     # E6.4 CWU-reg redesign — joint training now relies on recon +
     # uniform-marginal regularizer + token CE only.
     use_cpc = bool(getattr(args, "use_cpc", True) if getattr(args, "use_cpc", None) is not None else True)
+    use_recon = bool(getattr(args, "use_recon", True) if getattr(args, "use_recon", None) is not None else True)
     learnable_gamma = bool(getattr(args, "learnable_gamma", False) if getattr(args, "learnable_gamma", None) is not None else False)
 
     # gamma init: capacity-ratio normalised so uniform codebooks give
@@ -1480,7 +1506,7 @@ def main():
             label_smoothing=args.label_smoothing,
             focal_gamma=args.focal_gamma,
             token_noise=args.token_noise, fsq_noise=args.fsq_noise,
-            shift_max=shift_max,
+            shift_max=shift_max, use_recon=use_recon,
             neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
             soft_target_matrix=soft_tm_for_joint,
             **joint_kwargs_common,
@@ -1492,7 +1518,7 @@ def main():
             label_smoothing=args.label_smoothing,
             focal_gamma=args.focal_gamma,
             token_noise=0.0, fsq_noise=0.0,          # no noise at eval
-            shift_max=0,                              # no shift at eval
+            shift_max=0, use_recon=use_recon,         # no shift at eval
             neighbor_table=None, neighbor_counts=None,
             soft_target_matrix=soft_tm_for_joint,
             **joint_kwargs_common,
