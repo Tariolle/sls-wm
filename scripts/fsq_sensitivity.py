@@ -336,8 +336,30 @@ def cv_fit(kernel, specs, similarities, dim_weights, seed):
     return p_full, fit_full, (cv_a + cv_b) / 2.0
 
 
+def _pearson_r(kernel, specs, similarities, dim_weights, params):
+    """Pearson correlation between predicted and observed similarities on
+    the full spec set. More legible than fit_mse for intuitive kernel
+    quality: r=0.95 vs r=0.85 is much more interpretable than
+    fit_mse=1.2e-3 vs 8.6e-3. Does not depend on the normalization used
+    by fit_mse.
+    """
+    dw = np.asarray(dim_weights, dtype=np.float64)
+    params_use = params if len(np.atleast_1d(params)) > 1 else np.atleast_1d(params)[0]
+    preds = np.array([
+        kernel_value(kernel, params_use,
+                     np.asarray(s.step_by_dim, dtype=np.float64) * dw)
+        for s in specs
+    ])
+    tgts = np.asarray(similarities, dtype=np.float64)
+    if preds.std() < 1e-12 or tgts.std() < 1e-12:
+        return 0.0
+    return float(np.corrcoef(preds, tgts)[0, 1])
+
+
 def multi_seed_fit(kernel, specs, similarities, dim_weights, seeds):
-    """Repeat cv_fit across seeds; report mean params and mean CV MSE."""
+    """Repeat cv_fit across seeds; report mean params, mean CV MSE, and
+    Pearson r of the mean-param predictions against observed similarities.
+    """
     p_list = []
     fit_list = []
     cv_list = []
@@ -347,11 +369,14 @@ def multi_seed_fit(kernel, specs, similarities, dim_weights, seeds):
         fit_list.append(fit_mse)
         cv_list.append(cv_mse)
     p_arr = np.array(p_list)
+    params_mean = p_arr.mean(axis=0)
+    pearson_r = _pearson_r(kernel, specs, similarities, dim_weights, params_mean)
     return {
-        'params_mean': p_arr.mean(axis=0),
+        'params_mean': params_mean,
         'params_std': p_arr.std(axis=0),
         'fit_mse': float(np.mean(fit_list)),
         'cv_mse': float(np.mean(cv_list)),
+        'pearson_r': float(pearson_r),
     }
 
 
@@ -437,12 +462,78 @@ def run_analysis(args, device):
         [mse_ratios[single_one_idx[d]][0] for d in range(n_dims)])
     dim_weights = (dim_ratio_means / dim_ratio_means.mean()).tolist()
 
+    # Isotropy score. 0 = perfectly isotropic (every dim equally sensitive),
+    # >~0.15 = notable anisotropy that a calibrated kernel captures better
+    # than an isotropic one. Under frozen FSQ this tells you how wrong
+    # isotropic kernel would be; under joint FSQ training it tells you how
+    # far the encoder had to adapt to match the training kernel (or failed
+    # to, if training kernel was isotropic).
+    dw_arr = np.array(dim_weights)
+    anisotropy = float(dw_arr.std() / max(dw_arr.mean(), 1e-12))
+
+    # Per-dim sensitivity quantiles over the per-frame MSE ratio
+    # distribution. Tight quantiles = every code is equally sensitive to
+    # this dim (isotropy in the stronger, per-code sense, not just in the
+    # aggregate mean). Wide / multi-modal quantiles = some codes are much
+    # more sensitive than others, meaning an isotropic kernel will miss
+    # local structure even if the mean looks flat.
+    dim_quantiles = {}
+    for d in range(n_dims):
+        k = single_one_idx[d]
+        per_frame_ratio = mse_pert[k] / np.maximum(mse_base, 1e-12)
+        q = np.percentile(per_frame_ratio, [10, 25, 50, 75, 90])
+        dim_quantiles[d] = q
+
     # Reports
     print(f"\n== Dim weights (from +1 step MSE ratios, 95% CI) ==", flush=True)
+    print(f"  {'dim':<5} {'mean':>8} {'95% CI':>18}  "
+          f"{'p10':>6} {'p25':>6} {'p50':>6} {'p75':>6} {'p90':>6}")
     for d in range(n_dims):
         r, lo, hi = mse_ratios[single_one_idx[d]]
-        print(f"  dim{d}  {r:.3f}x  [{lo:.3f}, {hi:.3f}]")
+        q = dim_quantiles[d]
+        print(f"  dim{d:<2} {r:>7.3f}x  [{lo:>5.2f}, {hi:>5.2f}]  "
+              f"{q[0]:>6.2f} {q[1]:>6.2f} {q[2]:>6.2f} {q[3]:>6.2f} {q[4]:>6.2f}")
     print(f"Normalized dim_weights: {[round(w, 3) for w in dim_weights]}")
+    print(f"Anisotropy = std(dim_weights) / mean(dim_weights) = {anisotropy:.3f}")
+    if anisotropy < 0.05:
+        print("  -> codebook is near-perfectly isotropic (isotropic kernel suffices)")
+    elif anisotropy < 0.15:
+        print("  -> mild anisotropy (calibrated kernel modestly better than isotropic)")
+    else:
+        print("  -> strong anisotropy (calibrated kernel meaningfully better)")
+
+    # Cross-dim coupling matrix. C[i, j] measures how far (d_i+1, d_j+1)'s
+    # joint MSE ratio deviates from a separable additive prediction. Near
+    # zero -> dims are independent (diagonal metric is adequate). Non-zero
+    # off-diagonal -> codebook has a full metric tensor; even an optimal
+    # diagonal kernel (dim_weights) under-specifies it.
+    single_plus_one = {d: mse_ratios[single_one_idx[d]][0] for d in range(n_dims)}
+    pair_idx = {}
+    for i, spec in enumerate(specs):
+        nz = spec.nonzero_steps()
+        if len(nz) == 2 and all(s == 1 for _, s in nz):
+            d1, d2 = sorted(d for d, _ in nz)
+            pair_idx[(d1, d2)] = i
+    coupling = np.zeros((n_dims, n_dims), dtype=np.float64)
+    for (d1, d2), i in pair_idx.items():
+        measured = mse_ratios[i][0]
+        add_pred = (single_plus_one[d1] - 1) + (single_plus_one[d2] - 1) + 1
+        rel = (measured - add_pred) / max(measured, 1e-12)
+        coupling[d1, d2] = rel
+        coupling[d2, d1] = rel
+    off_diag_max = float(np.max(np.abs(coupling - np.diag(np.diag(coupling)))))
+    print(f"\n== Cross-dim coupling matrix (relative deviation from additive) ==")
+    print(f"  {'':4s} " + " ".join(f"{f'dim{j}':>8}" for j in range(n_dims)))
+    for i in range(n_dims):
+        row = " ".join(f"{coupling[i, j]:>+8.3f}" for j in range(n_dims))
+        print(f"  dim{i:<2} {row}")
+    print(f"Max |off-diagonal| coupling: {off_diag_max:.3f}")
+    if off_diag_max < 0.05:
+        print("  -> dims are essentially separable (diagonal kernel adequate)")
+    elif off_diag_max < 0.15:
+        print("  -> weak coupling (diagonal kernel a modest simplification)")
+    else:
+        print("  -> strong coupling (diagonal kernel under-specifies codebook)")
 
     print(f"\n== Perturbation ratios ==")
     header = f"{'Perturbation':<30} {'MSE':>9} {'95% CI':>18}"
@@ -458,8 +549,8 @@ def run_analysis(args, device):
             line += f"   {r2:>8.3f}x [{lo2:>5.2f}, {hi2:>5.2f}]"
         print(line)
 
-    # Qualitative compounding note (L1 vs L2)
-    single_plus_one = {d: mse_ratios[single_one_idx[d]][0] for d in range(n_dims)}
+    # Qualitative compounding note (L1 vs L2). single_plus_one already
+    # defined earlier for the coupling-matrix block; reused here.
     add_errs, mul_errs = [], []
     for k in range(2, n_dims + 1):
         for combo in combinations(range(n_dims), k):
@@ -493,8 +584,9 @@ def run_analysis(args, device):
     results = {}
     for metric_name, sim in metric_sims.items():
         print(f"\n== Kernel comparison ({metric_name.upper()} similarity) ==")
-        print(f"{'Kernel':<18} {'Params':<52} {'Fit MSE':>10} {'CV MSE':>10} {'AIC':>10}")
-        print("-" * 102)
+        print(f"{'Kernel':<18} {'Params':<52} {'Fit MSE':>10} {'CV MSE':>10} "
+              f"{'Pearson r':>10} {'AIC':>10}")
+        print("-" * 113)
         results[metric_name] = {}
         for kernel in args.kernels:
             res = multi_seed_fit(kernel, specs, sim, dim_weights, seeds)
@@ -504,11 +596,13 @@ def run_analysis(args, device):
                 'params_std': res['params_std'].tolist(),
                 'fit_mse': res['fit_mse'],
                 'cv_mse': res['cv_mse'],
+                'pearson_r': res['pearson_r'],
                 'aic': float(aic_val),
             }
             params_str = format_params(res['params_mean'], res['params_std'])
             print(f"{kernel:<18} {params_str:<52} {res['fit_mse']:>10.2e} "
-                  f"{res['cv_mse']:>10.2e} {aic_val:>10.2f}")
+                  f"{res['cv_mse']:>10.2e} {res['pearson_r']:>10.3f} "
+                  f"{aic_val:>10.2f}")
         best = min(
             ((k, v) for k, v in results[metric_name].items() if isinstance(v, dict)),
             key=lambda kv: kv[1]['cv_mse'],
@@ -549,6 +643,20 @@ def run_analysis(args, device):
             'perplexity': float(ppl),
         },
         'dim_weights': [float(w) for w in dim_weights],
+        'anisotropy': float(anisotropy),
+        'dim_quantiles': {
+            f'dim{d}': {'p10': float(dim_quantiles[d][0]),
+                        'p25': float(dim_quantiles[d][1]),
+                        'p50': float(dim_quantiles[d][2]),
+                        'p75': float(dim_quantiles[d][3]),
+                        'p90': float(dim_quantiles[d][4])}
+            for d in range(n_dims)
+        },
+        'coupling': {
+            f'dim{i}_dim{j}': float(coupling[i, j])
+            for i in range(n_dims) for j in range(n_dims) if i <= j
+        },
+        'coupling_max_off_diagonal': float(off_diag_max),
         'perturbations': {
             spec.name: {
                 'mse': {'mean': float(mse_ratios[k][0]),
