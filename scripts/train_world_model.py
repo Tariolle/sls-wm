@@ -1053,7 +1053,6 @@ def main():
                         help="Per-dimension distance weights for structured smoothing")
     parser.add_argument("--focal-gamma", type=float, default=None)
     parser.add_argument("--death-oversample", type=int, default=None)
-    parser.add_argument("--steps-per-epoch", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     # Mixed precision + compile (mirrors train_fsq.py conventions).
     # A100 defaults: bfloat16 + reduce-overhead. RTX 2060 SUPER (Turing) has
@@ -1300,11 +1299,13 @@ def main():
     print(f"Context: {args.context_frames} frames, Sequence length: {model.seq_len}")
     print(f"Vocab: {args.vocab_size} visual + 2 status = {model.full_vocab_size}")
 
-    # Cap samples per epoch if --steps-per-epoch is set
-    if args.steps_per_epoch > 0:
-        num_samples = args.steps_per_epoch * args.batch_size
-    else:
-        num_samples = int(sum(train_weights))
+    # One weighted pass per epoch. With death_oversample=N, num_samples =
+    # sum(weights) = N * n_deaths + n_non_deaths: each unit of weight is
+    # drawn once in expectation, giving death frames N expected draws per
+    # epoch. Previously --steps-per-epoch capped this; dropped because
+    # on-the-fly shift augmentation makes the effective dataset much
+    # smaller than the old pre-shifted episode ladder that justified a cap.
+    num_samples = int(sum(train_weights))
     train_sampler = WeightedRandomSampler(
         train_weights, num_samples=num_samples, replacement=True)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,

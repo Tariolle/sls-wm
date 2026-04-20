@@ -48,7 +48,6 @@ transformer:
   fsq_sigma: 0.9        # only consumed if learnable_gamma=true (unused here)
   focal_gamma: 2.0
   death_oversample: 4
-  steps_per_epoch: 500
   seed: 42
   checkpoint_dir: checkpoints_e6.4
   # Joint

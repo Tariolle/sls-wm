@@ -53,7 +53,6 @@ transformer:
   fsq_dim_weights: [1.29, 0.85, 0.97, 0.89]
   focal_gamma: 2.0
   death_oversample: 4
-  steps_per_epoch: 500
   seed: 42
   checkpoint_dir: checkpoints
 
