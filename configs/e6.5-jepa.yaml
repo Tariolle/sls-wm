@@ -1,0 +1,117 @@
+# E6.5 pure-JEPA: joint FSQ + Transformer with CWU-reg as sole anti-collapse.
+# The decoder is removed from training; a post-hoc decoder is trained on
+# frozen z afterward for visualization only (play_dream / compare_dreams).
+#
+# Architecture (primary target from 2026-04-20 roadmap revision):
+#   Loss = alpha_uniform * fsq_marginal_uniform_reg(z_bounded)
+#          + focal_CE(logits, target_indices)           # dense + target block
+#          + cpc_weight * cpc_loss                       # inert, use_cpc=false
+#
+# No recon loss, no decoder forward during training. Anti-collapse is
+# carried entirely by per-dim Cramer-von Mises against Uniform[-half_d,
+# +half_d]: forcing uniform marginals on a bounded grid spreads code mass
+# combinatorially, preventing encoder degeneracy without pixel gradient.
+#
+# Why drop recon:
+#   E6.4 ep44-132 showed `alpha_unif * unif ~0.011` stably (<0.5% of total
+#   loss) with codebook at 100% usage organically from ep2. Recon was
+#   carrying anti-collapse for free but at the cost of (a) coupling
+#   encoder shape to pixel fidelity rather than pure prediction, and (b)
+#   a non-trivial decoder forward+backward per step. E6.5 removes both
+#   costs; encoder becomes purely predictive, aligned with the controller
+#   which reads h_t (transformer hidden state), not decoded pixels.
+#
+# Paper framing: LeWM simplifies JEPA via SIGReg (for continuous Gaussian
+# embeddings). For FSQ-based world models on a bounded grid, CWU-reg is
+# the FSQ-geometry-native equivalent: two training terms, no stop-gradient,
+# no EMA target, no auxiliary regularizers.
+#
+# Fallback: if E6.5 underfits on val death F1 or the codebook destabilises
+# without the pixel anchor, revert to E6.6 (keep recon, drop alpha_uniform
+# instead; less elegant but known-good recipe).
+#
+# Schedule: 140 epochs to fit one 8h SLURM wall (140 * 200s + 350s warmup
+# = 7h49m). Cosine decay floor tightened vs E6.4 to match the shorter tail.
+
+model:
+  vocab_size: 625
+  embed_dim: 512
+  n_heads: 8
+  n_layers: 8
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [5, 5, 5, 5]
+  dropout: 0.15
+  adaln: true
+
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 140           # fits one 8h A100 slot at ~200s/epoch post-E6.4 speedup
+  batch_size: 896
+  lr: 0.004
+  lr_min: 0.0002
+  weight_decay: 0.01
+  cpc_weight: 1.0       # inert when use_cpc=false
+  token_noise: 0.05
+  fsq_noise: 0.05
+  label_smoothing: 0.0  # SLS disabled; pure focal CE on hard targets
+  fsq_sigma: 0.9        # only consumed if learnable_gamma=true (unused here)
+  focal_gamma: 2.0
+  death_oversample: 4
+  seed: 42
+  checkpoint_dir: checkpoints_e6.5
+  # Joint
+  joint: true
+  fsq_lr: 0.001
+  alpha_uniform: 1.0    # now the sole anti-collapse signal (no recon anchor)
+  shift_max: 4
+  # Architectural flags
+  use_cpc: false        # AC-CPC off
+  use_recon: false      # drop recon + decoder from training graph (E6.5 primary)
+  learnable_gamma: false
+
+# Post-hoc decoder trained on frozen encoder z after WM training completes.
+# Visualization-only, cannot bias training decisions.
+posthoc_decoder:
+  transformer_checkpoint: checkpoints_e6.5/transformer_best.pt
+  fsq_checkpoint: checkpoints_e6.5/fsq_best.pt
+  epochs: 30
+  batch_size: 512
+  lr: 0.001
+  seed: 42
+  checkpoint_dir: checkpoints_e6.5
+
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_e6.5/transformer_best.pt
+  epochs: 50
+  batch_size: 512
+  lr: 0.001
+  weight_decay: 0.0001
+  val_ratio: 0.1
+  seed: 42
+  checkpoint_dir: checkpoints_e6.5
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_e6.5/transformer_best.pt
+  pretrained: checkpoints_e6.5/controller_bc_best.pt
+  amp_dtype: bfloat16
+  n_iterations: 50000
+  n_episodes: 512
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 512
+  entropy_coeff: 0.01
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 45
+  death_threshold: 0.5
+  mlp_hidden: 512
+  n_eval_episodes: 512
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_e6.5
