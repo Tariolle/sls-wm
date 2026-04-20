@@ -43,18 +43,28 @@ def compute_val_set(death_dir, expert_dir):
 
 
 class EpisodeLoader:
+    """Loads episodes and re-encodes frames through the *current* FSQ on the
+    fly. The on-disk tokens.npy reflects whatever FSQ was active when
+    scripts/tokenize.py was last run (typically the V5 FSQ in
+    checkpoints_v5_fsq/fsq_best.pt). For joint-trained runs (E6.x) the
+    codebook is different, so trusting tokens.npy would feed alien token
+    ids to the transformer. We load frames.npy and encode at load time
+    against the FSQ we actually plan to use for this dream session.
+    """
     """Lazily loads episodes: keeps current + prefetched next ready."""
 
     def __init__(self, episodes_dir, context_frames, split_filter="all",
-                 val_set=None):
+                 val_set=None, vae=None, device=None):
         shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
         self.context_frames = context_frames
         self.val_set = val_set or set()
+        self.vae = vae
+        self.device = device
         self.dirs = []
         for ep in sorted(Path(episodes_dir).glob("*")):
             if shift_re.search(ep.name):
                 continue
-            if not ((ep / "tokens.npy").exists() and (ep / "actions.npy").exists()):
+            if not ((ep / "frames.npy").exists() and (ep / "actions.npy").exists()):
                 continue
             if split_filter == "val" and ep.name not in self.val_set:
                 continue
@@ -70,7 +80,7 @@ class EpisodeLoader:
         for ep in sorted(Path(episodes_dir).glob("*")):
             if shift_re.search(ep.name):
                 continue
-            if (ep / "tokens.npy").exists() and (ep / "actions.npy").exists():
+            if (ep / "frames.npy").exists() and (ep / "actions.npy").exists():
                 self.dirs.append(ep)
 
     def __len__(self):
@@ -78,8 +88,15 @@ class EpisodeLoader:
 
     def _load(self, ep_dir):
         from deepdash.data_split import is_val_episode
-        tokens = np.load(ep_dir / "tokens.npy").astype(np.int64)
+        frames = np.load(ep_dir / "frames.npy")                # (T, 64, 64) uint8
         actions = np.load(ep_dir / "actions.npy").astype(np.int64)
+        # Re-encode through the *loaded* FSQ so we don't trust stale
+        # tokens.npy which was produced by a different codebook.
+        with torch.no_grad():
+            x = torch.from_numpy(frames).float().to(self.device) / 255.0
+            x = x.unsqueeze(1)                                 # (T, 1, 64, 64)
+            indices = self.vae.encode(x)                       # (T, 8, 8)
+            tokens = indices.view(indices.size(0), -1).cpu().numpy().astype(np.int64)
         split = "VAL" if is_val_episode(ep_dir.name, self.val_set) else "TRAIN"
         return tokens, actions, ep_dir.name, split
 
@@ -155,13 +172,17 @@ def main():
     vae.eval()
     print("FSQ-VAE loaded")
 
-    # Load world model
+    # Load world model. fsq_dim = len(levels) must match the training-time
+    # value so the optional fsq_grad_proj STE conduit (E6.1+ joint training)
+    # is present on the module and state_dict loads cleanly. The conduit is
+    # unused at inference time (predict_next_frame never passes z_q_ste).
     wm = WorldModel(
         vocab_size=args.vocab_size, embed_dim=args.embed_dim,
         n_heads=args.n_heads, n_layers=args.n_layers,
         context_frames=args.context_frames, dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
+        fsq_dim=len(args.levels) if getattr(args, 'levels', None) else None,
     ).to(device)
     state = torch.load(args.transformer_checkpoint, map_location=device,
                        weights_only=True)
@@ -186,7 +207,8 @@ def main():
     # Episode loader (lazy: loads current + prefetches next)
     val_set = compute_val_set(args.episodes_dir, args.expert_episodes_dir)
     loader = EpisodeLoader(args.episodes_dir, args.context_frames,
-                            args.filter, val_set=val_set)
+                            args.filter, val_set=val_set,
+                            vae=vae, device=device)
     loader.add_dir(args.expert_episodes_dir)
     print(f"Found {len(loader)} episode directories (filter: {args.filter})")
     if not loader.dirs:

@@ -30,20 +30,38 @@ def _unwrap(model):
     return model._orig_mod if hasattr(model, "_orig_mod") else model
 
 
-def load_episodes(episodes_dir, context_frames):
-    """Load tokenized episodes (base only, no shifts) with enough frames."""
+def load_episodes(episodes_dir, context_frames, vae=None, device=None):
+    """Load episodes, encoding frames through the passed FSQ on the fly.
+
+    If vae is None, falls back to the on-disk tokens.npy (V5 / pre-E6.x
+    workflow). Pass vae + device for any E6.x joint-trained FSQ where the
+    on-disk tokens reflect a different codebook.
+    """
     shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
     K = context_frames
     episodes = []
     for ep in sorted(Path(episodes_dir).glob("*")):
         if shift_re.search(ep.name):
             continue
-        tp = ep / "tokens.npy"
         ap = ep / "actions.npy"
-        if not tp.exists() or not ap.exists():
+        if not ap.exists():
             continue
-        tokens = np.load(tp).astype(np.int64)
         actions = np.load(ap).astype(np.int64)
+        if vae is not None:
+            fp = ep / "frames.npy"
+            if not fp.exists():
+                continue
+            with torch.no_grad():
+                frames = np.load(fp)
+                x = torch.from_numpy(frames).float().to(device) / 255.0
+                x = x.unsqueeze(1)
+                indices = vae.encode(x)
+                tokens = indices.view(indices.size(0), -1).cpu().numpy().astype(np.int64)
+        else:
+            tp = ep / "tokens.npy"
+            if not tp.exists():
+                continue
+            tokens = np.load(tp).astype(np.int64)
         if len(tokens) >= K * 3:
             episodes.append((tokens, actions, ep.name))
     return episodes
@@ -109,6 +127,10 @@ def main():
     parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
     parser.add_argument("--transformer-checkpoint", default=None)
+    parser.add_argument("--fsq-checkpoint", default=None,
+                        help="If set, re-encode frames through this FSQ "
+                             "(needed for E6.x joint-trained codebooks; "
+                             "leave unset to use on-disk tokens.npy)")
     parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=512)
@@ -152,6 +174,7 @@ def main():
         context_frames=args.context_frames, dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
+        fsq_dim=len(args.levels) if getattr(args, 'levels', None) else None,
     ).to(device)
     state = torch.load(args.transformer_checkpoint, map_location=device,
                        weights_only=True)
@@ -160,13 +183,25 @@ def main():
     wm.eval()
     print("World model loaded")
 
+    # Optional FSQ for on-the-fly re-encoding (E6.x joint-trained codebooks).
+    vae = None
+    if args.fsq_checkpoint is not None:
+        from deepdash.fsq import FSQVAE
+        vae = FSQVAE(levels=args.levels).to(device)
+        fsq_state = torch.load(args.fsq_checkpoint, map_location=device,
+                               weights_only=True)
+        fsq_state = {k.removeprefix("_orig_mod."): v for k, v in fsq_state.items()}
+        vae.load_state_dict(fsq_state)
+        vae.eval()
+        print(f"FSQ loaded from {args.fsq_checkpoint}; tokens will be re-encoded on the fly")
+
     # Load episodes (death + expert)
     from deepdash.data_split import get_val_episodes, is_val_episode
     K = args.context_frames
     val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
 
-    all_eps = load_episodes(args.episodes_dir, K) + \
-              load_episodes(args.expert_episodes_dir, K)
+    all_eps = load_episodes(args.episodes_dir, K, vae=vae, device=device) + \
+              load_episodes(args.expert_episodes_dir, K, vae=vae, device=device)
     print(f"Loaded {len(all_eps)} episodes")
     if not all_eps:
         print("No episodes found!")

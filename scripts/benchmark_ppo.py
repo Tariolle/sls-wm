@@ -102,6 +102,7 @@ def main():
             context_frames=ns.context_frames, dropout=ns.dropout,
             tokens_per_frame=ns.tokens_per_frame,
             adaln=getattr(ns, 'adaln', False),
+            fsq_dim=len(ns.levels) if getattr(ns, 'levels', None) else None,
         ).to(device).eval()
         ctrl = MLPPolicy(h_dim=ns.embed_dim).to(device).eval()
         return wm, ctrl

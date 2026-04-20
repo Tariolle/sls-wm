@@ -20,6 +20,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.world_model import WorldModel
 
 
+def _encode_episode(ep_dir, vae, device):
+    """Load frames.npy and encode through the currently-loaded FSQ.
+
+    Replaces `np.load(ep_dir / 'tokens.npy')`: trusting tokens.npy here
+    would feed V5-era codes to a transformer trained against a different
+    (joint, E6.x) codebook.
+    """
+    frames = np.load(ep_dir / "frames.npy")
+    with torch.no_grad():
+        x = torch.from_numpy(frames).float().to(device) / 255.0
+        x = x.unsqueeze(1)
+        indices = vae.encode(x)
+    return indices.view(indices.size(0), -1).cpu().numpy().astype(np.int64)
+
+
 def load_tokenizer(args, device):
     """Load the appropriate tokenizer (FSQ or VQ-VAE)."""
     if args.tokenizer == "fsq":
@@ -103,6 +118,7 @@ def main():
         dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
+        fsq_dim=len(args.levels) if getattr(args, 'levels', None) else None,
     ).to(device)
     state = torch.load(args.transformer_checkpoint, map_location=device, weights_only=True)
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
@@ -124,7 +140,7 @@ def main():
     shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
 
     all_eps = sorted(ep for ep in episodes_dir.glob("*")
-                     if (ep / "tokens.npy").exists() and (ep / "actions.npy").exists())
+                     if (ep / "frames.npy").exists() and (ep / "actions.npy").exists())
 
     # Global split (shared across all models)
     from deepdash.data_split import get_val_episodes
@@ -132,8 +148,9 @@ def main():
 
     candidates = []
     for ep in all_eps:
-        tokens = np.load(ep / "tokens.npy")
-        if len(tokens) < min_frames:
+        # Frame count is enough to gate; no need to encode here.
+        n_frames = int(np.load(ep / "frames.npy", mmap_mode="r").shape[0])
+        if n_frames < min_frames:
             continue
         base_name = shift_re.sub("", ep.name)
         if args.all_episodes or base_name in val_names:
@@ -159,7 +176,7 @@ def main():
             for ep_idx, ep in enumerate(candidates):
                 print(f"  Single-step: episode {ep_idx + 1}/{len(candidates)} ({ep.name})",
                       end="\r")
-                tokens = np.load(ep / "tokens.npy").astype(np.int64)
+                tokens = _encode_episode(ep, tokenizer, device)
                 actions = np.load(ep / "actions.npy").astype(np.int64)
                 T = len(tokens)
                 if T < K + 1:
@@ -202,7 +219,7 @@ def main():
 
     # --- Multi-step rollout ---
     for ep in selected:
-        tokens = np.load(ep / "tokens.npy")
+        tokens = _encode_episode(ep, tokenizer, device)
         actions = np.load(ep / "actions.npy")
         meta_path = ep / "metadata.json"
         level = "?"

@@ -54,18 +54,25 @@ from deepdash.world_model import WorldModel
 
 
 class EpisodeLoader:
-    """Lazily loads episodes: keeps current + prefetched next ready."""
+    """Lazily loads episodes: keeps current + prefetched next ready.
+
+    Re-encodes frames through the loaded FSQ on the fly rather than trusting
+    tokens.npy (which reflects whatever FSQ was active at the last tokenize
+    pass and may not match the codebook we're dreaming with).
+    """
 
     def __init__(self, episodes_dir, context_frames, split_filter="all",
-                 val_set=None):
+                 val_set=None, vae=None, device=None):
         shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
         self.context_frames = context_frames
         self.val_set = val_set or set()
+        self.vae = vae
+        self.device = device
         self.dirs = []
         for ep in sorted(Path(episodes_dir).glob("*")):
             if shift_re.search(ep.name):
                 continue
-            if not ((ep / "tokens.npy").exists() and (ep / "actions.npy").exists()):
+            if not ((ep / "frames.npy").exists() and (ep / "actions.npy").exists()):
                 continue
             if split_filter == "val" and ep.name not in self.val_set:
                 continue
@@ -80,7 +87,7 @@ class EpisodeLoader:
         for ep in sorted(Path(episodes_dir).glob("*")):
             if shift_re.search(ep.name):
                 continue
-            if (ep / "tokens.npy").exists() and (ep / "actions.npy").exists():
+            if (ep / "frames.npy").exists() and (ep / "actions.npy").exists():
                 self.dirs.append(ep)
 
     def __len__(self):
@@ -88,8 +95,13 @@ class EpisodeLoader:
 
     def _load(self, ep_dir):
         from deepdash.data_split import is_val_episode
-        tokens = np.load(ep_dir / "tokens.npy").astype(np.int64)
+        frames = np.load(ep_dir / "frames.npy")
         actions = np.load(ep_dir / "actions.npy").astype(np.int64)
+        with torch.no_grad():
+            x = torch.from_numpy(frames).float().to(self.device) / 255.0
+            x = x.unsqueeze(1)
+            indices = self.vae.encode(x)
+            tokens = indices.view(indices.size(0), -1).cpu().numpy().astype(np.int64)
         split = "VAL" if is_val_episode(ep_dir.name, self.val_set) else "TRAIN"
         return tokens, actions, ep_dir.name, split
 
@@ -123,6 +135,7 @@ def load_transformer(args, ckpt_path, device):
         context_frames=args.context_frames, dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, "adaln", False),
+        fsq_dim=len(args.levels) if getattr(args, "levels", None) else None,
     ).to(device)
     state = torch.load(ckpt_path, map_location=device, weights_only=True)
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
@@ -203,7 +216,8 @@ def main():
     from deepdash.data_split import get_val_episodes
     val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
     loader = EpisodeLoader(args.episodes_dir, args.context_frames,
-                            args.filter, val_set=val_set)
+                            args.filter, val_set=val_set,
+                            vae=vae, device=device)
     loader.add_dir(args.expert_episodes_dir)
     print(f"Found {len(loader)} episode directories (filter: {args.filter})")
     if not loader.dirs:
