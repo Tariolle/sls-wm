@@ -832,21 +832,23 @@ class JointStep(nn.Module):
 
 
 def _codebook_stats(code_counts):
-    """Usage % and perplexity from a (vocab_size,) long histogram.
+    """Usage % and normalized perplexity from a (vocab_size,) long histogram.
 
     usage_pct: fraction of codes observed at least once, in percent.
-    perplexity: exp(H) of the empirical code distribution. Max = vocab_size
-    when perfectly uniform, 1 when all mass lands on a single code.
+    ppl_pct: exp(H) / vocab_size, in percent. 100% = uniform codebook usage,
+    ~0% = fully collapsed. Cross-vocab-size comparable (unlike raw ppl).
     """
+    vocab_size = int(code_counts.numel())
     total = int(code_counts.sum().item())
     if total == 0:
         return 0.0, 0.0
     n_used = int((code_counts > 0).sum().item())
-    usage_pct = 100.0 * n_used / int(code_counts.numel())
+    usage_pct = 100.0 * n_used / vocab_size
     p = code_counts.to(torch.float64) / float(total)
     p_nz = p[p > 0]
     entropy = float(-(p_nz * p_nz.log()).sum().item())
-    return usage_pct, math.exp(entropy)
+    ppl_pct = 100.0 * math.exp(entropy) / vocab_size
+    return usage_pct, ppl_pct
 
 
 def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
@@ -926,7 +928,7 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
     death_prec = tp / (tp + fp + 1e-8)
     death_rec = tp / (tp + fn + 1e-8)
     death_f1 = 2 * death_prec * death_rec / (death_prec + death_rec + 1e-8)
-    code_usage_pct, code_perplexity = _codebook_stats(
+    code_usage_pct, code_ppl_pct = _codebook_stats(
         code_counts_total if code_counts_total is not None
         else torch.zeros(1, dtype=torch.long))
     return {
@@ -941,7 +943,7 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
         "enc_grad_rms": (enc_grad_sq / max(1, n_batches)) ** 0.5,
         "tr_grad_rms": (tr_grad_sq / max(1, n_batches)) ** 0.5,
         "code_usage_pct": code_usage_pct,
-        "code_perplexity": code_perplexity,
+        "code_ppl_pct": code_ppl_pct,
     }
 
 
@@ -994,7 +996,7 @@ def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
     death_prec = tp / (tp + fp + 1e-8)
     death_rec = tp / (tp + fn + 1e-8)
     death_f1 = 2 * death_prec * death_rec / (death_prec + death_rec + 1e-8)
-    code_usage_pct, code_perplexity = _codebook_stats(
+    code_usage_pct, code_ppl_pct = _codebook_stats(
         code_counts_total if code_counts_total is not None
         else torch.zeros(1, dtype=torch.long))
     return {
@@ -1007,7 +1009,7 @@ def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
         "recon": total_recon / n_samples,
         "unif": total_unif / n_samples,
         "code_usage_pct": code_usage_pct,
-        "code_perplexity": code_perplexity,
+        "code_ppl_pct": code_ppl_pct,
     }
 
 
@@ -1555,8 +1557,8 @@ def main():
             "fsq_gap",
             "encoder_grad_rms", "transformer_grad_rms",
             "fsq_lr",
-            "train_code_usage_pct", "train_code_perplexity",
-            "val_code_usage_pct", "val_code_perplexity",
+            "train_code_usage_pct", "train_code_ppl_pct",
+            "val_code_usage_pct", "val_code_ppl_pct",
         ]
         # E6.3 learnable γ: one column per FSQ dim with per-epoch value.
         # The per-dim trajectory is the headline paper plot.
@@ -1681,9 +1683,9 @@ def main():
                 print(
                     f"  Codebook | "
                     f"Train: usage={train_metrics['code_usage_pct']:.1f}% "
-                    f"ppl={train_metrics['code_perplexity']:.1f} | "
+                    f"ppl={train_metrics['code_ppl_pct']:.1f}% | "
                     f"Val: usage={val_metrics['code_usage_pct']:.1f}% "
-                    f"ppl={val_metrics['code_perplexity']:.1f}"
+                    f"ppl={val_metrics['code_ppl_pct']:.1f}%"
                 )
 
             row = [
@@ -1708,9 +1710,9 @@ def main():
                     f"{train_metrics['tr_grad_rms']:.6e}",
                     f"{fsq_lr_now:.1e}" if fsq_lr_now is not None else "",
                     f"{train_metrics['code_usage_pct']:.2f}",
-                    f"{train_metrics['code_perplexity']:.2f}",
+                    f"{train_metrics['code_ppl_pct']:.2f}",
                     f"{val_metrics['code_usage_pct']:.2f}",
-                    f"{val_metrics['code_perplexity']:.2f}",
+                    f"{val_metrics['code_ppl_pct']:.2f}",
                 ]
                 if model.sls_gamma is not None:
                     for v in model.sls_gamma.detach().cpu().tolist():
@@ -1750,9 +1752,9 @@ def main():
                     "fsq/gap": fsq_gap,
                     "fsq/lr": fsq_lr_now,
                     "fsq/train/code_usage_pct": train_metrics["code_usage_pct"],
-                    "fsq/train/code_perplexity": train_metrics["code_perplexity"],
+                    "fsq/train/code_ppl_pct": train_metrics["code_ppl_pct"],
                     "fsq/val/code_usage_pct": val_metrics["code_usage_pct"],
-                    "fsq/val/code_perplexity": val_metrics["code_perplexity"],
+                    "fsq/val/code_ppl_pct": val_metrics["code_ppl_pct"],
                     "transformer/train/grad_rms": train_metrics["tr_grad_rms"],
                 })
                 # Learnable γ trajectory - one key per dim. Headline paper
