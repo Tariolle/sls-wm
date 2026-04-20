@@ -31,7 +31,7 @@ transformer:
   checkpoint_dir: checkpoints_e6.5_local
   joint: true
   fsq_lr: 0.001
-  alpha_uniform: 1.0
+  alpha_uniform: 10.0   # sole anti-collapse signal (no recon anchor)
   shift_max: 4
   use_cpc: false
   use_recon: false

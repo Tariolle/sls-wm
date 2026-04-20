@@ -64,7 +64,12 @@ transformer:
   # Joint
   joint: true
   fsq_lr: 0.001
-  alpha_uniform: 1.0    # now the sole anti-collapse signal (no recon anchor)
+  alpha_uniform: 10.0   # sole anti-collapse signal (no recon anchor). At E6.4
+                        # convergence unif ~0.011 and token_loss ~1.5; alpha=10
+                        # puts CWU contribution at ~7% of primary loss, squarely
+                        # inside the standard 1-10% loss-ratio regularizer band.
+                        # alpha=1 (E6.4 value) was 0.2% -- fine as a companion
+                        # to recon, timid as a sole anti-collapse driver.
   shift_max: 4
   # Architectural flags
   use_cpc: false        # AC-CPC off
