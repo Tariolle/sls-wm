@@ -1338,7 +1338,7 @@ def main():
     ckpt_dir.mkdir(exist_ok=True)
 
     start_epoch = 1
-    best_val_acc = 0.0
+    best_val_death_f1 = 0.0
 
     wandb_resume_id = None
     resume_state = None
@@ -1353,9 +1353,9 @@ def main():
             if "scaler" in resume_state:
                 scaler.load_state_dict(resume_state["scaler"])
             start_epoch = resume_state["epoch"] + 1
-            best_val_acc = resume_state.get("best_val_acc", 0.0)
+            best_val_death_f1 = resume_state.get("best_val_death_f1", 0.0)
             wandb_resume_id = resume_state.get("wandb_run_id")
-            print(f"Resumed from epoch {resume_state['epoch']} (best val acc: {best_val_acc:.4f})")
+            print(f"Resumed from epoch {resume_state['epoch']} (best val death F1: {best_val_death_f1:.4f})")
         else:
             print("No checkpoint found, starting fresh.")
 
@@ -1771,20 +1771,25 @@ def main():
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
                 "scaler": scaler.state_dict(),
-                "best_val_acc": best_val_acc,
+                "best_val_death_f1": best_val_death_f1,
                 "wandb_run_id": wandb_run_id(),
             }
             if joint:
                 state_dict["fsq"] = fsq.state_dict()
             torch.save(state_dict, ckpt_dir / "transformer_state.pt")
 
-            # val_acc is target-distribution-independent (top-1), so it
-            # is comparable across epochs even under learnable γ where
-            # val_loss shifts with the target kernel. Skip the first few
-            # epochs because FSQ codebook collapse at init makes targets
-            # cluster on few codes, inflating val_acc as an artifact.
-            if epoch > 10 and val_acc > best_val_acc:
-                best_val_acc = val_acc
+            # Death F1 is the right selection metric for joint training.
+            # val_acc is over 625 visual-token classes whose target indices
+            # drift as the codebook densifies under joint training -- a
+            # transformer that correctly spreads mass over close-metric
+            # neighbours (ideal SLS behaviour) loses top-1 to that drift
+            # even while improving. Death tokens are fixed indices (625/626),
+            # not part of the FSQ codebook, so death F1 is codebook-drift-
+            # invariant and binary (high SNR). It also aligns with the
+            # deployment objective (survival). No epoch guard needed: F1
+            # starts at 0 and climbs cleanly, no codebook-collapse artifact.
+            if val_d_f1 > best_val_death_f1:
+                best_val_death_f1 = val_d_f1
                 torch.save(_unwrap(model).state_dict(), ckpt_dir / "transformer_best.pt")
                 if joint:
                     torch.save(fsq.state_dict(), ckpt_dir / "fsq_best.pt")
@@ -1801,7 +1806,7 @@ def main():
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "scaler": scaler.state_dict(),
-            "best_val_acc": best_val_acc,
+            "best_val_death_f1": best_val_death_f1,
             "wandb_run_id": wandb_run_id(),
         }
         if joint:
@@ -1813,7 +1818,7 @@ def main():
     torch.save(_unwrap(model).state_dict(), ckpt_dir / "transformer_final.pt")
     if joint:
         torch.save(fsq.state_dict(), ckpt_dir / "fsq_final.pt")
-    print(f"\nTraining complete. Best val acc: {best_val_acc:.4f}")
+    print(f"\nTraining complete. Best val death F1: {best_val_death_f1:.4f}")
     print(f"Checkpoints saved to {ckpt_dir}/")
 
 
