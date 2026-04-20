@@ -1664,7 +1664,6 @@ def main():
                 f"death[P={val_d_prec:.3f} R={val_d_rec:.3f} F1={val_d_f1:.3f}] "
                 f"{val_cpc_str}"
                 f"gap={gap:+.4f} | LR: {lr:.1e}"
-                + (f" fsq_LR: {fsq_lr_now:.1e}" if fsq_lr_now is not None else "")
             )
             if joint:
                 print(
@@ -1676,6 +1675,7 @@ def main():
                     f"gap={fsq_gap:+.4f} | "
                     f"grad_rms[enc={train_metrics['enc_grad_rms']:.2e} "
                     f"tr={train_metrics['tr_grad_rms']:.2e}]"
+                    + (f" | LR: {fsq_lr_now:.1e}" if fsq_lr_now is not None else "")
                 )
                 print(
                     f"  Codebook | "
