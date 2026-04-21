@@ -617,15 +617,6 @@ class JointStep(nn.Module):
 
     def forward(self, raw_frames, actions, is_death):
         from deepdash.fsq import fsqvae_loss, fsq_marginal_uniform_reg
-        # One-shot probe to check whether the forward is running under a
-        # grad-disabled context. Prints once per instance (first call).
-        if not getattr(self, "_dbg_printed", False):
-            import torch as _t
-            print(f"[DBG fwd] is_grad_enabled={_t.is_grad_enabled()} "
-                  f"inference_mode={_t.is_inference_mode_enabled()} "
-                  f"use_recon={self.use_recon} training={self.training}",
-                  flush=True)
-            self._dbg_printed = True
 
         m = _unwrap(self.wm)
         K = m.context_frames
@@ -646,17 +637,14 @@ class JointStep(nn.Module):
         z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
             self.fsq, raw_frames, K, tpf, fsq_dim,
             run_decoder=self.use_recon)
-        # When use_recon=False (FSQ-frozen phase), detach z_q before it
-        # reaches the transformer. The STE conduit via fsq_grad_proj
-        # still carries grad into the transformer (proj.weight grad
-        # depends only on z_q's value, not its requires_grad), so the
-        # transformer keeps learning; autograd won't need encoder params
-        # for any downstream loss, so encoder backward is skipped.
-        # Specializes at compile time via the Python branch (no
-        # torch.no_grad() context: dynamo's handling of that inside
-        # fullgraph=True can escape the intended scope).
-        if not self.use_recon:
-            z_q_all = z_q_all.detach()
+        # Do not detach z_q in the use_recon=False path: under
+        # torch.compile AOT autograd, detaching the only grad-bearing
+        # intermediate appears to eliminate the backward graph for the
+        # entire function, yielding loss.grad_fn=None. Let z_q carry its
+        # grad through; fsq encoder params accumulate grads but LR=0 on
+        # the fsq_encoder optimizer group makes them inert. Decoder is
+        # still skipped via run_decoder=self.use_recon above, so the net
+        # memory footprint is below the pre-freeze phase.
 
         frame_last = frames_f[:, K - 1]
         frame_tgt = frames_f[:, K]
@@ -863,22 +851,6 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
             be = torch.cuda.Event(enable_timing=True)
             bs.record()
         optimizer.zero_grad()
-        if n_batches == 0:
-            # One-shot diagnostic so the epoch-51 frozen-variant backward
-            # failure logs useful state. Printed once per epoch.
-            print(f"[DBG] loss.requires_grad={loss.requires_grad} "
-                  f"grad_fn={loss.grad_fn} value={loss.item():.4f}", flush=True)
-            print(f"[DBG] token_loss.grad_fn={metrics['token_loss'].grad_fn} "
-                  f"recon_loss.grad_fn={metrics['recon_loss'].grad_fn} "
-                  f"uniform_loss.grad_fn={metrics['uniform_loss'].grad_fn} "
-                  f"cpc_loss.grad_fn={metrics['cpc_loss'].grad_fn}", flush=True)
-            wm_tr = sum(1 for p in js.wm.parameters() if p.requires_grad)
-            wm_tot = sum(1 for _ in js.wm.parameters())
-            fsq_tr = sum(1 for p in js.fsq.parameters() if p.requires_grad)
-            fsq_tot = sum(1 for _ in js.fsq.parameters())
-            print(f"[DBG] wm trainable={wm_tr}/{wm_tot} "
-                  f"fsq trainable={fsq_tr}/{fsq_tot} "
-                  f"use_recon={js.use_recon}", flush=True)
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         # Per-group grad clip: each network gets its own norm=1.0 budget
@@ -1573,26 +1545,15 @@ def main():
                 joint_step_val = torch.compile(
                     joint_step_val, mode=compile_mode, fullgraph=True)
                 if will_freeze:
-                    # Frozen variants: compile with mode="default" and
-                    # fullgraph=False. The smoke test passed with
-                    # reduce-overhead + fullgraph in a fresh process, but
-                    # the resume+freeze path reproducibly yielded
-                    # loss.grad_fn=None at the first backward of epoch
-                    # freeze+1 -- the suspect is reduce-overhead's CUDA
-                    # graph capture interacting with the state-dict
-                    # reload. mode="default" keeps Inductor fusion for
-                    # memory (eager OOMs at batch 1024) but skips the
-                    # CUDA-graph layer.
                     joint_step_train_frozen = torch.compile(
-                        joint_step_train_frozen, mode="default",
-                        fullgraph=False)
+                        joint_step_train_frozen, mode=compile_mode,
+                        fullgraph=True)
                     joint_step_val_frozen = torch.compile(
-                        joint_step_val_frozen, mode="default",
-                        fullgraph=False)
+                        joint_step_val_frozen, mode=compile_mode,
+                        fullgraph=True)
                     print(f"JointStep compiled (mode={compile_mode}, "
                           f"{inductor_cfg.compile_threads} compile threads, "
-                          f"train + val; frozen variants mode=default, "
-                          f"fullgraph=False)")
+                          f"train + val + frozen train + frozen val)")
                 else:
                     print(f"JointStep compiled (mode={compile_mode}, "
                           f"{inductor_cfg.compile_threads} compile threads, train + val)")
