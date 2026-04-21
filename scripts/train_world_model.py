@@ -1379,7 +1379,7 @@ def main():
             inductor_cfg.compile_threads = (
                 1 if sys.platform == "win32"
                 else min(os.cpu_count() or 1, 8))
-            model = torch.compile(model, mode=compile_mode)
+            model = torch.compile(model, mode=compile_mode, fullgraph=True)
             print(f"torch.compile enabled (mode={compile_mode}, "
                   f"{inductor_cfg.compile_threads} compile threads)")
         except Exception as e:
@@ -1492,8 +1492,10 @@ def main():
                 inductor_cfg.compile_threads = (
                     1 if sys.platform == "win32"
                     else min(os.cpu_count() or 1, 8))
-                joint_step_train = torch.compile(joint_step_train, mode=compile_mode)
-                joint_step_val = torch.compile(joint_step_val, mode=compile_mode)
+                joint_step_train = torch.compile(
+                    joint_step_train, mode=compile_mode, fullgraph=True)
+                joint_step_val = torch.compile(
+                    joint_step_val, mode=compile_mode, fullgraph=True)
                 print(f"JointStep compiled (mode={compile_mode}, "
                       f"{inductor_cfg.compile_threads} compile threads, train + val)")
             except Exception as e:
