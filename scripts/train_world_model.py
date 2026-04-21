@@ -634,22 +634,19 @@ class JointStep(nn.Module):
             row_idx = (torch.arange(H, device=raw_frames.device) - dy).clamp(0, H - 1)
             raw_frames = raw_frames.index_select(-2, row_idx)
 
-        # When use_recon=False (FSQ-frozen phase), run the encoder under
-        # no_grad and detach z_q before it reaches the transformer. The
-        # STE conduit via fsq_grad_proj still carries grad into the
-        # transformer (proj.weight grad depends only on z_q's value, not
-        # its requires_grad), so the transformer keeps learning; the
-        # encoder's backward pass is skipped entirely. Specializes at
-        # compile time via the Python branch.
-        if self.use_recon:
-            z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
-                self.fsq, raw_frames, K, tpf, fsq_dim,
-                run_decoder=True)
-        else:
-            with torch.no_grad():
-                z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
-                    self.fsq, raw_frames, K, tpf, fsq_dim,
-                    run_decoder=False)
+        z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
+            self.fsq, raw_frames, K, tpf, fsq_dim,
+            run_decoder=self.use_recon)
+        # When use_recon=False (FSQ-frozen phase), detach z_q before it
+        # reaches the transformer. The STE conduit via fsq_grad_proj
+        # still carries grad into the transformer (proj.weight grad
+        # depends only on z_q's value, not its requires_grad), so the
+        # transformer keeps learning; autograd won't need encoder params
+        # for any downstream loss, so encoder backward is skipped.
+        # Specializes at compile time via the Python branch (no
+        # torch.no_grad() context: dynamo's handling of that inside
+        # fullgraph=True can escape the intended scope).
+        if not self.use_recon:
             z_q_all = z_q_all.detach()
 
         frame_last = frames_f[:, K - 1]
