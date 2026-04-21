@@ -1,142 +1,116 @@
-# SLS-WM: Structured Label Smoothing for Discrete World Models
+# SLS-WM
+### Structured Label Smoothing for Joint-Embedding Discrete World Models
 
-Official implementation of **SLS-WM**, a world model architecture that introduces *FSQ-Structured Label Smoothing*: a topology-aware training objective for discrete latent predictors. The method replaces uniform label smoothing with a Gaussian kernel defined over the metric structure of the Finite Scalar Quantization (FSQ) codebook, weighted by per-dimension visual sensitivity.
+**Abstract:** Discrete world models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer. Standard cross-entropy training treats every incorrect prediction as equally wrong, discarding a signal that Finite Scalar Quantization (FSQ) makes available by construction: each code sits at a point on an integer coordinate lattice, so some wrong predictions are near-misses (one quantization step away in one dimension, a near-identical reconstruction) while others are gross errors (opposite corner of the codebook, unrelated content). SLS-WM's contribution is *FSQ-Structured Label Smoothing* (SLS), a training objective that replaces uniform label smoothing with a kernel over the integer-lattice coordinates of the FSQ codebook, so a near-miss prediction is treated as a near-miss rather than a gross error. We train the FSQ encoder jointly with the dynamics transformer (prediction gradients flow back into the encoder through a straight-through estimator, so the codebook is shaped by both reconstruction and prediction) and study SLS under this setup. We evaluate on Geometry Dash, a deterministic platformer with binary actions (jump/idle) and precision timing, where the controller is trained entirely in imagination and deployed at 30 FPS on the real game via screen capture.
 
-**DeepDash** is the reinforcement learning environment suite developed to evaluate SLS-WM. It targets Geometry Dash, a deterministic platformer with binary actions (jump/idle) and precision timing constraints, where a controller is trained entirely in imagination and deployed at 30 FPS on the real game via screen capture.
+> **Status:** Pre-freeze research code. Model freeze target **2026-05-31**, NeurIPS 2026 workshop submission. Numerical results and ablation tables will land with V6 deployment; everything below describes concepts and architecture, not outcomes.
 
-## Contributions
+## Key ideas
 
-### Primary: FSQ-Structured Label Smoothing
+**1. Joint FSQ + transformer training with a pixel anchor.** FSQ was originally introduced as a tokenizer for downstream tasks and is typically used in subsequent work as a frozen pre-processing stage. Dreamer-family models (DreamerV3, TWISTER) do train their encoders jointly with the dynamics model, but use categorical-VAE latents rather than FSQ. SLS-WM sits at the intersection: we use FSQ for its coordinate-lattice structure (which SLS then exploits) and train it jointly with the transformer. A learnable linear projection `fsq_grad_proj` sits between the encoder's continuous latents and the transformer's input embedding; it contributes zero in the forward path but carries prediction gradients back into the encoder under an STE. We keep a light pixel-reconstruction loss as an anchor: a pure-JEPA variant without pixel anchor collapses in our experiments. Our attempt at a marginal anti-collapse regularizer (a Cramér-von-Mises test against a factorized uniform target, adapted from SIGReg's continuous-Gaussian formulation in LeWorldModel to the discrete factorized FSQ setting) was insufficient in our experiments to prevent joint-distribution degeneracy when the prediction target comes from the online encoder. Finding an anti-codebook-collapse loss that lets us drop the pixel anchor is open work; for now recon stays.
 
-Standard label smoothing redistributes probability mass uniformly across the vocabulary, treating all incorrect tokens as equally wrong. In discrete latent spaces produced by FSQ, this assumption is incorrect: a token differing by one quantization level in a single dimension reconstructs to a near-identical image patch, while a distant token produces an unrelated output.
-
-SLS-WM addresses this by defining a structured target distribution:
+**2. FSQ-Structured Label Smoothing.** Standard label smoothing redistributes mass uniformly across the vocabulary, treating all incorrect tokens as equally wrong. Under FSQ this is wrong: a token differing by one quantization level in a single dimension reconstructs to a near-identical image patch, while a distant token is an unrelated output. SLS replaces the uniform component with a kernel over FSQ coordinate distances:
 
 $$
 q(j \mid i) = \begin{cases}
 1 - \varepsilon & \text{if } j = i \\
-\varepsilon \cdot \dfrac{w(i, j)}{\sum_{k \neq i} w(i, k)} & \text{otherwise}
+\varepsilon \cdot \dfrac{k(\|\mathbf{c}_i - \mathbf{c}_j\|)}{\sum_{l \neq i} k(\|\mathbf{c}_i - \mathbf{c}_l\|)} & \text{otherwise}
 \end{cases}
 $$
 
-where the kernel weight is a Gaussian over weighted squared Euclidean distance in FSQ coordinate space:
+where $\mathbf{c}_i$ is the FSQ coordinate of code $i$ on the integer lattice. We compare three kernels (Gaussian $e^{-d^2/2\sigma^2}$, Laplace $e^{-d/\sigma}$, Cauchy $1/(1+d^2/\sigma^2)$) and find Laplace preferable: its cusp at $d=0$ concentrates mass on the target, while exponential (not polynomial) tail decay keeps distant neighbours from leaking meaningful probability. Under joint training the codebook drifts during the run, so any per-dimension sensitivity weights calibrated from a snapshot are stale; we use an isotropic kernel with bandwidth set by a zero-calibration first-neighbour rule ($\sigma = 1$ at integer lattice spacing). This formulation generalizes to any discrete latent space with a coordinate metric.
 
-$$
-w(i, j) = \exp\!\left(-\frac{\sum_d \alpha_d \cdot (\Delta_d)^2}{2\sigma^2}\right)
-$$
-
-The per-dimension weights $\alpha_d$ are calibrated from empirical patch-level MSE analysis over 5,000 validation frames, measuring the actual visual impact of a one-step perturbation in each FSQ dimension. This formulation generalizes to any discrete latent space equipped with a coordinate metric.
-
-### Secondary: Real-Time World Model Deployment
-
-A complete inference pipeline achieving 30 FPS real-time play on a live game, with no game API access. The pipeline uses GPU-resident token ring buffers, CUDA Graphs, and `torch.compile` to maintain sub-33ms latency per frame.
+**3. Real-time deployment of a discrete-latent world model.** A complete inference pipeline with GPU-resident token ring buffers, CUDA Graphs, and `torch.compile` (mode `reduce-overhead`, `fullgraph=True`), demonstrating that a joint-embedding discrete world model can drive a real game at 30 FPS on consumer hardware without API access.
 
 ## Architecture
 
-![V -> M -> C Pipeline](docs/architecture_pipeline.png)
+Three components, trained in two stages (world model first, then controller):
 
-| Component | Model | Params | Function |
-|-----------|-------|--------|----------|
-| **V** (Vision) | FSQ-VAE [5,5,5,5] | 1.9M (0.9M encoder) | 64x64 Sobel frame to 8x8 discrete tokens (625 codes) |
-| **M** (Memory) | Transformer 512d/8H/8L + AdaLN + QK-norm | ~35M | Predicts next tokens + death, produces h_t |
-| **C** (Controller) | MLPPolicy | ~265K | h_t to jump/idle (1-hidden-layer MLP) |
+| Component | Model | Training |
+|-----------|-------|----------|
+| **V** (Vision) | FSQ-VAE over $64\times64$ Sobel edge maps, $[5,5,5,5]$ levels, $8\times8$ spatial grid (625-code vocabulary) | Joint with M: pixel MSE anchor + prediction gradient via STE |
+| **M** (Memory) | Causal transformer with AdaLN-Zero action conditioning, QK-norm, 3D-RoPE (row, col, frame) | Joint with V: token CE + SLS-weighted targets, focal loss |
+| **C** (Controller) | MLP policy on transformer hidden state $h_t$ | BC warm-start on expert demos, then RL in imagination |
 
-## Results (V5 headline)
+The transformer predicts next-frame token logits; cross-entropy targets come from the online FSQ encoder. Per-group gradient clipping (encoder and transformer clipped independently at the same norm) prevents the pixel-MSE gradient from saturating the prediction-side budget during warm-up. A separate `scripts/fsq_sensitivity.py` probe measures per-dimension reconstruction sensitivity and cross-dimension coupling of any trained codebook, retained as an analysis tool, not a hyperparameter pipeline.
 
-V5 baseline = FSQ [5,5,5,5] + Transformer with calibrated SLS (`sigma=0.9`, `dim_weights=[1.02, 0.94, 0.83, 1.20]`, `epsilon=0.1`).
+## Running the code
 
-| Metric | V5 |
-|--------|-----|
-| Transformer params | ~35M |
-| Val CPC | 0.3069 |
-| Val accuracy | 0.3215 |
-| Val death P/R/F1 | 0.666 / 0.885 / 0.760 |
-| Controller params | ~265K |
-| Controller (PPO on V5 dreams) | underperforming — not dream-bounded (dreams improved over V4) but controller / hidden-state-bounded: the MLP head on `h_t` could not master the richer V5 dynamics. Motivates the post-V5 work (joint encoder/transformer training + Dreamer-style AC replacing PPO). |
+**Environment.** Conda, PyTorch 2.10, CUDA 12.6. `conda run -n <env> python -m pip install -r requirements.txt`.
 
-Full V0 -> V5 evolution with per-version decisions and ablation trails is in [VERSIONS.md](VERSIONS.md).
-
-## Pipeline
-
+**Train the world model (V + M jointly):**
+```bash
+python scripts/train_world_model.py --config configs/e6.8-recon-laplacesls.yaml
 ```
-1. Record gameplay       ->  data/death_episodes/, data/expert_episodes/
-2. Shift augmentation    ->  5x vertical shifts per episode
-3. Train FSQ-VAE         ->  checkpoints/fsq_best.pt
-4. Tokenize episodes     ->  tokens.npy per episode
-5. Train Transformer     ->  checkpoints/transformer_best.pt
-6. BC pretrain           ->  checkpoints/controller_bc_best.pt
-7. PPO finetune          ->  checkpoints/controller_ppo_best.pt
-8. Deploy                ->  python scripts/deploy.py
+
+**Train the controller (BC warm-start, then PPO in imagination):**
+```bash
+python scripts/train_controller_bc.py  --config configs/e6.8-recon-laplacesls.yaml
+python scripts/train_controller_ppo.py --config configs/e6.8-recon-laplacesls.yaml
 ```
+
+**Deploy to the live game (screen capture, 30 FPS):**
+```bash
+python scripts/deploy.py --config configs/e6.8-recon-laplacesls.yaml
+```
+
+**Analyse the learned codebook** (kernel fit per family, anisotropy, coupling):
+```bash
+python scripts/fsq_sensitivity.py --checkpoint checkpoints_e6.8/fsq_best.pt --levels 5 5 5 5
+```
+
+Cluster launches (SLURM, A100): `sbatch slurm/train_world_model.sl`, `sbatch slurm/train_controller.sl`.
 
 ## Data
 
-- **Death episodes**: 4,229 episodes, ~218K frames across 16 levels (intentional deaths at obstacles)
-- **Expert episodes**: 36 clean runs, ~34K frames (no deaths, for BC + world model rebalancing)
-- **Total**: 4,265 episodes, ~252K frames
-- Global episode-level train/val split (seed 42, stratified) shared across all models (`deepdash/data_split.py`)
+- **Death episodes**: 4,229 episodes, ~218K frames across 16 levels (intentional deaths at obstacles).
+- **Expert episodes**: 36 clean runs, ~34K frames (no deaths, for BC + world-model rebalancing).
+- Global episode-level train/val split (seed 42, stratified) shared across all models (`deepdash/data_split.py`).
 
-## Training Details
+## Roadmap
 
-### FSQ-VAE
-- 100% codebook utilization (625/625 active), 76% perplexity (exp(H)/V; uniform = 100%)
-- iFSQ bounding (2σ(1.6z)−1 instead of tanh) for near-uniform bin utilization
-- GRWM temporal slowness (0.1) + uniformity loss (0.01), shift augmentation, cosine LR, BF16, 200 epochs on A100
-
-### Transformer
-- AdaLN-Zero action conditioning (DiT/LeWorldModel) + QK-norm (SD3/MMDiT)
-- Block-causal attention + 3D-RoPE + AC-CPC weight 1.0 (TWISTER)
-- Focal loss (gamma=2.0) + structured label smoothing (sigma=0.9, eps=0.1, calibrated dim_weights) + dual token noise
-- Vertical-only shift augmentation (5x), death oversample 4x
-- No masking (all target tokens predicted, no ground truth leakage)
-- 512d embedding, 8 heads, 8 layers, dropout 0.15
-- 200 epochs, LR 4e-3, batch 512, BF16
-
-### Training Throughput (A100)
-
-Benchmarked all `torch.compile` modes × precisions with subprocess isolation to prevent CUDA allocator fragmentation. Winning config applied to all training scripts:
-
-| Config | ms/step | Speedup |
-|--------|---------|---------|
-| Eager FP32 (baseline) | ~2036ms | 1.00x |
-| Compile default + BF16 | ~317ms | 6.42x |
-| **Compile reduce-overhead + BF16** | **~314ms** | **6.48x** |
-
-`reduce-overhead` + BF16 is the default at our scale: best of both worlds — faster than `default`, and without the long autotune startup of `max-autotune` which at our model size only yields ~1% more steady-state throughput.
-
-### Controller
-- **BC**: death + expert episodes, class-weighted BCE (1.5x jumps), early stopping
-- **PPO**: clipped surrogate, jump penalty 0.2/jump, percentile-based advantage normalization, EMA target critic (0.98), 45-step dream rollouts, constant LR 1e-4
-- **BC ablation (V4)**: cold-start PPO converges to the same plateau as BC-initialized PPO but needs ~2,000 extra iterations (~6h on A100). BC itself takes ~5 min. ROI: 5 min saves 6 hours. Not re-run post-V4 — literature and this ablation agree that BC init is a clear win; BC is kept in the pipeline.
-
-### Deployment
-- Screen capture (dxcam), Sobel (7ms, GPU), FSQ encode (4ms), Transformer h_t (14ms), Controller (1ms), keyboard input
-- GPU token ring buffer (no CPU round-trip), CUDA Graph for encode_context, pinned memory transfer
-- torch.compile on all platforms (PyTorch 2.10)
-- 30 FPS real-time
-
-## Version History
-
-See [VERSIONS.md](VERSIONS.md) for full V0 through V5 evolution.
+| Tag | Stage | Status |
+|-----|-------|--------|
+| V5 | Frozen-FSQ + transformer + calibrated-SLS baseline | shipped (tagged on `main`) |
+| E6.4 | First joint training iteration (CWU anti-collapse) | done, strong representation signal |
+| E6.5 | Pure-JEPA ablation (no pixel anchor) | done, confirmed marginal CWU insufficient for joint collapse |
+| E6.7 | Joint training + isotropic Cauchy SLS | done, confirmed Cauchy tail over-smooths dream rollouts |
+| E6.8 | Joint training + isotropic Laplace SLS (current) | running |
+| V6 | Final architecture post E6.x sweep | pre-freeze, 2026-05-31 target |
 
 ## References
 
-- **FSQ**: Mentzer et al. (2024). [*Finite Scalar Quantization: VQ-VAE Made Simple*](https://arxiv.org/abs/2309.15505). ICLR
-- **iFSQ**: Vali et al. (2026). [*iFSQ: Improving FSQ for Image Generation with 1 Line of Code*](https://arxiv.org/abs/2601.17124). ICLR
-- **Label Smoothing**: Szegedy et al. (2016). [*Rethinking the Inception Architecture for Computer Vision*](https://arxiv.org/abs/1512.00567). CVPR
-- **Striving for Simplicity**: Springenberg et al. (2015). [*Striving for Simplicity: The All Convolutional Net*](https://arxiv.org/abs/1412.6806). ICLR Workshop
-- **World Models**: Ha & Schmidhuber (2018). [*World Models*](https://arxiv.org/abs/1803.10122). NeurIPS
-- **IRIS**: Micheli et al. (2023). [*Transformers are Sample-Efficient World Models*](https://arxiv.org/abs/2209.00588). ICLR
-- **TWISTER**: Burchi & Timofte (2025). [*Transformer-based World Models with AC-CPC*](https://arxiv.org/abs/2503.04416). ICLR
-- **LeWorldModel**: Maes et al. (2026). [*Stable End-to-End Joint-Embedding Predictive Architecture from Pixels*](https://arxiv.org/abs/2603.19312). Preprint
-- **DiT**: Peebles & Xie (2023). [*Scalable Diffusion Models with Transformers*](https://arxiv.org/abs/2212.09748). ICCV
-- **SD3/MMDiT**: Esser et al. (2024). [*Scaling Rectified Flow Transformers for High-Resolution Image Synthesis*](https://arxiv.org/abs/2403.03206). ICML
-- **FiLM**: Perez et al. (2018). [*FiLM: Visual Reasoning with a General Conditioning Layer*](https://arxiv.org/abs/1709.07871). AAAI
-- **RoPE**: Su et al. (2024). [*RoFormer: Enhanced Transformer with Rotary Position Embedding*](https://arxiv.org/abs/2104.09864). Neurocomputing
-- **CPC / InfoNCE**: van den Oord et al. (2018). [*Representation Learning with Contrastive Predictive Coding*](https://arxiv.org/abs/1807.03748). Preprint
-- **GRWM (temporal slowness)**: Huh et al. (2023). [*Straightening Out the Frame-by-Frame Video Prediction Problem*](https://arxiv.org/abs/2311.17009). Preprint
-- **Uniformity loss**: Wang & Isola (2020). [*Understanding Contrastive Representation Learning through Alignment and Uniformity on the Hypersphere*](https://arxiv.org/abs/2005.10242). ICML
-- **DreamerV3**: Hafner et al. (2025). [*Mastering Diverse Control Tasks through World Models*](https://arxiv.org/abs/2301.04104). Nature
-- **Dreamer 4**: Hafner et al. (2025). [*Training Agents Inside of Scalable World Models*](https://arxiv.org/abs/2509.24527). Preprint
-- **PPO**: Schulman et al. (2017). [*Proximal Policy Optimization Algorithms*](https://arxiv.org/abs/1707.06347). Preprint
-- **Focal Loss**: Lin et al. (2017). [*Focal Loss for Dense Object Detection*](https://arxiv.org/abs/1708.02002). ICCV
+### World models
+- Ha & Schmidhuber (2018). [World Models](https://arxiv.org/abs/1803.10122). NeurIPS.
+- Micheli et al. (2023). [IRIS: Transformers are Sample-Efficient World Models](https://arxiv.org/abs/2209.00588). ICLR.
+- Burchi & Timofte (2025). [TWISTER: Transformer World Models with AC-CPC](https://arxiv.org/abs/2503.04416). ICLR.
+- Hafner et al. (2025). [DreamerV3](https://arxiv.org/abs/2301.04104). Nature.
+- Hafner et al. (2025). [Dreamer 4](https://arxiv.org/abs/2509.24527). Preprint.
+
+### Joint-embedding predictive architectures
+- Maes et al. (2026). [LeWorldModel: Stable End-to-End JEPA from Pixels](https://arxiv.org/abs/2603.19312). Preprint.
+
+### Quantization
+- Mentzer et al. (2024). [FSQ: Finite Scalar Quantization](https://arxiv.org/abs/2309.15505). ICLR.
+- Vali et al. (2026). [iFSQ: Improving FSQ for Image Generation](https://arxiv.org/abs/2601.17124). ICLR.
+
+### Label smoothing and descendants
+- Szegedy et al. (2016). [Rethinking Inception](https://arxiv.org/abs/1512.00567). CVPR.
+- Lin et al. (2017). [Focal Loss](https://arxiv.org/abs/1708.02002). ICCV.
+
+### Conditioning and attention
+- Peebles & Xie (2023). [DiT](https://arxiv.org/abs/2212.09748). ICCV.
+- Esser et al. (2024). [SD3 / MMDiT (QK-norm)](https://arxiv.org/abs/2403.03206). ICML.
+- Su et al. (2024). [RoFormer / RoPE](https://arxiv.org/abs/2104.09864). Neurocomputing.
+
+### Contrastive / slowness / uniformity
+- van den Oord et al. (2018). [CPC / InfoNCE](https://arxiv.org/abs/1807.03748).
+- Huh et al. (2023). [GRWM temporal slowness](https://arxiv.org/abs/2311.17009).
+- Wang & Isola (2020). [Alignment and Uniformity on the Hypersphere](https://arxiv.org/abs/2005.10242). ICML.
+
+### RL
+- Schulman et al. (2017). [PPO](https://arxiv.org/abs/1707.06347).
+
+## Acknowledgments
+
+A100 compute provided by MesoNet (CRIANN, Rouen) through the Representation Learning course at INSA Rouen Normandy. Gameplay data contributions from Maël Planchot. Geometry Dash is developed by RobTop Games.
