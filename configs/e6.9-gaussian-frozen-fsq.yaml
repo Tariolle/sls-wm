@@ -21,7 +21,7 @@ transformer:
   lr_min: 0.0002
   weight_decay: 0.01
   cpc_weight: 1.0
-  token_noise: 0.05
+  token_noise: 0.0
   fsq_noise: 0.05
   label_smoothing: 0.1
   fsq_kernel: gaussian
