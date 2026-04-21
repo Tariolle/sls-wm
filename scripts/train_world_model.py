@@ -1548,13 +1548,16 @@ def main():
                 joint_step_val = torch.compile(
                     joint_step_val, mode=compile_mode, fullgraph=True)
                 if will_freeze:
-                    joint_step_train_frozen = torch.compile(
-                        joint_step_train_frozen, mode=compile_mode, fullgraph=True)
-                    joint_step_val_frozen = torch.compile(
-                        joint_step_val_frozen, mode=compile_mode, fullgraph=True)
+                    # Frozen variants run eager. The use_recon=True variant
+                    # under torch.compile + fullgraph + resume+freeze
+                    # reproducibly yielded loss.grad_fn=None at the first
+                    # backward of epoch freeze+1, despite the smoke test
+                    # passing in a fresh process. Eager costs a small
+                    # per-step overhead for the second half of the run;
+                    # keeps the first half's compiled speed win intact.
                     print(f"JointStep compiled (mode={compile_mode}, "
                           f"{inductor_cfg.compile_threads} compile threads, "
-                          f"train + val + frozen train + frozen val)")
+                          f"train + val; frozen variants eager)")
                 else:
                     print(f"JointStep compiled (mode={compile_mode}, "
                           f"{inductor_cfg.compile_threads} compile threads, train + val)")
