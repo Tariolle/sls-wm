@@ -634,9 +634,23 @@ class JointStep(nn.Module):
             row_idx = (torch.arange(H, device=raw_frames.device) - dy).clamp(0, H - 1)
             raw_frames = raw_frames.index_select(-2, row_idx)
 
-        z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
-            self.fsq, raw_frames, K, tpf, fsq_dim,
-            run_decoder=self.use_recon)
+        # When use_recon=False (FSQ-frozen phase), run the encoder under
+        # no_grad and detach z_q before it reaches the transformer. The
+        # STE conduit via fsq_grad_proj still carries grad into the
+        # transformer (proj.weight grad depends only on z_q's value, not
+        # its requires_grad), so the transformer keeps learning; the
+        # encoder's backward pass is skipped entirely. Specializes at
+        # compile time via the Python branch.
+        if self.use_recon:
+            z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
+                self.fsq, raw_frames, K, tpf, fsq_dim,
+                run_decoder=True)
+        else:
+            with torch.no_grad():
+                z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
+                    self.fsq, raw_frames, K, tpf, fsq_dim,
+                    run_decoder=False)
+            z_q_all = z_q_all.detach()
 
         frame_last = frames_f[:, K - 1]
         frame_tgt = frames_f[:, K]
@@ -1638,14 +1652,19 @@ def main():
         nonlocal fsq_frozen
         if fsq_frozen:
             return
-        for p in fsq.parameters():
-            p.requires_grad_(False)
+        # Zero the fsq_encoder optimizer group LR rather than flipping
+        # requires_grad=False on fsq params. Under fullgraph=True the
+        # compiled JointStep was traced with fsq params requiring grad;
+        # severing that at runtime breaks the graph's grad path. LR=0
+        # alone is sufficient: the use_recon=False JointStep variant
+        # already drops the recon loss, so the only residual gradient
+        # into fsq is the STE path, which LR=0 renders a no-op.
         for group in optimizer.param_groups:
             if group.get("name") == "fsq_encoder":
                 group["lr"] = 0.0
         fsq_frozen = True
-        print(f"=== FSQ frozen (epoch {epoch}): encoder/decoder requires_grad=False, "
-              f"recon loss dropped, fsq_encoder LR -> 0 ===")
+        print(f"=== FSQ frozen (epoch {epoch}): recon loss dropped, "
+              f"fsq_encoder LR -> 0 ===")
 
     if joint and will_freeze and start_epoch > freeze_epoch:
         epoch = start_epoch - 1  # for the print in _freeze_fsq
