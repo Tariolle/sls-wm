@@ -9,7 +9,7 @@ model:
   tokens_per_frame: 64
   context_frames: 4
   levels: [5, 5, 5, 5]
-  dropout: 0.15
+  dropout: 0.10
   adaln: true
 
 transformer:
