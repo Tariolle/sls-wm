@@ -10,19 +10,8 @@
 #SBATCH --time=08:00:00
 #SBATCH --signal=B:USR1@300
 
-# Combined BC pretraining + PPO fine-tuning with auto-resubmit.
-# On first run: BC trains (~5 min), then PPO starts.
-# On resume (job restart): BC skipped, PPO resumes from checkpoint.
-# SIGUSR1 is sent 5 minutes before time limit, triggering resubmit.
-#
-# Config is passed as the first arg (default: configs/e6.7-recon-cauchysls.yaml).
-# The controller scripts pass --fsq-checkpoint when the config is a joint-
-# trained run where tokens.npy reflects a different codebook; leave unset
-# and the scripts fall back to the on-disk tokens.npy workflow.
-#
-# Submit:  sbatch slurm/train_controller.sl [config]
-# Example: sbatch slurm/train_controller.sl configs/e6.7-recon-cauchysls.yaml
-# Monitor: tail -f slurm/logs/train_controller.out
+# BC pretraining then PPO fine-tuning, USR1 auto-resume.
+# Submit: sbatch slurm/train_controller.sl [config]
 
 CONFIG=${1:-configs/e6.7-recon-cauchysls.yaml}
 

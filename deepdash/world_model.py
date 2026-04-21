@@ -77,11 +77,11 @@ class WorldModel(nn.Module):
     ):
         super().__init__()
         self.use_cpc = use_cpc
-        # Learnable per-dim SLS precision γ (E6.3). Stored on WorldModel so
+        # Learnable per-dim SLS precision γ. Stored on WorldModel so
         # it ends up in the transformer optimizer param group (it's a
         # loss-side parameter that drives CE target smoothing, not an
         # encoder parameter). If None, the SLS smoothing uses fixed
-        # dim_weights via the V5 precomputed soft_target_matrix path.
+        # dim_weights via the precomputed soft_target_matrix path.
         if sls_gamma_init is not None:
             self.sls_gamma = nn.Parameter(sls_gamma_init.clone())
         else:
@@ -113,11 +113,11 @@ class WorldModel(nn.Module):
         if not adaln:
             self.action_embed = nn.Embedding(n_actions, embed_dim)
 
-        # Joint training gradient conduit (E6.1+): a learnable Linear that
+        # Joint training gradient conduit: a learnable Linear that
         # contributes zero to the forward value but routes gradient from
         # transformer losses through STE back to the FSQ encoder. See
         # forward() for the zero-sum STE correction pattern. Only created
-        # when fsq_dim is provided; None in V5 behavior.
+        # when fsq_dim is provided; None when non-joint.
         self.fsq_dim = fsq_dim
         if fsq_dim is not None:
             self.fsq_grad_proj = nn.Linear(fsq_dim, embed_dim)
@@ -385,7 +385,7 @@ class WorldModel(nn.Module):
                 forward value is unchanged (term cancels to 0), but gradient
                 flows from downstream losses through fsq_grad_proj and STE
                 back to the FSQ encoder. Status position (index
-                tokens_per_frame) receives no correction. When None, V5
+                tokens_per_frame) receives no correction. When None,
                 behavior is byte-identical.
             return_dense_logits: if True (AdaLN only), also returns logits
                 at every context block position so callers can apply dense
@@ -471,7 +471,7 @@ class WorldModel(nn.Module):
         if self.use_cpc:
             cpc_loss = self._compute_cpc_loss(x, actions)
         else:
-            # JEPA path (E6.2+): AC-CPC removed, transformer CE against
+            # JEPA path: AC-CPC removed, transformer CE against
             # EMA teacher tokens replaces the contrastive objective.
             cpc_loss = torch.zeros((), device=x.device, dtype=x.dtype)
 

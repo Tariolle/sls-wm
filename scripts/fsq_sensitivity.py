@@ -337,12 +337,7 @@ def cv_fit(kernel, specs, similarities, dim_weights, seed):
 
 
 def _pearson_r(kernel, specs, similarities, dim_weights, params):
-    """Pearson correlation between predicted and observed similarities on
-    the full spec set. More legible than fit_mse for intuitive kernel
-    quality: r=0.95 vs r=0.85 is much more interpretable than
-    fit_mse=1.2e-3 vs 8.6e-3. Does not depend on the normalization used
-    by fit_mse.
-    """
+    """Pearson correlation between predicted and observed similarities."""
     dw = np.asarray(dim_weights, dtype=np.float64)
     params_use = params if len(np.atleast_1d(params)) > 1 else np.atleast_1d(params)[0]
     preds = np.array([
@@ -357,9 +352,7 @@ def _pearson_r(kernel, specs, similarities, dim_weights, params):
 
 
 def multi_seed_fit(kernel, specs, similarities, dim_weights, seeds):
-    """Repeat cv_fit across seeds; report mean params, mean CV MSE, and
-    Pearson r of the mean-param predictions against observed similarities.
-    """
+    """Repeat cv_fit across seeds; report mean params, CV MSE, Pearson r."""
     p_list = []
     fit_list = []
     cv_list = []
@@ -462,21 +455,9 @@ def run_analysis(args, device):
         [mse_ratios[single_one_idx[d]][0] for d in range(n_dims)])
     dim_weights = (dim_ratio_means / dim_ratio_means.mean()).tolist()
 
-    # Isotropy score. 0 = perfectly isotropic (every dim equally sensitive),
-    # >~0.15 = notable anisotropy that a calibrated kernel captures better
-    # than an isotropic one. Under frozen FSQ this tells you how wrong
-    # isotropic kernel would be; under joint FSQ training it tells you how
-    # far the encoder had to adapt to match the training kernel (or failed
-    # to, if training kernel was isotropic).
     dw_arr = np.array(dim_weights)
     anisotropy = float(dw_arr.std() / max(dw_arr.mean(), 1e-12))
 
-    # Per-dim sensitivity quantiles over the per-frame MSE ratio
-    # distribution. Tight quantiles = every code is equally sensitive to
-    # this dim (isotropy in the stronger, per-code sense, not just in the
-    # aggregate mean). Wide / multi-modal quantiles = some codes are much
-    # more sensitive than others, meaning an isotropic kernel will miss
-    # local structure even if the mean looks flat.
     dim_quantiles = {}
     for d in range(n_dims):
         k = single_one_idx[d]
@@ -502,11 +483,6 @@ def run_analysis(args, device):
     else:
         print("  -> strong anisotropy (calibrated kernel meaningfully better)")
 
-    # Cross-dim coupling matrix. C[i, j] measures how far (d_i+1, d_j+1)'s
-    # joint MSE ratio deviates from a separable additive prediction. Near
-    # zero -> dims are independent (diagonal metric is adequate). Non-zero
-    # off-diagonal -> codebook has a full metric tensor; even an optimal
-    # diagonal kernel (dim_weights) under-specifies it.
     single_plus_one = {d: mse_ratios[single_one_idx[d]][0] for d in range(n_dims)}
     pair_idx = {}
     for i, spec in enumerate(specs):
@@ -549,8 +525,6 @@ def run_analysis(args, device):
             line += f"   {r2:>8.3f}x [{lo2:>5.2f}, {hi2:>5.2f}]"
         print(line)
 
-    # Qualitative compounding note (L1 vs L2). single_plus_one already
-    # defined earlier for the coupling-matrix block; reused here.
     add_errs, mul_errs = [], []
     for k in range(2, n_dims + 1):
         for combo in combinations(range(n_dims), k):

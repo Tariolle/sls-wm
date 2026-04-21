@@ -1,20 +1,9 @@
-"""Train a post-hoc decoder on frozen FSQ encoder z_q outputs.
+"""Train a decoder on frozen FSQ encoder outputs for visualization.
 
-Used by E6.5+ pure-JEPA runs where the decoder is removed from training
-(`use_recon: false`). The encoder is shaped purely by prediction CE +
-CWU-reg, so the training-time FSQ checkpoint has fresh/random decoder
-weights. This script loads that checkpoint, freezes the encoder (and
-the FSQ quantizer — no learnable params there), and trains a new
-Decoder module on `MSE(decoder(z_q), frame)` over all episodes.
-
-The resulting decoder is saved to `<checkpoint_dir>/fsq_posthoc.pt` and
-is drop-in-replaceable at inference: load the original fsq_best.pt
-first, then overwrite `vae.decoder` state from `fsq_posthoc.pt`.
-
-Because training decisions cannot be affected (decoder is trained
-*after* the encoder/transformer are frozen), dream visualisation is
-biased neither for nor against the encoder's representational choices.
-This is the "faithful viewer" pattern.
+Used when the world model was trained with `use_recon: false`, so the
+training-time FSQ checkpoint has untrained decoder weights. Freezes
+encoder + quantizer, re-inits decoder, trains on MSE(decoder(z_q), frame).
+Output is a drop-in replacement for fsq_best.pt.
 
 Usage:
     python scripts/train_posthoc_decoder.py --config configs/e6.7-recon-cauchysls.yaml
@@ -37,13 +26,7 @@ from deepdash.fsq import FSQVAE, fsqvae_loss
 
 
 class FramesDataset(Dataset):
-    """Streams (frame_uint8) from pre-collected episode directories.
-
-    Shifted duplicates (episodes with `_s<sign><n>_<sign><n>$` suffix)
-    are excluded — they are training-time augmentation for the WM, not
-    additional unique content, and including them would upweight their
-    frames in the decoder loss.
-    """
+    """Streams per-frame uint8 arrays from episode directories (no shifts)."""
 
     def __init__(self, episode_dirs):
         shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
@@ -112,25 +95,15 @@ def main():
     with open(ckpt_dir / "posthoc_decoder_args.json", "w") as f:
         json.dump(vars(args), f, indent=2)
 
-    # Load the full FSQVAE from the WM run's fsq_best.pt. The encoder +
-    # quantizer are frozen; only the decoder receives gradient in this
-    # script. The decoder weights in the checkpoint are whatever came out
-    # of training — typically fresh/random for E6.5 runs (use_recon=False),
-    # or already-trained for E6.4/V5 lineage (use_recon=True). Either way
-    # we re-initialize the decoder before training so results don't depend
-    # on the starting point.
     fsq = FSQVAE(levels=args.levels).to(device)
     fsq_state = torch.load(args.fsq_checkpoint, map_location=device,
                            weights_only=True)
     fsq_state = {k.removeprefix("_orig_mod."): v for k, v in fsq_state.items()}
     fsq.load_state_dict(fsq_state)
-    # Freeze encoder + quantizer.
     for p in fsq.encoder.parameters():
         p.requires_grad = False
     for p in fsq.fsq.parameters():
         p.requires_grad = False
-    # Re-init decoder (drop whatever was in the checkpoint) so the
-    # training outcome is deterministic w.r.t. the seed.
     for m in fsq.decoder.modules():
         if isinstance(m, (torch.nn.Conv2d, torch.nn.ConvTranspose2d)):
             torch.nn.init.kaiming_normal_(m.weight, nonlinearity="relu")

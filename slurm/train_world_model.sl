@@ -10,18 +10,7 @@
 #SBATCH --time=08:00:00
 #SBATCH --signal=B:USR1@300
 
-# Train the world model (FSQ + Transformer) on A100 via
-# scripts/train_world_model.py. Joint mode is the forward path; FSQ is
-# trained jointly with the transformer, no pre-tokenisation required.
-# Current E6.x candidate is configs/e6.7-recon-cauchysls.yaml: E6.4
-# joint architecture (recon + CWU + joint Transformer, recon carries
-# anti-collapse) with SLS reintroduced as isotropic Cauchy sigma=1.0
-# (zero data-derived hyperparameters; see memory/project_sls_kernel_choice.md).
-# E6.5 pure-JEPA failed at ep22 with val codebook collapse — CWU measures
-# only per-dim marginal uniformity and doesn't prevent joint collapse
-# when recon is removed. V5 tokenised-input mode is legacy.
-# Auto-resumes: SLURM sends USR1 5 min before time limit, the trap
-# saves checkpoint and resubmits the job.
+# Joint FSQ + Transformer training on A100 with USR1 auto-resume.
 #
 # Submit:  sbatch slurm/train_world_model.sl [config]
 # Example: sbatch slurm/train_world_model.sl configs/e6.7-recon-cauchysls.yaml

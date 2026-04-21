@@ -1,26 +1,4 @@
-# E6.4 CWU-reg: joint FSQ + Transformer with per-dim Cramér-von Mises
-# uniform-marginal regularizer as the sole anti-collapse anchor.
-#
-# Architecture (Path A from LeWM 2026 analysis, adapted to FSQ):
-#   Loss = recon + alpha_uniform * fsq_marginal_uniform_reg(z_bounded)
-#          + focal_CE(logits, target_indices)
-#          + cpc_weight * cpc_loss   (inert, use_cpc=false)
-#
-# Why the regularizer swap:
-#   E6.2 diagnostic (2026-04-20) showed 91% codebook usage / perplexity 192 /
-#   kernel sigma ~4-5 under slow + sphere-uniformity + detached viewer.
-#   Geometry mismatch: unit-sphere uniformity is wrong target for FSQ's
-#   bounded [-half_d, +half_d]^D hypercube. Slow + JEPA-self-target created
-#   an identity-prediction shortcut. Detached viewer removed the only
-#   information-content anchor.
-#
-# Fix: direct per-dim distribution matching against Uniform[-half_d, +half_d]
-# via Cramér-von Mises. FSQ dims factorize by construction so no Cramér-Wold
-# sketch is needed (unlike SIGReg for continuous non-factorized targets).
-#
-# SLS is disabled here (label_smoothing=0, learnable_gamma=false). Reintroduce
-# once the codebook develops local metric structure (kernel sigma < ~2 in
-# fsq_sensitivity).
+# Joint FSQ + Transformer with CWU anti-collapse regularizer, SLS disabled.
 
 model:
   vocab_size: 625
@@ -37,26 +15,24 @@ transformer:
   episodes_dir: data/death_episodes
   expert_episodes_dir: data/expert_episodes
   epochs: 200
-  batch_size: 896     # E6.2 at B=512 used 47% VRAM on A100; headroom for 896 confirmed after E6.4 arch changes (net neutral mem/sample).
+  batch_size: 896
   lr: 0.004
   lr_min: 0.0002
   weight_decay: 0.01
-  cpc_weight: 1.0       # inert when use_cpc=false
+  cpc_weight: 1.0
   token_noise: 0.05
   fsq_noise: 0.05
-  label_smoothing: 0.0  # SLS disabled; pure focal CE on hard targets
-  fsq_sigma: 0.9        # only consumed if learnable_gamma=true (unused here)
+  label_smoothing: 0.0
+  fsq_sigma: 0.9
   focal_gamma: 2.0
   death_oversample: 4
   seed: 42
   checkpoint_dir: checkpoints_e6.4
-  # Joint
   joint: true
   fsq_lr: 0.001
-  alpha_uniform: 1.0    # Cramer-von Mises weight; CvM values live in [1e-4, 1e-1] so 1.0 gives similar magnitude as CE
+  alpha_uniform: 1.0
   shift_max: 4
-  # Architectural flags
-  use_cpc: false        # AC-CPC off
+  use_cpc: false
   learnable_gamma: false
 
 controller_bc:

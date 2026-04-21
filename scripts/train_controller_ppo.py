@@ -29,9 +29,8 @@ from deepdash.controller import MLPPolicy
 
 
 def load_episodes(episodes_dir, context_frames, vae=None, device=None):
-    """Load episodes. If vae is passed, re-encode frames through it on the fly
-    (needed when the codebook differs from what tokens.npy reflects, e.g.
-    E6.x joint-trained FSQ). If vae is None, fall back to on-disk tokens.npy."""
+    """Load episodes; if vae is passed, re-encode frames through it instead
+    of reading tokens.npy."""
     shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
     episodes = []
     for ep in sorted(Path(episodes_dir).glob("*")):
@@ -366,9 +365,8 @@ def main():
         description="Train controller via PPO in dream rollouts")
     parser.add_argument("--transformer-checkpoint", default=None)
     parser.add_argument("--fsq-checkpoint", default=None,
-                        help="If set, re-encode frames through this FSQ "
-                             "(needed for E6.x joint-trained codebooks; "
-                             "leave unset to use on-disk tokens.npy)")
+                        help="Re-encode frames through this FSQ instead of "
+                             "using on-disk tokens.npy.")
     parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
     # PPO
@@ -457,7 +455,6 @@ def main():
         except Exception as e:
             print(f"torch.compile not available: {e}")
 
-    # Optional FSQ for on-the-fly re-encoding (E6.x joint-trained codebooks).
     vae = None
     if args.fsq_checkpoint is not None:
         from deepdash.fsq import FSQVAE

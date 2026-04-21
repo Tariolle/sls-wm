@@ -54,12 +54,8 @@ from deepdash.world_model import WorldModel
 
 
 class EpisodeLoader:
-    """Lazily loads episodes: keeps current + prefetched next ready.
-
-    Re-encodes frames through the loaded FSQ on the fly rather than trusting
-    tokens.npy (which reflects whatever FSQ was active at the last tokenize
-    pass and may not match the codebook we're dreaming with).
-    """
+    """Loads episodes lazily (current + prefetched next) and re-encodes
+    frames through the currently-loaded FSQ."""
 
     def __init__(self, episodes_dir, context_frames, split_filter="all",
                  val_set=None, vae=None, device=None):

@@ -1,23 +1,12 @@
 """Train the world model (FSQ tokenizer + Transformer dynamics).
 
-E6.1+ joint path (default going forward): --joint trains the FSQ and
-Transformer simultaneously from raw frames, with gradient from the
-transformer losses routed back to the FSQ encoder via STE
-(see JointStep / WorldModel.fsq_grad_proj). Vertical shift augmentation
-is applied on-the-fly per batch (shift_max config key).
-
-V5 legacy path (still works, for reproducing pre-joint results): trains
-the Transformer only on pre-tokenised episode data (tokens.npy files
-produced by a separate pipeline). This pipeline is no longer supported
-in-tree - the `tokenize_episodes.py` and `shift_episodes.py` scripts
-were removed 2026-04-19 in favour of on-the-fly encoding and shifting.
+With --joint, the FSQ and Transformer train simultaneously from raw
+frames; transformer gradient routes back into the encoder via STE (see
+JointStep / WorldModel.fsq_grad_proj). Without --joint, the Transformer
+trains on pre-tokenised episode data (tokens.npy).
 
 Usage:
     python scripts/train_world_model.py --config configs/e6.7-recon-cauchysls.yaml
-
-Historical note: this file used to be named scripts/train_transformer.py
-back when it only trained the Transformer on tokenized input. Renamed
-2026-04-19 when joint training landed.
 """
 
 import argparse
@@ -61,18 +50,9 @@ def _unwrap(model):
 
 
 def build_optimizer(transformer, args, fsq_encoder=None, fsq_lr=None):
-    """AdamW with one or two param groups.
-
-    Single-group (default, matches V5 behavior byte-for-byte):
-        build_optimizer(transformer, args) -> AdamW(transformer.params,
-                                                    lr=args.lr,
-                                                    weight_decay=args.weight_decay)
-
-    Two-group (E6.1 joint training): pass an FSQ encoder module and a
-    separate peak LR for it. The transformer group keeps args.weight_decay;
-    the encoder group uses weight_decay=0.0 to match V5 FSQ (Adam, no WD).
-    Both groups are driven by the same LambdaLR factor; different peak LRs
-    come from each group's base_lr.
+    """AdamW with one param group (transformer only) or two (joint: encoder
+    + transformer). Both groups share the same LambdaLR factor; peak LRs
+    differ via their base_lr. Encoder group uses weight_decay=0.
     """
     groups = [{
         "params": list(transformer.parameters()),
@@ -184,7 +164,7 @@ def focal_cross_entropy(logits, targets, gamma=2.0, soft_target_matrix=None,
       1. `soft_targets` (N, C) - precomputed per-row distribution. Used
          by the learnable-γ path in JointStep where the target kernel is
          rebuilt per batch from γ.
-      2. `soft_target_matrix` (C, C) - V5 path: lookup by target index.
+      2. `soft_target_matrix` (C, C) - static path: lookup by target index.
       3. Fall back to standard F.cross_entropy with uniform smoothing.
 
     Reference: Lin et al., "Focal Loss for Dense Object Detection", ICCV 2017.
@@ -291,7 +271,7 @@ def apply_fsq_noise(tokens, neighbor_table, neighbor_counts, prob, device):
 
 
 # -------------------------------------------------------------------------
-# E6.2+E6.3 helpers: EMA target update, FSQ coord table, learnable-γ targets
+# Learnable-γ SLS helpers: FSQ coord table + per-batch soft-target builder
 # -------------------------------------------------------------------------
 
 def _fsq_coords(levels):
@@ -327,7 +307,7 @@ def _build_soft_targets(target_indices, coords, gamma, sigma, smoothing,
     but recomputed per forward pass so γ receives gradient. Visual
     target rows (< vocab_size) get the full SLS kernel over FSQ
     coordinates; status rows (>= vocab_size) get hard one-hot (never
-    smoothed - death prediction must be exact, matches V5 convention).
+    smoothed - death prediction must be exact, status tokens are exact).
 
     Args:
         target_indices: (N,) long - flattened target token indices.
@@ -335,7 +315,7 @@ def _build_soft_targets(target_indices, coords, gamma, sigma, smoothing,
         gamma: (D,) nn.Parameter - per-dim log-precision; w = exp(γ).
         sigma: float - kernel bandwidth.
         smoothing: float - total mass redistributed to neighbours for
-            visual targets (V5 default 0.1).
+            visual targets (default 0.1).
         full_vocab_size: int - visual codes + status tokens.
         vocab_size: int - visual codes only.
 
@@ -517,7 +497,7 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
 
 
 # -------------------------------------------------------------------------
-# Joint training helpers (E6.1: unfreeze FSQ, train simultaneously)
+# Joint training helpers (unfreeze FSQ, train simultaneously)
 # -------------------------------------------------------------------------
 
 def _encode_joint(fsq, raw_frames, K, tpf, D, fsq_dim_side=8, run_decoder=True):
@@ -532,7 +512,7 @@ def _encode_joint(fsq, raw_frames, K, tpf, D, fsq_dim_side=8, run_decoder=True):
         D: FSQ latent dim (= len(levels)).
         fsq_dim_side: spatial side of the encoder output (8 for 64x64 -> 8x8).
         run_decoder: if False, skip the decoder forward and return recon_all=None.
-            Used by E6.5 pure-JEPA where the decoder is not part of training.
+            Used when the decoder is not part of training.
 
     Returns:
         z_e_all:   (B, K+1, D, side, side)  - continuous encoder output.
@@ -607,28 +587,13 @@ class JointStep(nn.Module):
         super().__init__()
         self.fsq = fsq
         self.wm = wm
-        # alpha_uniform is now the weight on the Cramér-von Mises
-        # per-dim uniform-marginal regularizer (fsq_marginal_uniform_reg),
-        # replacing the Wang&Isola sphere-normalized uniformity loss.
-        # Geometry: FSQ quantizes per-dim into L bins over [-half_d, +half_d],
-        # so the correct anti-collapse target is Uniform[-half_d, +half_d]
-        # per dim, not unit-sphere pairwise dispersion.
         self.alpha_uniform = float(alpha_uniform)
         self.cpc_weight = float(cpc_weight)
         self.label_smoothing = float(label_smoothing)
         self.focal_gamma = float(focal_gamma)
         self.token_noise = float(token_noise)
         self.fsq_noise = float(fsq_noise)
-        # E6.5 pure-JEPA: skip decoder forward + recon loss entirely.
-        # Anti-collapse falls to CWU-reg alone; encoder is shaped purely
-        # by prediction-CE via STE. Currently disabled pending a joint-
-        # distribution anti-collapse regularizer (CWU only enforces
-        # marginal uniformity; E6.5 showed joint collapse can still
-        # happen without a pixel anchor).
         self.use_recon = bool(use_recon)
-        # Learnable γ parameters live on self.wm.sls_gamma (so they join
-        # the transformer optimizer group via wm.parameters()). We only
-        # need the coord table + sigma here for building targets on-the-fly.
         self.fsq_sigma = float(fsq_sigma)
         if fsq_levels is not None:
             coords = _fsq_coords(fsq_levels)
@@ -636,16 +601,7 @@ class JointStep(nn.Module):
             self._has_coords = True
         else:
             self._has_coords = False
-        # Vertical shift augmentation: per-batch random dy ∈ [-shift_max,
-        # +shift_max]. Applied uniformly to all K+1 frames in a window so
-        # the temporal consistency of the context->target pair is preserved.
-        # Edge-padded (rows outside the range clamp to the nearest edge).
-        # Replaces the pre-computed `_s+0_+dy` episode directories used in
-        # V5. 0 disables; 4 matches the V5 shift ladder.
         self.shift_max = int(shift_max)
-        # Cache per-dim half-levels for the uniform-marginal regularizer.
-        # Access via self.fsq.fsq.half_levels at forward time to survive
-        # module wrapping.
         self._has_fsq_levels = fsq_levels is not None
         if neighbor_table is not None:
             self.register_buffer("neighbor_table", neighbor_table, persistent=False)
@@ -669,14 +625,8 @@ class JointStep(nn.Module):
         alive_tok = m.ALIVE_TOKEN
         death_tok = m.DEATH_TOKEN
         B = raw_frames.size(0)
-        # FSQ latent dim inferred from the STE conduit's input size.
         fsq_dim = self.wm.fsq_grad_proj.in_features
 
-        # On-the-fly vertical shift augmentation (replaces the V5 pre-
-        # computed `_s+0_+dy/` episode ladder). One random dy per batch
-        # applied to all K+1 frames of every window, edge-padded via
-        # clamp. Compile-friendly: index_select with a gpu-sampled int
-        # tensor, no .item() sync.
         if self.training and self.shift_max > 0:
             H = raw_frames.shape[-2]
             dy = torch.randint(-self.shift_max, self.shift_max + 1, (1,),
@@ -691,14 +641,6 @@ class JointStep(nn.Module):
         frame_last = frames_f[:, K - 1]
         frame_tgt = frames_f[:, K]
 
-        # Anti-collapse: per-timestep Cramér-von Mises against
-        # Uniform[-half_d, +half_d] on the sigmoid-bounded encoder output.
-        # Tested INDEPENDENTLY at each of the K+1 frame positions then
-        # averaged — temporally-correlated frames in the same episode can
-        # hide distributional non-uniformity under pooled aggregation, so
-        # per-timestep matches LeWM's step-wise SIGReg formulation. FSQ
-        # dims factorize the target, so direct 1D marginal tests are
-        # exact (no Cramér-Wold sketch needed).
         B_, K1_, D_, H_, W_ = z_e_all.shape
         z_bounded_all = self.fsq.fsq.bound(
             z_e_all.reshape(B_ * K1_, D_, H_, W_)
@@ -709,11 +651,6 @@ class JointStep(nn.Module):
             for t in range(K1_)
         ]).mean()
 
-        # Reconstruction anchor: full FSQ recon loss with gradient to the
-        # encoder. E6.4 retains this as the pixel anchor; E6.5 drops it
-        # (use_recon=False) so the encoder is shaped purely by prediction-
-        # CE via STE + CWU-reg, with a post-hoc decoder trained on frozen
-        # z afterwards for visualization only.
         if self.use_recon:
             recon_last = recon_all[:, K - 1]
             recon_tgt = recon_all[:, K]
@@ -723,17 +660,10 @@ class JointStep(nn.Module):
             recon_loss = torch.zeros((), device=raw_frames.device,
                                      dtype=frames_f.dtype)
 
-        # Target indices come from the online encoder on the target frame.
-        # CE against discrete targets is non-differentiable at the argmax
-        # quantization step, so target-side encoder is shaped only by the
-        # recon + uniform terms above — no EMA needed (see LeWM 2026).
         frame_tokens = _build_frame_tokens_joint(
             indices_all, is_death, alive_tok, death_tok)
         target = frame_tokens[:, -1]
 
-        # Noise on context visual tokens (branch-free). Cost when noise=0
-        # is the noise tensors being computed then discarded via where;
-        # still cheap relative to attention.
         ctx = frame_tokens[:, :-1]
         visual = ctx[:, :, :tpf]
         if self.token_noise > 0.0:
@@ -751,30 +681,18 @@ class JointStep(nn.Module):
         wm_out = self.wm(
             frame_tokens, actions, z_q_ste_context=z_q_ste_ctx,
             return_dense_logits=True)
-        # Dense logits only populated in AdaLN mode; non-AdaLN falls back
-        # to single-block target-only loss (legacy path, config-gated).
         if len(wm_out) == 3:
             logits, cpc_loss, dense_logits = wm_out
         else:
             logits, cpc_loss = wm_out
             dense_logits = None
 
-        # Dense next-frame-prediction CE. Context blocks 0..K-1 predict
-        # frames 1..K's VISUAL tokens; the masked target block predicts
-        # frame K's full (visual + status). Status tokens are omitted
-        # from context-block dense loss because intermediate frames in a
-        # window are always ALIVE — a status-CE there would be trivial
-        # and only the target block carries death supervision.
-        # Logits and targets are concatenated along the position axis so
-        # one focal_cross_entropy call gives a position-weighted mean,
-        # matching LeWM's single-mean formulation.
         target_block_flat_logits = logits.reshape(-1, logits.size(-1))
         target_block_flat_targets = target.reshape(-1)
         if dense_logits is not None:
             dense_vis_flat_logits = (
                 dense_logits[:, :, :tpf, :]
                 .reshape(-1, dense_logits.size(-1)))
-            # indices_all is (B, K+1, tpf) visual-only — slice frames 1..K
             dense_vis_flat_targets = indices_all[:, 1:K + 1, :].reshape(-1)
             all_flat_logits = torch.cat(
                 [dense_vis_flat_logits, target_block_flat_logits], dim=0)
@@ -784,9 +702,6 @@ class JointStep(nn.Module):
             all_flat_logits = target_block_flat_logits
             all_flat_targets = target_block_flat_targets
 
-        # Smoothed target distribution. Learnable γ path (E6.3) if
-        # self.wm.sls_gamma is set AND we have the coords table; else
-        # fall back to the precomputed soft_target_matrix (V5 / E6.1).
         if self._has_coords and self.wm.sls_gamma is not None:
             soft_per_batch = _build_soft_targets(
                 all_flat_targets, self.sls_coords, self.wm.sls_gamma,
@@ -1090,44 +1005,24 @@ def main():
                              "(A100 + modern CUDA). Use 'default' on Turing "
                              "to avoid CUDA-graph issues, or 'none' to disable "
                              "compile entirely (eager).")
-    # E6.1 joint training: unfreeze FSQ, train simultaneously, STE-routed
-    # gradient from transformer losses back to the encoder via
-    # WorldModel.fsq_grad_proj. When --joint is off, the script runs in
-    # V5 mode on pre-tokenized episodes (unchanged).
     parser.add_argument("--joint", action="store_true", default=None,
-                        help="Enable joint FSQ+Transformer training (E6.1).")
+                        help="Joint FSQ+Transformer training (STE-routed).")
     parser.add_argument("--fsq-lr", type=float, default=None,
-                        help="Peak LR for the FSQ encoder param group in joint "
-                             "mode. Default: V5 FSQ peak (1e-3).")
+                        help="Peak LR for the FSQ encoder param group (joint mode).")
     parser.add_argument("--alpha-uniform", type=float, default=None,
-                        help="Weight on per-dim Cramer-von Mises uniform-"
-                             "marginal regularizer (joint mode).")
+                        help="Weight on CWU anti-collapse regularizer.")
     parser.add_argument("--shift-max", type=int, default=None,
-                        help="Max per-batch vertical shift (pixels) for on-"
-                             "the-fly data augmentation. One random dy in "
-                             "[-shift_max, +shift_max] applied per batch. "
-                             "0 disables. 4 matches the V5 pre-shift ladder.")
-    # Joint-mode architectural flags.
+                        help="Max per-batch vertical shift pixels. 0 disables.")
     parser.add_argument("--use-cpc", action=argparse.BooleanOptionalAction,
-                        default=None,
-                        help="Include AC-CPC in the joint loss. V5/E6.1 used "
-                             "True; E6.2+ (JEPA-style CE-against-online) uses "
-                             "False.")
+                        default=None, help="Include AC-CPC in the joint loss.")
     parser.add_argument("--use-recon", action=argparse.BooleanOptionalAction,
                         default=None,
-                        help="Include the FSQ recon loss (decoder + MSE) in "
-                             "the joint training loss. V5/E6.1/E6.4 set True; "
-                             "E6.5 pure-JEPA sets False to drop the decoder "
-                             "from training and let CWU-reg carry anti-"
-                             "collapse alone. When False, a post-hoc decoder "
-                             "must be trained on the frozen encoder z for "
-                             "visualization (scripts/train_posthoc_decoder.py).")
+                        help="Include FSQ recon loss in the joint training loss. "
+                             "When off, train a post-hoc decoder separately.")
     parser.add_argument("--learnable-gamma", action=argparse.BooleanOptionalAction,
                         default=None,
-                        help="When True (E6.3): gamma is an nn.Parameter, target "
-                             "distribution rebuilt per forward. When False "
-                             "(V5/E6.1): fixed dim_weights via precomputed "
-                             "soft_target_matrix.")
+                        help="Gamma as nn.Parameter (target distribution rebuilt "
+                             "per forward) rather than fixed dim_weights.")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
@@ -1153,10 +1048,6 @@ def main():
     from deepdash.data_split import get_val_episodes, is_val_episode
     val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
 
-    # Joint mode loads raw frames (frames.npy) and encodes on-the-fly.
-    # V5 mode loads pre-tokenized data (tokens.npy) - legacy path, no
-    # longer actively supported; the tokenize step is expected to be done
-    # externally if you really need it.
     joint = bool(getattr(args, "joint", False))
     source_file = "frames.npy" if joint else "tokens.npy"
 
@@ -1217,7 +1108,7 @@ def main():
                     train_weights.append(
                         float(args.death_oversample) if is_death_frame else 1.0)
     else:
-        # V5 tokenized path (unchanged)
+        # Non-joint tokenized path
         train_frames, train_actions, train_weights = [], [], []
         val_frames, val_actions = [], []
         for ep in all_episodes:
@@ -1245,29 +1136,12 @@ def main():
                     train_weights.append(
                         float(args.death_oversample) if is_death_frame else 1.0)
 
-    # Flag resolution. use_cpc preserves AC-CPC for non-JEPA configs;
-    # learnable_gamma gates SLS (disabled here; reintroduce once codebook
-    # has local metric structure). EMA/viewer/slow were removed in the
-    # E6.4 CWU-reg redesign — joint training now relies on recon +
-    # uniform-marginal regularizer + token CE only.
     use_cpc = bool(getattr(args, "use_cpc", True) if getattr(args, "use_cpc", None) is not None else True)
     use_recon = bool(getattr(args, "use_recon", True) if getattr(args, "use_recon", None) is not None else True)
     learnable_gamma = bool(getattr(args, "learnable_gamma", False) if getattr(args, "learnable_gamma", None) is not None else False)
 
-    # gamma init: capacity-ratio normalised so uniform codebooks give
-    # w = 1 per dim (matching V5's isotropic kernel scale). Formula:
-    #     w_d = L_d / mean(L) = D * L_d / sum(L)
-    #     gamma_d = ln(w_d)
-    # Closed-form, data-independent, and scale-preserving: anyone using
-    # SLS on any FSQ codebook gets a reproducible init from the `levels`
-    # list alone. On uniform codebooks (e.g. [5,5,5,5]) this starts at
-    # gamma = 0 (w = 1, identical to V5's kernel scale); gamma then
-    # differentiates per-dim via data-driven gradients since per-dim
-    # data distribution isn't symmetric. On non-uniform codebooks
-    # (e.g. [8,5,5,5]) it starts with a structural prior: higher-L dims
-    # get heavier w to compensate their finer-grained bin structure.
-    # (Raw L/sum(L) without the mean-normalisation would give w < 1
-    # everywhere and silently widen the kernel ~1/mean(w)x.)
+    # Capacity-ratio gamma init: w_d = D * L_d / sum(L), gamma_d = ln(w_d).
+    # Data-independent, gives w=1 on uniform codebooks.
     sls_gamma_init = None
     if learnable_gamma and args.fsq_levels is not None:
         levels_t = torch.tensor(args.fsq_levels, dtype=torch.float32)
@@ -1397,7 +1271,7 @@ def main():
 
     # Derive run name from checkpoint_dir slug (post-"checkpoints_" prefix).
     # This trains the whole world model (FSQ + Transformer in joint mode,
-    # Transformer only in V5 mode), so a single "wm-<experiment>" label
+    # Transformer only in non-joint mode), so a single "wm-<experiment>" label
     # matches the script name and reflects all metrics logged.
     _ckpt_name = Path(args.checkpoint_dir).name
     _slug = re.sub(r"^checkpoints[_-]?", "", _ckpt_name) or _ckpt_name
@@ -1405,7 +1279,7 @@ def main():
     wandb_init(project="deepdash", name=run_name,
                config=vars(args), resume_id=wandb_resume_id)
 
-    # torch.compile the model. In V5 mode we compile WorldModel alone.
+    # torch.compile the model. In non-joint mode we compile WorldModel alone.
     # In joint mode we defer until JointStep is built (below) and compile
     # the wrapped FSQ+Transformer+loss graph as one unit so CUDA graph
     # capture spans encode -> STE -> transformer -> losses.
@@ -1439,7 +1313,7 @@ def main():
         neighbor_table, neighbor_counts = None, None
 
     # Build structured label smoothing matrix.
-    # Under learnable γ (E6.3) the target distribution is rebuilt per
+    # Under learnable γ the target distribution is rebuilt per
     # forward pass inside JointStep, so precomputing the matrix is dead
     # work; skip it and log a different message so the run logs reflect
     # what's actually happening.
@@ -1488,7 +1362,7 @@ def main():
     else:
         soft_target_matrix = None
 
-    # Build and compile JointStep (E6.1). Two instances share the same
+    # Build and compile JointStep. Two instances share the same
     # underlying fsq + model parameters; only the noise settings differ
     # so each can be specialised by torch.compile.
     joint_step_train = None
@@ -1589,7 +1463,7 @@ def main():
             "train_code_usage_pct", "train_code_ppl_pct",
             "val_code_usage_pct", "val_code_ppl_pct",
         ]
-        # E6.3 learnable γ: one column per FSQ dim with per-epoch value.
+        # Learnable γ trajectory: one column per FSQ dim.
         # The per-dim trajectory is the headline paper plot.
         if model.sls_gamma is not None:
             for i in range(model.sls_gamma.shape[0]):
@@ -1683,7 +1557,7 @@ def main():
                                  + a_u * val_metrics["unif"])
                 fsq_gap = fsq_val_total - fsq_train_total
 
-            # Suppress cpc= column when AC-CPC is disabled (E6.2+); logging
+            # Suppress cpc= column when AC-CPC is disabled (JEPA); logging
             # a hardcoded zero is just noise.
             train_cpc_str = f"cpc={train_cpc:.3f} | " if use_cpc else ""
             val_cpc_str = f"cpc={val_cpc:.3f} | " if use_cpc else ""
@@ -1809,16 +1683,6 @@ def main():
                 state_dict["fsq"] = fsq.state_dict()
             torch.save(state_dict, ckpt_dir / "transformer_state.pt")
 
-            # Death F1 is the right selection metric for joint training.
-            # val_acc is over 625 visual-token classes whose target indices
-            # drift as the codebook densifies under joint training -- a
-            # transformer that correctly spreads mass over close-metric
-            # neighbours (ideal SLS behaviour) loses top-1 to that drift
-            # even while improving. Death tokens are fixed indices (625/626),
-            # not part of the FSQ codebook, so death F1 is codebook-drift-
-            # invariant and binary (high SNR). It also aligns with the
-            # deployment objective (survival). No epoch guard needed: F1
-            # starts at 0 and climbs cleanly, no codebook-collapse artifact.
             if val_d_f1 > best_val_death_f1:
                 best_val_death_f1 = val_d_f1
                 torch.save(_unwrap(model).state_dict(), ckpt_dir / "transformer_best.pt")

@@ -31,12 +31,8 @@ def _unwrap(model):
 
 
 def load_episodes(episodes_dir, context_frames, vae=None, device=None):
-    """Load episodes, encoding frames through the passed FSQ on the fly.
-
-    If vae is None, falls back to the on-disk tokens.npy (V5 / pre-E6.x
-    workflow). Pass vae + device for any E6.x joint-trained FSQ where the
-    on-disk tokens reflect a different codebook.
-    """
+    """Load episodes; if vae is passed, re-encode frames through it instead
+    of reading tokens.npy."""
     shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
     K = context_frames
     episodes = []
@@ -128,9 +124,8 @@ def main():
     parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
     parser.add_argument("--transformer-checkpoint", default=None)
     parser.add_argument("--fsq-checkpoint", default=None,
-                        help="If set, re-encode frames through this FSQ "
-                             "(needed for E6.x joint-trained codebooks; "
-                             "leave unset to use on-disk tokens.npy)")
+                        help="Re-encode frames through this FSQ instead of "
+                             "using on-disk tokens.npy.")
     parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=512)
@@ -183,7 +178,6 @@ def main():
     wm.eval()
     print("World model loaded")
 
-    # Optional FSQ for on-the-fly re-encoding (E6.x joint-trained codebooks).
     vae = None
     if args.fsq_checkpoint is not None:
         from deepdash.fsq import FSQVAE

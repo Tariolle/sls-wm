@@ -43,14 +43,7 @@ def compute_val_set(death_dir, expert_dir):
 
 
 class EpisodeLoader:
-    """Loads episodes and re-encodes frames through the *current* FSQ on the
-    fly. The on-disk tokens.npy reflects whatever FSQ was active when
-    scripts/tokenize.py was last run (typically the V5 FSQ in
-    checkpoints_v5_fsq/fsq_best.pt). For joint-trained runs (E6.x) the
-    codebook is different, so trusting tokens.npy would feed alien token
-    ids to the transformer. We load frames.npy and encode at load time
-    against the FSQ we actually plan to use for this dream session.
-    """
+    """Loads episodes and re-encodes frames through the currently-loaded FSQ."""
     """Lazily loads episodes: keeps current + prefetched next ready."""
 
     def __init__(self, episodes_dir, context_frames, split_filter="all",
@@ -172,10 +165,6 @@ def main():
     vae.eval()
     print("FSQ-VAE loaded")
 
-    # Load world model. fsq_dim = len(levels) must match the training-time
-    # value so the optional fsq_grad_proj STE conduit (E6.1+ joint training)
-    # is present on the module and state_dict loads cleanly. The conduit is
-    # unused at inference time (predict_next_frame never passes z_q_ste).
     wm = WorldModel(
         vocab_size=args.vocab_size, embed_dim=args.embed_dim,
         n_heads=args.n_heads, n_layers=args.n_layers,

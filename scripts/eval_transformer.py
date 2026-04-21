@@ -21,12 +21,7 @@ from deepdash.world_model import WorldModel
 
 
 def _encode_episode(ep_dir, vae, device):
-    """Load frames.npy and encode through the currently-loaded FSQ.
-
-    Replaces `np.load(ep_dir / 'tokens.npy')`: trusting tokens.npy here
-    would feed V5-era codes to a transformer trained against a different
-    (joint, E6.x) codebook.
-    """
+    """Load frames.npy and encode through the currently-loaded FSQ."""
     frames = np.load(ep_dir / "frames.npy")
     with torch.no_grad():
         x = torch.from_numpy(frames).float().to(device) / 255.0

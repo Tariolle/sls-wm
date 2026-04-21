@@ -68,8 +68,7 @@ def load_episodes(episodes_dir, context_frames, vae=None, device=None,
             continue
         tp = ep / "tokens.npy"
         if vae is not None:
-            # Always re-encode against the passed FSQ; on-disk tokens.npy
-            # may reflect a different codebook (E6.x concern).
+            # Re-encode against the passed FSQ rather than trust tokens.npy.
             if not (ep / "frames.npy").exists():
                 continue
             frames = np.load(ep / "frames.npy")

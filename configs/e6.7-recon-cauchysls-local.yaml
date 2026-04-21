@@ -1,6 +1,4 @@
-# E6.7 local probe on RTX 2060 SUPER (Turing, 8 GB VRAM, Windows).
-# Same architectural flags as e6.7-recon-cauchysls.yaml with Turing
-# hardware overrides.
+# Local probe variant of e6.7-recon-cauchysls.yaml (fp16, smaller batch).
 
 model:
   vocab_size: 625
