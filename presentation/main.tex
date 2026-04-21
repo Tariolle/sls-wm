@@ -408,11 +408,48 @@
 
 \begin{frame}{FSQ-VAE: Training}
   \begin{itemize}
-    \item $\sim$252K frames ($\sim$\naugeps{} episodes), batch 2048
-    \item GRWM regularization (temporal slowness + uniformity)
-    \item Cosine LR schedule, 200 epochs
-    \item GPU: A100, total training time: $\sim$48 min
+    \item $\sim$252K frames ($\sim$\naugeps{} episodes), batch 1024
+    \item \textbf{Jointly} optimized with the transformer: no frozen pre-stage
+    \item Pixel MSE kept as an \textbf{anchor} on codebook semantics
+    \item Prediction gradients route back into the encoder via a straight-through estimator (STE) through a learnable linear projection \texttt{fsq\_grad\_proj}
+    \item \textbf{Encoder frozen halfway}: FSQ converges fast, transformer needs more budget. Second half is transformer-only on a fixed codebook; recon loss dropped, decoder forward/backward skipped.
+    \item Cosine LR schedule + 10\% warmup, AdamW, weight decay $1e^{-4}$, 100 epochs total
   \end{itemize}
+\end{frame}
+
+\begin{frame}{V + M: Joint Training}
+  \vspace{1em}
+  \begin{center}
+  \resizebox{0.95\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw, rounded corners, minimum height=1.0cm, minimum width=1.8cm, align=center, font=\scriptsize, line width=0.7pt},
+    loss/.style={rectangle, draw=insared, fill=insared!10, rounded corners, minimum height=0.8cm, minimum width=1.6cm, align=center, font=\scriptsize, line width=0.7pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    darr/.style={-{Stealth[length=2.5mm]}, thick, dashed, insared},
+    lbl/.style={font=\tiny, align=center},
+  ]
+    \node[lbl] (in) {$\mathbf{x}_t$};
+    \node[block, fill=vcolor!20, draw=vcolor, right=0.6cm of in] (enc) {Encoder};
+    \node[block, fill=vcolor!35, draw=vcolor, right=0.5cm of enc] (fsq) {FSQ};
+    \node[block, fill=vcolor!15, draw=vcolor, above right=0.2cm and 0.7cm of fsq] (dec) {Decoder};
+    \node[loss, right=0.5cm of dec] (mse) {pixel MSE\\(anchor)};
+    \node[block, fill=mcolor!20, draw=mcolor, below right=0.2cm and 0.7cm of fsq] (tfm) {Transformer};
+    \node[loss, right=0.5cm of tfm] (ce) {CE + SLS};
+
+    \node[block, fill=gray!10, draw=insared, dashed, below=0.9cm of fsq, minimum width=2.4cm] (ste) {\texttt{fsq\_grad\_proj} (STE)};
+
+    \draw[arr] (in) -- (enc);
+    \draw[arr] (enc) -- (fsq);
+    \draw[arr] (fsq) -- (dec);
+    \draw[arr] (fsq) -- (tfm);
+    \draw[arr] (dec) -- (mse);
+    \draw[arr] (tfm) -- (ce);
+
+    \draw[darr] (ce.south) |- (ste.east);
+    \draw[darr] (ste.west) -| (enc.south);
+  \end{tikzpicture}%
+  }
+  \end{center}
 \end{frame}
 
 \begin{frame}{FSQ-VAE: Reconstructions}
@@ -420,66 +457,27 @@
     \includegraphics[width=\textwidth]{fsq_reconstructions.png}
   \end{center}
   \begin{center}
-    \small RMSE $\approx 0.025$ per pixel
+    \small{55$\times$ compression}: $32{,}768 \to 594$ bits/frame
   \end{center}
-\end{frame}
-
-\begin{frame}{FSQ-VAE: Abstraction for Pipeline}
-  \vspace{1em}
-  \begin{center}
-  \resizebox{\textwidth}{!}{%
-  \begin{tikzpicture}[
-    block/.style={rectangle, draw, rounded corners, minimum height=1.4cm, minimum width=3cm, align=center, font=\normalsize, line width=0.8pt},
-    arr/.style={-{Stealth[length=3mm]}, thick},
-    lbl/.style={font=\small, align=center},
-  ]
-    \node[lbl] (in) {$\mathbf{x}_t$\\{\scriptsize 64$\times$64}};
-    \node[block, fill=vcolor!20, draw=vcolor, right=1.2cm of in] (enc) {\textbf{Encoder}\\{\scriptsize frozen}};
-    \node[block, fill=vcolor!35, draw=vcolor, right=1cm of enc, minimum width=2cm] (fsq) {\textbf{FSQ}};
-    \node[lbl, right=1.2cm of fsq] (out) {$\mathbf{z}_t$\\{\scriptsize 8$\times$8}};
-    \node[block, fill=gray!10, draw=gray!40, right=2.5cm of out, text=gray!50] (dec) {Decoder\\{\scriptsize viz only}};
-
-    \draw[arr] (in) -- (enc);
-    \draw[arr] (enc) -- (fsq);
-    \draw[arr] (fsq) -- (out);
-    \draw[-{Stealth[length=3mm]}, gray!40, dashed, thick] (out) -- (dec);
-  \end{tikzpicture}%
-  }
-  \end{center}
-
-  \vspace{1em}
-  \begin{itemize}
-    \item Encoder + FSQ \textbf{frozen} after training
-    \item Decoder $\to$ visualization only (dream rollouts)
-    \item \textbf{55$\times$ compression}: $32{,}768 \to 594$ bits/frame
-  \end{itemize}
 \end{frame}
 
 % ==========================================================
 \section{Phase 2: M (Transformer)}
 % ==========================================================
 
-\begin{frame}{Training: Dual Token Noise}
+\begin{frame}{Training: FSQ-Neighbor Token Noise}
   \vspace{0.5em}
   \begin{columns}[T]
     \column{0.55\textwidth}
-    Two complementary noise types on context tokens:
+    Noise on context tokens during training: with probability 5\% per token, replace it by a $\pm 1$ neighbour in one FSQ dimension.
 
     \vspace{0.5em}
-    \textbf{1. Random replacement (5\%)}
     \begin{itemize}
-      \item Any of 625 tokens uniformly
-      \item Forces global robustness
+      \item Visually near-identical patches (one quantization step)
+      \item Forces the transformer to treat near-miss codes as equivalent context
+      \item Matches the SLS assumption that near-miss is almost-right: consistent signal on both sides of the loss
     \end{itemize}
-
-    \vspace{0.5em}
-    \textbf{2. FSQ neighbor substitution (5\%)} {\color{insared}\textit{(novel)}}
-    \begin{itemize}
-      \item $\pm1$ in one FSQ dimension
-      \item Visually near-identical patches
-      \item Forces embedding to learn codebook topology
-    \end{itemize}
-
+    
     \column{0.45\textwidth}
     \vspace{-1.2em}
     \begin{center}
@@ -488,47 +486,22 @@
   \end{columns}
 \end{frame}
 
-\begin{frame}[t]{Novel: FSQ-Structured Label Smoothing}
-  \vspace{0.8em}
-  \textbf{Problem}: uniform smoothing $\to$ FSQ neighbor = random token
-
-  \vspace{0.5em}
-  \textbf{Solution} {\color{insared}\textit{(novel)}}: Gaussian kernel over FSQ coordinate distance:
-  \[
-    w(a,b) = \exp\!\left(-\frac{d^2(a,b)}{2\sigma^2}\right), \quad d^2 = \sum_d \alpha_d\,(\Delta_d)^2, \quad \sigma = 0.9
-  \]
-
-  $\sigma$ and per-dim weights calibrated from empirical MSE (5{,}000 val frames, 500-sample bootstrap, 3 seeds).
-
-  \vspace{0.2em}\end{frame}
-
-\begin{frame}{Transformer: Current Model (V5 baseline)}
-  \vspace{0.5em}
-  \begin{center}
-    \small
-    \begin{tabular}{lc}
-      \toprule
-      \textbf{Metric} & \textbf{Value} \\
-      \midrule
-      Parameters & $\sim$35M \\
-      Val accuracy & 32.2\% \\
-      Death F1 & 0.76 \\
-      Val CPC loss & 0.307 \\
-      Val--train gap & 0.056 \\
-      \bottomrule
-    \end{tabular}
-  \end{center}
-
-  \vspace{0.5em}
-  Key changes from V4:
-  \begin{itemize}
-    \item FSQ codebook $[8,5,5,5]$ (1000 codes) $\to$ $[5,5,5,5]$ (\fsqcodes{} codes), near-double perplexity utilization
-    \item Structured label smoothing with \emph{calibrated} per-dim weights $\boldsymbol{\alpha} = [1.02,\,0.94,\,0.83,\,1.20]$ ($\sigma$=0.9, $\varepsilon$=0.1)
-    \item AdaLN-Zero + QK-norm + RoPE retained from V4
-  \end{itemize}
+\begin{frame}[t]{FSQ-Structured Label Smoothing}
+  \vspace{0.4em}
+  \textbf{Problem}: uniform smoothing treats an FSQ neighbour like a random token.
 
   \vspace{0.3em}
-  {\footnotesize Val CPC is higher than V4's 0.133 because the cleaner FSQ has fewer easy contrastive negatives; this is a property of the tokenizer, not a regression.}
+  \textbf{Kernel study} over FSQ coordinate distance $d = \lVert \mathbf{c}_i - \mathbf{c}_j \rVert$:
+  \vspace{-0.2em}
+  \[
+    k_{\text{Gauss}}(d) = e^{-d^2/2\sigma^2}, \quad
+    k_{\text{Laplace}}(d) = e^{-d/\sigma}, \quad
+    k_{\text{Cauchy}}(d) = \frac{1}{1 + d^2/\sigma^2}
+  \]
+
+  \vspace{0.2em}
+  \textbf{Design choice}: narrow Gaussian ($\sigma = 0.7$). Gaussian's squared-exponential tails decay faster than Laplace or Cauchy, so distant neighbours receive negligible mass ($k(2) \approx 0.02$); $\sigma = 0.7$ still places meaningful mass on the immediate neighbour ($k(1) \approx 0.37$). The goal is to reward near-misses without tempting the predictor to commit less strongly to the correct code.
+
 \end{frame}
 
 % ==========================================================
@@ -580,7 +553,6 @@
   \vspace{0.5em}
   \textbf{Stage 2: PPO in Dream} (generalization)
   \begin{itemize}
-    \item Uniform context sampling, excluding last $2K$ frames per episode
     \item Reward: $+1$ per step survived $-0.2$ per jump, rollout stops at death prediction
     \item 512 episodes/iteration, 45-step rollouts, 4 PPO epochs, GAE ($\gamma$=0.995, $\lambda$=0.95)
     \item Clipped surrogate + percentile advantage norm + EMA target critic
@@ -601,8 +573,8 @@
     \item \textbf{Sobel}: filters visual noise $\to$ structural perception
     \item \textbf{Vertical shifts}: reduced overfitting, physically valid
     \item \textbf{Parallel decoding}: 1 pass vs 65 $\to$ real-time
-    \item \textbf{Structured label smoothing}: grounded in FSQ distance analysis
-    \item \textbf{AdaLN-Zero}: best CPC (0.133)
+    \item \textbf{Structured label smoothing}: narrow Gaussian on FSQ lattice distance
+    \item \textbf{AdaLN-Zero}: action conditioning from DiT
     \item \textbf{QK-norm}: stabilized AdaLN (4 runs diverged without)
   \end{itemize}
 \end{frame}
@@ -611,12 +583,11 @@
   \vspace{0.5em}
   \begin{itemize}
     \item \textbf{$\beta$-VAE}: blurry, large grid search $\to$ abandoned
-    \item \textbf{LR $10^{-3}$ w/o augmentation}: 13.5pp train/val gap $\to$ memorization
-    \item \textbf{FSQ neighbor substitution}: no measurable impact, kept (free)
     \item \textbf{Pure RL (CMA-ES)}: $\sim$12 steps (local optimum) $\to$ BC required
-    \item \textbf{Death oversample 15$\times$}: memorization (44pp precision gap). Fix: 5$\times$ + expert
+    \item \textbf{Death oversample 15$\times$}: memorization (44pp precision gap). Fix: 4$\times$ + expert
     \item \textbf{MaskGIT}: degraded on 64 tokens, parallel single-step better
-    \item \textbf{CNN controller on $\mathbf{z}_t$}: duplicated work the transformer already did.
+    \item \textbf{CNN controller on $\mathbf{z}_t$}: duplicated work the transformer already did
+    \item \textbf{Pure-JEPA} (no pixel anchor): codebook collapse; our marginal anti-collapse regularizer (CvM adapted from LeWorldModel's SIGReg) was insufficient for joint-distribution degeneracy
   \end{itemize}
 \end{frame}
 
@@ -626,8 +597,8 @@
 
 \begin{frame}{Limitations \& Future Work}
   \begin{itemize}
-    \item \textbf{Controller precision}: jumps too often/early
-    \item \textbf{Dream/reality gap}: $\mathbf{h}_t$ distribution differs in real game
+    \item \textbf{Scope}: only one game (and standard levels). Generalization to other games/levels unknown
+    \item \textbf{Sample efficiency}: $\sim$252K frames is small for deep learning, but still requires hours of gameplay to collect
   \end{itemize}
 \end{frame}
 
@@ -642,6 +613,8 @@
     \item Micheli, V. et al. (2023). \href{https://arxiv.org/abs/2209.00588}{\textit{Transformers are Sample-Efficient World Models}} (IRIS). ICLR
     \item Burchi, M. \& Timofte, R. (2025). \href{https://arxiv.org/abs/2503.04416}{\textit{TWISTER: Transformer-based World Models with AC-CPC}}. ICLR
     \item Mentzer, F. et al. (2024). \href{https://arxiv.org/abs/2309.15505}{\textit{Finite Scalar Quantization: VQ-VAE Made Simple}}. ICLR
+    \item Vali, M. et al. (2026). \href{https://arxiv.org/abs/2601.17124}{\textit{iFSQ: Improving FSQ for Image Generation}}. ICLR
+    \item Wang, T. \& Isola, P. (2020). \href{https://arxiv.org/abs/2005.10242}{\textit{Alignment and Uniformity on the Hypersphere}}. ICML
     \item Hafner, D. et al. (2025). \href{https://arxiv.org/abs/2301.04104}{\textit{Mastering Diverse Control Tasks through World Models}} (DreamerV3). Nature
     \item Maes, L. et al. (2026). \href{https://arxiv.org/abs/2603.19312}{\textit{LeWorldModel: Stable End-to-End JEPA from Pixels}}. Preprint
     \item Peebles, W. \& Xie, S. (2023). \href{https://arxiv.org/abs/2212.09748}{\textit{Scalable Diffusion Models with Transformers}} (DiT). ICCV
@@ -674,14 +647,14 @@
     \node[block, minimum width=2cm, right=0.6cm of blocks] (head) {Prediction\\Head};
     \node[lbl, right=0.6cm of head] (out1) {$\hat{\mathbf{z}}_{t+1}$, $\hat{d}_{t+1}$\\{\tiny 64 tokens + death}};
 
-    \node[block, minimum width=2cm, above=0.4cm of blocks, fill=mcolor!15] (cpc) {AC-CPC Loss};
-
     \draw[arr] (in) -- (emb);
     \draw[arr] (emb) -- (rope);
     \draw[arr] (rope) -- (blocks);
     \draw[arr] (blocks) -- (head);
-    \draw[arr] (blocks) -- (cpc);
     \draw[arr] (head) -- (out1);
+
+    % STE backward arrow: prediction head back through embedding into encoder
+    \draw[-{Stealth[length=2.5mm]}, dashed, thick, insared] (head.north) -- ++(0,0.8) -| node[above, lbl, pos=0.25, insared] {STE via \texttt{fsq\_grad\_proj}} (emb.north);
 
     \node[below=0.4cm of blocks, lbl, font=\scriptsize] (ht) {$\mathbf{h}_t \in \mathbb{R}^{\hdim}$};
     \draw[arr] (blocks.south) -- (ht);
@@ -692,7 +665,6 @@
   \vspace{0.3em}
   \begin{center}
     \small
-    $\sim$35M params \quad\quad
     Parallel decode: 1 step vs \ntokens+1 autoregressive \quad\quad
     Vocab: $|\mathcal{V}| = \vocabsize$
   \end{center}
