@@ -617,6 +617,15 @@ class JointStep(nn.Module):
 
     def forward(self, raw_frames, actions, is_death):
         from deepdash.fsq import fsqvae_loss, fsq_marginal_uniform_reg
+        # One-shot probe to check whether the forward is running under a
+        # grad-disabled context. Prints once per instance (first call).
+        if not getattr(self, "_dbg_printed", False):
+            import torch as _t
+            print(f"[DBG fwd] is_grad_enabled={_t.is_grad_enabled()} "
+                  f"inference_mode={_t.is_inference_mode_enabled()} "
+                  f"use_recon={self.use_recon} training={self.training}",
+                  flush=True)
+            self._dbg_printed = True
 
         m = _unwrap(self.wm)
         K = m.context_frames
