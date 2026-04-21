@@ -42,6 +42,14 @@ class FSQQuantizer(nn.Module):
         self.register_buffer("half_levels",
                              torch.tensor([L // 2 for L in levels], dtype=torch.float32))
 
+    def bound(self, z_e):
+        """Bound raw encoder output to [-half_d, +half_d] per channel.
+
+        Exposed for regularizers that need the pre-round bounded representation.
+        """
+        half = self.half_levels.view(1, -1, 1, 1)
+        return (2.0 * torch.sigmoid(1.6 * z_e) - 1.0) * half
+
     def forward(self, z_e):
         """Quantize encoder output via iFSQ bounding + round.
 
@@ -60,7 +68,7 @@ class FSQQuantizer(nn.Module):
         # Even L: values in {-L/2+1, ..., L/2}  then shift by -0.5 to center
         # Following the FSQ paper's approach for even levels.
         half = self.half_levels.view(1, -1, 1, 1)  # (1, D, 1, 1)
-        z_bounded = (2.0 * torch.sigmoid(1.6 * z_e) - 1.0) * half
+        z_bounded = self.bound(z_e)
         z_q = z_bounded.round()
         # Clamp to valid range to handle even levels correctly
         levels = self.levels.float().view(1, -1, 1, 1)
@@ -215,3 +223,41 @@ def grwm_uniformity(z_e, t=2.0):
     # Pairwise squared distances
     sq_dists = torch.cdist(z_flat, z_flat).pow(2)  # (B, B)
     return sq_dists.mul(-t).exp().mean().log()
+
+
+def fsq_marginal_uniform_reg(z_bounded, half_levels):
+    """Per-dim Cramér-von Mises distance from Uniform[-half_d, +half_d].
+
+    FSQ dims are factorised by construction, so each 1D marginal can be
+    tested directly — no Cramér-Wold sketching needed. CvM is used
+    instead of KS for smoother gradients.
+
+    Accepts (B, D, H, W) [single batch] or (B, T, D, H, W) [T independent
+    frames share the regulariser]. In the 5D case each frame contributes
+    its own CvM-per-channel over B*H*W samples; the returned scalar is
+    the mean across T and D. Single fused sort replaces the per-frame
+    Python loop that was here before.
+    """
+    half = half_levels.to(z_bounded.device, dtype=z_bounded.dtype)
+    if z_bounded.ndim == 4:
+        B, D, H, W = z_bounded.shape
+        z_flat = (z_bounded.permute(1, 0, 2, 3)
+                  .reshape(D, B * H * W)
+                  .contiguous())
+        M = z_flat.size(1)
+        h_sorted, _ = z_flat.sort(dim=1)
+        i_emp = (torch.arange(M, device=z_flat.device, dtype=z_flat.dtype) + 0.5) / M
+        cdf = ((h_sorted + half.view(D, 1)) / (2.0 * half.view(D, 1))).clamp(0.0, 1.0)
+        return (cdf - i_emp.view(1, M)).pow(2).mean()
+    if z_bounded.ndim == 5:
+        B, T, D, H, W = z_bounded.shape
+        z_flat = (z_bounded.permute(1, 2, 0, 3, 4)
+                  .reshape(T, D, B * H * W)
+                  .contiguous())
+        M = z_flat.size(-1)
+        h_sorted, _ = z_flat.sort(dim=-1)
+        i_emp = (torch.arange(M, device=z_flat.device, dtype=z_flat.dtype) + 0.5) / M
+        cdf = ((h_sorted + half.view(1, D, 1))
+               / (2.0 * half.view(1, D, 1))).clamp(0.0, 1.0)
+        return (cdf - i_emp.view(1, 1, M)).pow(2).mean()
+    raise ValueError(f"expected 4D or 5D input, got {z_bounded.ndim}D")

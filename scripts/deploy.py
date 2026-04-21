@@ -143,6 +143,7 @@ def main():
         context_frames=args.context_frames, dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
+        fsq_dim=len(args.levels) if getattr(args, 'levels', None) else None,
     ).to(device)
     state = torch.load(args.transformer_checkpoint, map_location=device,
                        weights_only=True)

@@ -9,7 +9,7 @@ Usage
     parser.add_argument("--lr", type=float)
     parser.add_argument("--batch-size", type=int)
     ...
-    config = load_config("configs/v4.yaml", parser.parse_args(), section="transformer")
+    config = load_config("configs/e6.8-recon-laplacesls.yaml", parser.parse_args(), section="transformer")
     # config["lr"], config["batch_size"], etc.
 """
 
@@ -74,7 +74,7 @@ def load_config(
     return config
 
 
-DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "configs" / "v4.yaml"
+DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "configs" / "e6.8-recon-laplacesls.yaml"
 
 
 def apply_config(
@@ -96,7 +96,7 @@ def apply_config(
         YAML section for component-specific values (e.g. "transformer").
     config_path : str | Path, optional
         Path to YAML config.  Falls back to ``args.config`` then
-        ``configs/v4.yaml``.
+        ``configs/e6.8-recon-laplacesls.yaml``.
     """
     path = config_path or getattr(args, "config", None) or DEFAULT_CONFIG
     config = load_config(path, section=section)

@@ -8,7 +8,7 @@ and --fsq-dim-weights.
 
 Usage:
     python scripts/fsq_sensitivity.py \
-        --checkpoint checkpoints_v5_fsq/fsq_best.pt --levels 5 5 5 5
+        --checkpoint checkpoints_e6.7/fsq_best.pt --levels 5 5 5 5
 """
 
 import argparse
@@ -60,6 +60,7 @@ def encode_all(model, frames, batch_size, device):
     """Encode frames to quantized codes; keep images for later reconstruction."""
     all_z_q = []
     all_imgs = []
+    all_indices = []
     with torch.no_grad():
         for i in range(0, len(frames), batch_size):
             batch = torch.from_numpy(
@@ -67,9 +68,32 @@ def encode_all(model, frames, batch_size, device):
             ).unsqueeze(1).to(device)
             z_e = model.encoder(batch)
             z_q, _ = model.fsq(z_e)
+            indices = model.encode(batch)  # (B, side, side) flat code ids
             all_z_q.append(z_q.cpu())
             all_imgs.append(batch.cpu())
-    return torch.cat(all_z_q), torch.cat(all_imgs)
+            all_indices.append(indices.cpu())
+    return torch.cat(all_z_q), torch.cat(all_imgs), torch.cat(all_indices)
+
+
+def codebook_usage(indices, levels):
+    """Compute codebook usage % and perplexity over a tensor of flat code ids.
+
+    indices: long tensor of any shape, values in [0, prod(levels)).
+    Returns (usage_pct, perplexity, n_used, vocab_size).
+    """
+    vocab_size = int(np.prod(levels))
+    flat = indices.reshape(-1).long()
+    counts = torch.zeros(vocab_size, dtype=torch.long)
+    counts.scatter_add_(0, flat, torch.ones_like(flat, dtype=torch.long))
+    n_used = int((counts > 0).sum().item())
+    usage_pct = 100.0 * n_used / vocab_size
+    total = int(counts.sum().item())
+    if total == 0:
+        return usage_pct, 0.0, n_used, vocab_size
+    p = counts.to(torch.float64) / float(total)
+    p_nz = p[p > 0]
+    entropy = float(-(p_nz * p_nz.log()).sum().item())
+    return usage_pct, float(np.exp(entropy)), n_used, vocab_size
 
 
 # -------- Perturbation specs --------
@@ -312,8 +336,23 @@ def cv_fit(kernel, specs, similarities, dim_weights, seed):
     return p_full, fit_full, (cv_a + cv_b) / 2.0
 
 
+def _pearson_r(kernel, specs, similarities, dim_weights, params):
+    """Pearson correlation between predicted and observed similarities."""
+    dw = np.asarray(dim_weights, dtype=np.float64)
+    params_use = params if len(np.atleast_1d(params)) > 1 else np.atleast_1d(params)[0]
+    preds = np.array([
+        kernel_value(kernel, params_use,
+                     np.asarray(s.step_by_dim, dtype=np.float64) * dw)
+        for s in specs
+    ])
+    tgts = np.asarray(similarities, dtype=np.float64)
+    if preds.std() < 1e-12 or tgts.std() < 1e-12:
+        return 0.0
+    return float(np.corrcoef(preds, tgts)[0, 1])
+
+
 def multi_seed_fit(kernel, specs, similarities, dim_weights, seeds):
-    """Repeat cv_fit across seeds; report mean params and mean CV MSE."""
+    """Repeat cv_fit across seeds; report mean params, CV MSE, Pearson r."""
     p_list = []
     fit_list = []
     cv_list = []
@@ -323,11 +362,14 @@ def multi_seed_fit(kernel, specs, similarities, dim_weights, seeds):
         fit_list.append(fit_mse)
         cv_list.append(cv_mse)
     p_arr = np.array(p_list)
+    params_mean = p_arr.mean(axis=0)
+    pearson_r = _pearson_r(kernel, specs, similarities, dim_weights, params_mean)
     return {
-        'params_mean': p_arr.mean(axis=0),
+        'params_mean': params_mean,
         'params_std': p_arr.std(axis=0),
         'fit_mse': float(np.mean(fit_list)),
         'cv_mse': float(np.mean(cv_list)),
+        'pearson_r': float(pearson_r),
     }
 
 
@@ -369,7 +411,16 @@ def run_analysis(args, device):
     print(f"Loaded {len(frames)} frames", flush=True)
 
     print("Encoding...", flush=True)
-    all_z_q, all_imgs = encode_all(model, frames, args.batch_size, device)
+    all_z_q, all_imgs, all_indices = encode_all(
+        model, frames, args.batch_size, device)
+
+    usage_pct, ppl, n_used, vocab_size = codebook_usage(
+        all_indices, args.levels)
+    print(f"\n== Codebook usage ==", flush=True)
+    print(f"  codes used: {n_used}/{vocab_size} "
+          f"({usage_pct:.2f}%)")
+    print(f"  perplexity: {ppl:.2f} "
+          f"(max={vocab_size} uniform, 1=single-code collapse)")
 
     specs = generate_perturbations(args.levels)
     print(f"Generated {len(specs)} perturbations", flush=True)
@@ -404,12 +455,61 @@ def run_analysis(args, device):
         [mse_ratios[single_one_idx[d]][0] for d in range(n_dims)])
     dim_weights = (dim_ratio_means / dim_ratio_means.mean()).tolist()
 
+    dw_arr = np.array(dim_weights)
+    anisotropy = float(dw_arr.std() / max(dw_arr.mean(), 1e-12))
+
+    dim_quantiles = {}
+    for d in range(n_dims):
+        k = single_one_idx[d]
+        per_frame_ratio = mse_pert[k] / np.maximum(mse_base, 1e-12)
+        q = np.percentile(per_frame_ratio, [10, 25, 50, 75, 90])
+        dim_quantiles[d] = q
+
     # Reports
     print(f"\n== Dim weights (from +1 step MSE ratios, 95% CI) ==", flush=True)
+    print(f"  {'dim':<5} {'mean':>8} {'95% CI':>18}  "
+          f"{'p10':>6} {'p25':>6} {'p50':>6} {'p75':>6} {'p90':>6}")
     for d in range(n_dims):
         r, lo, hi = mse_ratios[single_one_idx[d]]
-        print(f"  dim{d}  {r:.3f}x  [{lo:.3f}, {hi:.3f}]")
+        q = dim_quantiles[d]
+        print(f"  dim{d:<2} {r:>7.3f}x  [{lo:>5.2f}, {hi:>5.2f}]  "
+              f"{q[0]:>6.2f} {q[1]:>6.2f} {q[2]:>6.2f} {q[3]:>6.2f} {q[4]:>6.2f}")
     print(f"Normalized dim_weights: {[round(w, 3) for w in dim_weights]}")
+    print(f"Anisotropy = std(dim_weights) / mean(dim_weights) = {anisotropy:.3f}")
+    if anisotropy < 0.05:
+        print("  -> codebook is near-perfectly isotropic (isotropic kernel suffices)")
+    elif anisotropy < 0.15:
+        print("  -> mild anisotropy (calibrated kernel modestly better than isotropic)")
+    else:
+        print("  -> strong anisotropy (calibrated kernel meaningfully better)")
+
+    single_plus_one = {d: mse_ratios[single_one_idx[d]][0] for d in range(n_dims)}
+    pair_idx = {}
+    for i, spec in enumerate(specs):
+        nz = spec.nonzero_steps()
+        if len(nz) == 2 and all(s == 1 for _, s in nz):
+            d1, d2 = sorted(d for d, _ in nz)
+            pair_idx[(d1, d2)] = i
+    coupling = np.zeros((n_dims, n_dims), dtype=np.float64)
+    for (d1, d2), i in pair_idx.items():
+        measured = mse_ratios[i][0]
+        add_pred = (single_plus_one[d1] - 1) + (single_plus_one[d2] - 1) + 1
+        rel = (measured - add_pred) / max(measured, 1e-12)
+        coupling[d1, d2] = rel
+        coupling[d2, d1] = rel
+    off_diag_max = float(np.max(np.abs(coupling - np.diag(np.diag(coupling)))))
+    print(f"\n== Cross-dim coupling matrix (relative deviation from additive) ==")
+    print(f"  {'':4s} " + " ".join(f"{f'dim{j}':>8}" for j in range(n_dims)))
+    for i in range(n_dims):
+        row = " ".join(f"{coupling[i, j]:>+8.3f}" for j in range(n_dims))
+        print(f"  dim{i:<2} {row}")
+    print(f"Max |off-diagonal| coupling: {off_diag_max:.3f}")
+    if off_diag_max < 0.05:
+        print("  -> dims are essentially separable (diagonal kernel adequate)")
+    elif off_diag_max < 0.15:
+        print("  -> weak coupling (diagonal kernel a modest simplification)")
+    else:
+        print("  -> strong coupling (diagonal kernel under-specifies codebook)")
 
     print(f"\n== Perturbation ratios ==")
     header = f"{'Perturbation':<30} {'MSE':>9} {'95% CI':>18}"
@@ -425,8 +525,6 @@ def run_analysis(args, device):
             line += f"   {r2:>8.3f}x [{lo2:>5.2f}, {hi2:>5.2f}]"
         print(line)
 
-    # Qualitative compounding note (L1 vs L2)
-    single_plus_one = {d: mse_ratios[single_one_idx[d]][0] for d in range(n_dims)}
     add_errs, mul_errs = [], []
     for k in range(2, n_dims + 1):
         for combo in combinations(range(n_dims), k):
@@ -460,8 +558,9 @@ def run_analysis(args, device):
     results = {}
     for metric_name, sim in metric_sims.items():
         print(f"\n== Kernel comparison ({metric_name.upper()} similarity) ==")
-        print(f"{'Kernel':<18} {'Params':<52} {'Fit MSE':>10} {'CV MSE':>10} {'AIC':>10}")
-        print("-" * 102)
+        print(f"{'Kernel':<18} {'Params':<52} {'Fit MSE':>10} {'CV MSE':>10} "
+              f"{'Pearson r':>10} {'AIC':>10}")
+        print("-" * 113)
         results[metric_name] = {}
         for kernel in args.kernels:
             res = multi_seed_fit(kernel, specs, sim, dim_weights, seeds)
@@ -471,11 +570,13 @@ def run_analysis(args, device):
                 'params_std': res['params_std'].tolist(),
                 'fit_mse': res['fit_mse'],
                 'cv_mse': res['cv_mse'],
+                'pearson_r': res['pearson_r'],
                 'aic': float(aic_val),
             }
             params_str = format_params(res['params_mean'], res['params_std'])
             print(f"{kernel:<18} {params_str:<52} {res['fit_mse']:>10.2e} "
-                  f"{res['cv_mse']:>10.2e} {aic_val:>10.2f}")
+                  f"{res['cv_mse']:>10.2e} {res['pearson_r']:>10.3f} "
+                  f"{aic_val:>10.2f}")
         best = min(
             ((k, v) for k, v in results[metric_name].items() if isinstance(v, dict)),
             key=lambda kv: kv[1]['cv_mse'],
@@ -509,7 +610,27 @@ def run_analysis(args, device):
         'levels': args.levels,
         'n_frames': int(len(all_z_q)),
         'n_perturbations': len(specs),
+        'codebook': {
+            'n_used': n_used,
+            'vocab_size': vocab_size,
+            'usage_pct': float(usage_pct),
+            'perplexity': float(ppl),
+        },
         'dim_weights': [float(w) for w in dim_weights],
+        'anisotropy': float(anisotropy),
+        'dim_quantiles': {
+            f'dim{d}': {'p10': float(dim_quantiles[d][0]),
+                        'p25': float(dim_quantiles[d][1]),
+                        'p50': float(dim_quantiles[d][2]),
+                        'p75': float(dim_quantiles[d][3]),
+                        'p90': float(dim_quantiles[d][4])}
+            for d in range(n_dims)
+        },
+        'coupling': {
+            f'dim{i}_dim{j}': float(coupling[i, j])
+            for i in range(n_dims) for j in range(n_dims) if i <= j
+        },
+        'coupling_max_off_diagonal': float(off_diag_max),
         'perturbations': {
             spec.name: {
                 'mse': {'mean': float(mse_ratios[k][0]),
@@ -537,7 +658,7 @@ def run_self_test():
     backward compatibility with the pre-upgrade implementation.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from scripts.train_transformer import build_structured_smooth_targets
+    from scripts.train_world_model import build_structured_smooth_targets
     levels = [5, 5, 5, 5]
     full_vocab = 625 + 2
     # Default kernel should be 'gaussian' and output should equal pre-upgrade

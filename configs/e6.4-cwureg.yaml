@@ -1,0 +1,70 @@
+# Joint FSQ + Transformer with CWU anti-collapse regularizer, SLS disabled.
+
+model:
+  vocab_size: 625
+  embed_dim: 512
+  n_heads: 8
+  n_layers: 8
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [5, 5, 5, 5]
+  dropout: 0.15
+  adaln: true
+
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 200
+  batch_size: 896
+  lr: 0.004
+  lr_min: 0.0002
+  weight_decay: 0.01
+  cpc_weight: 1.0
+  token_noise: 0.05
+  fsq_noise: 0.05
+  label_smoothing: 0.0
+  fsq_sigma: 0.9
+  focal_gamma: 2.0
+  death_oversample: 4
+  seed: 42
+  checkpoint_dir: checkpoints_e6.4
+  joint: true
+  fsq_lr: 0.001
+  alpha_uniform: 1.0
+  shift_max: 4
+  use_cpc: false
+  learnable_gamma: false
+
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_e6.4/transformer_best.pt
+  epochs: 50
+  batch_size: 512
+  lr: 0.001
+  weight_decay: 0.0001
+  val_ratio: 0.1
+  seed: 42
+  checkpoint_dir: checkpoints_e6.4
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_e6.4/transformer_best.pt
+  pretrained: checkpoints_e6.4/controller_bc_best.pt
+  amp_dtype: bfloat16
+  n_iterations: 50000
+  n_episodes: 512
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 512
+  entropy_coeff: 0.01
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 45
+  death_threshold: 0.5
+  mlp_hidden: 512
+  n_eval_episodes: 512
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_e6.4

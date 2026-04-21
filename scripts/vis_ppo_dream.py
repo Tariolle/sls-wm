@@ -67,14 +67,21 @@ def load_episodes(episodes_dir, context_frames, vae=None, device=None,
         if split_filter == "train" and ep.name in val_set:
             continue
         tp = ep / "tokens.npy"
-        if not tp.exists():
-            if vae is not None and (ep / "frames.npy").exists():
-                print(f"  Tokenizing {ep.name}...", end="\r")
-                tokenize_episode(vae, ep, device)
-                tokenized += 1
-            else:
+        if vae is not None:
+            # Re-encode against the passed FSQ rather than trust tokens.npy.
+            if not (ep / "frames.npy").exists():
                 continue
-        tokens = np.load(tp).astype(np.int64)
+            frames = np.load(ep / "frames.npy")
+            with torch.no_grad():
+                x = torch.from_numpy(frames).float().to(device) / 255.0
+                x = x.unsqueeze(1)
+                indices = vae.encode(x)
+            tokens = indices.view(indices.size(0), -1).cpu().numpy().astype(np.int64)
+            tokenized += 1
+        else:
+            if not tp.exists():
+                continue
+            tokens = np.load(tp).astype(np.int64)
         actions = np.load(ap).astype(np.int64)
         if len(tokens) >= context_frames * 3:
             episodes.append((tokens, actions))
@@ -262,6 +269,7 @@ def main():
         context_frames=args.context_frames, dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
+        fsq_dim=len(args.levels) if getattr(args, 'levels', None) else None,
     ).to(device)
     state = torch.load(args.transformer_checkpoint, map_location=device,
                        weights_only=True)

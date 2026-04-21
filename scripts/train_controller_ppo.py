@@ -28,19 +28,33 @@ from deepdash.world_model import WorldModel
 from deepdash.controller import MLPPolicy
 
 
-def load_episodes(episodes_dir, context_frames):
-    """Load base (non-shifted) tokenized episodes with enough frames."""
+def load_episodes(episodes_dir, context_frames, vae=None, device=None):
+    """Load episodes; if vae is passed, re-encode frames through it instead
+    of reading tokens.npy."""
     shift_re = re.compile(r"_s[+-]\d+_[+-]\d+$")
     episodes = []
     for ep in sorted(Path(episodes_dir).glob("*")):
         if shift_re.search(ep.name):
             continue
-        tp = ep / "tokens.npy"
         ap = ep / "actions.npy"
-        if not tp.exists() or not ap.exists():
+        if not ap.exists():
             continue
-        tokens = np.load(tp).astype(np.int64)
         actions = np.load(ap).astype(np.int64)
+        if vae is not None:
+            fp = ep / "frames.npy"
+            if not fp.exists():
+                continue
+            with torch.no_grad():
+                frames = np.load(fp)
+                x = torch.from_numpy(frames).float().to(device) / 255.0
+                x = x.unsqueeze(1)
+                indices = vae.encode(x)
+                tokens = indices.view(indices.size(0), -1).cpu().numpy().astype(np.int64)
+        else:
+            tp = ep / "tokens.npy"
+            if not tp.exists():
+                continue
+            tokens = np.load(tp).astype(np.int64)
         if len(tokens) >= context_frames * 3:
             episodes.append((tokens, actions, ep.name))
     return episodes
@@ -350,6 +364,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Train controller via PPO in dream rollouts")
     parser.add_argument("--transformer-checkpoint", default=None)
+    parser.add_argument("--fsq-checkpoint", default=None,
+                        help="Re-encode frames through this FSQ instead of "
+                             "using on-disk tokens.npy.")
     parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
     # PPO
@@ -418,6 +435,7 @@ def main():
         dropout=args.dropout,
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
+        fsq_dim=len(args.levels) if getattr(args, 'levels', None) else None,
     ).to(device)
     state = torch.load(args.transformer_checkpoint, map_location=device,
                        weights_only=True)
@@ -437,12 +455,25 @@ def main():
         except Exception as e:
             print(f"torch.compile not available: {e}")
 
+    vae = None
+    if args.fsq_checkpoint is not None:
+        from deepdash.fsq import FSQVAE
+        vae = FSQVAE(levels=args.levels).to(device)
+        fsq_state = torch.load(args.fsq_checkpoint, map_location=device,
+                               weights_only=True)
+        fsq_state = {k.removeprefix("_orig_mod."): v for k, v in fsq_state.items()}
+        vae.load_state_dict(fsq_state)
+        vae.eval()
+        print(f"FSQ loaded from {args.fsq_checkpoint}; tokens will be re-encoded on the fly")
+
     # Load episodes (death + expert) with global split
     from deepdash.data_split import get_val_episodes, is_val_episode
     val_set = get_val_episodes(args.episodes_dir, args.expert_episodes_dir)
 
-    all_eps = load_episodes(args.episodes_dir, args.context_frames) + \
-              load_episodes(args.expert_episodes_dir, args.context_frames)
+    all_eps = load_episodes(args.episodes_dir, args.context_frames,
+                             vae=vae, device=device) + \
+              load_episodes(args.expert_episodes_dir, args.context_frames,
+                             vae=vae, device=device)
     # Train on all episodes, eval on val only
     train_episodes = [(t, a) for t, a, name in all_eps
                       if not is_val_episode(name, val_set)]

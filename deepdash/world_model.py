@@ -71,8 +71,21 @@ class WorldModel(nn.Module):
         cpc_dim: int = 64,
         tokens_per_frame: int = 64,
         adaln: bool = False,
+        fsq_dim: int | None = None,
+        use_cpc: bool = True,
+        sls_gamma_init: torch.Tensor | None = None,
     ):
         super().__init__()
+        self.use_cpc = use_cpc
+        # Learnable per-dim SLS precision γ. Stored on WorldModel so
+        # it ends up in the transformer optimizer param group (it's a
+        # loss-side parameter that drives CE target smoothing, not an
+        # encoder parameter). If None, the SLS smoothing uses fixed
+        # dim_weights via the precomputed soft_target_matrix path.
+        if sls_gamma_init is not None:
+            self.sls_gamma = nn.Parameter(sls_gamma_init.clone())
+        else:
+            self.sls_gamma = None
         self.vocab_size = vocab_size
         self.n_actions = n_actions
         self.embed_dim = embed_dim
@@ -99,6 +112,17 @@ class WorldModel(nn.Module):
         self.token_embed = nn.Embedding(self.full_vocab_size, embed_dim)
         if not adaln:
             self.action_embed = nn.Embedding(n_actions, embed_dim)
+
+        # Joint training gradient conduit: a learnable Linear that
+        # contributes zero to the forward value but routes gradient from
+        # transformer losses through STE back to the FSQ encoder. See
+        # forward() for the zero-sum STE correction pattern. Only created
+        # when fsq_dim is provided; None when non-joint.
+        self.fsq_dim = fsq_dim
+        if fsq_dim is not None:
+            self.fsq_grad_proj = nn.Linear(fsq_dim, embed_dim)
+        else:
+            self.fsq_grad_proj = None
 
         # AdaLN: action conditioning MLP
         if adaln:
@@ -342,7 +366,8 @@ class WorldModel(nn.Module):
 
         return total_loss / max(n_pairs, 1)
 
-    def forward(self, frame_tokens, actions):
+    def forward(self, frame_tokens, actions, z_q_ste_context=None,
+                return_dense_logits=False):
         """Forward pass: predict all target tokens from context.
 
         All target positions are replaced with mask_embed (no ground truth
@@ -352,13 +377,55 @@ class WorldModel(nn.Module):
             frame_tokens: (B, K+1, tokens_per_frame+1) long — K context + 1 target.
                           Last column is the status token (ALIVE or DEATH).
             actions: (B, K) long — action for each context frame.
+            z_q_ste_context: optional (B, K, tokens_per_frame, fsq_dim) continuous
+                STE-routed FSQ codes for context frames' VISUAL positions only.
+                When provided (joint training), a zero-sum correction term
+                `fsq_grad_proj(z_q_ste) - fsq_grad_proj(z_q_ste).detach()` is
+                added to each context frame's visual-token embedding; the
+                forward value is unchanged (term cancels to 0), but gradient
+                flows from downstream losses through fsq_grad_proj and STE
+                back to the FSQ encoder. Status position (index
+                tokens_per_frame) receives no correction. When None,
+                behavior is byte-identical.
+            return_dense_logits: if True (AdaLN only), also returns logits
+                at every context block position so callers can apply dense
+                next-frame-prediction CE. Ignored in non-AdaLN mode.
 
         Returns:
-            logits: (B, block_size, full_vocab_size) — predictions for all target positions.
+            logits: (B, block_size, full_vocab_size) — predictions for the
+                masked target block (frame K). Shape unchanged across modes
+                so downstream callers keep working.
             cpc_loss: scalar — AC-CPC contrastive loss.
+            dense_logits: only returned when return_dense_logits=True and
+                AdaLN is enabled; shape (B, K, block_size, full_vocab_size)
+                — logits at each context block's positions for predicting
+                the NEXT frame's tokens (block i -> frame i+1). None in
+                non-AdaLN mode.
         """
         B = frame_tokens.size(0)
         K = self.context_frames
+        use_ste = z_q_ste_context is not None
+        if use_ste and self.fsq_grad_proj is None:
+            raise RuntimeError(
+                "z_q_ste_context passed but fsq_grad_proj not initialized; "
+                "construct WorldModel with fsq_dim=<int> for joint training."
+            )
+
+        def embed_ctx_frame(i):
+            """Embed context frame i with optional zero-sum STE correction
+            on visual positions. Status (last) position is unchanged."""
+            hard = self.token_embed(frame_tokens[:, i])  # (B, TPF+1, D)
+            if not use_ste:
+                return hard
+            z = z_q_ste_context[:, i]                     # (B, TPF, fsq_dim)
+            corr_vis = self.fsq_grad_proj(z)              # (B, TPF, D)
+            # Zero-sum: forward value = 0, backward grad routes through z
+            corr_vis = corr_vis - corr_vis.detach()
+            # Pad the status position with zeros (no z for that position)
+            pad = torch.zeros(B, 1, self.embed_dim,
+                              device=hard.device, dtype=hard.dtype)
+            corr = torch.cat([corr_vis, pad], dim=1)      # (B, TPF+1, D)
+            return hard + corr
 
         parts = []
         cond = None
@@ -368,12 +435,12 @@ class WorldModel(nn.Module):
             act_onehot = F.one_hot(actions, self.n_actions).float()
             cond = self.action_cond(act_onehot.reshape(B, -1))  # (B, D)
             for i in range(K):
-                parts.append(self.token_embed(frame_tokens[:, i]))
+                parts.append(embed_ctx_frame(i))
             ctx_end = K * self.block_size
         else:
             # Standard: interleaved [f0(65) a0 f1(65) a1 ... fK-1(65) aK-1]
             for i in range(K):
-                parts.append(self.token_embed(frame_tokens[:, i]))
+                parts.append(embed_ctx_frame(i))
                 act = self.action_embed(actions[:, i])
                 parts.append(act.unsqueeze(1))
             ctx_end = K * (self.block_size + 1)
@@ -390,8 +457,26 @@ class WorldModel(nn.Module):
         predict_positions = x[:, ctx_end:ctx_end + self.block_size]  # (B, 65, D)
         logits = self.head(predict_positions)  # (B, 65, full_vocab_size)
 
-        cpc_loss = self._compute_cpc_loss(x, actions)
+        # Dense next-frame-prediction logits: block i (i<K) -> frame i+1.
+        # Only defined for AdaLN mode where context blocks are contiguous
+        # (non-AdaLN interleaves actions and would need skip-indexing).
+        dense_logits = None
+        if return_dense_logits and self.adaln:
+            # Context blocks occupy positions [0, K*block_size).
+            ctx_positions = x[:, :K * self.block_size]  # (B, K*block_size, D)
+            ctx_logits = self.head(ctx_positions)
+            dense_logits = ctx_logits.view(
+                B, K, self.block_size, -1)  # (B, K, block_size, V)
 
+        if self.use_cpc:
+            cpc_loss = self._compute_cpc_loss(x, actions)
+        else:
+            # JEPA path: AC-CPC removed, transformer CE against
+            # EMA teacher tokens replaces the contrastive objective.
+            cpc_loss = torch.zeros((), device=x.device, dtype=x.dtype)
+
+        if return_dense_logits:
+            return logits, cpc_loss, dense_logits
         return logits, cpc_loss
 
     @staticmethod

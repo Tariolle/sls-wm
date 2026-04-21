@@ -117,6 +117,66 @@ class TestWorldModel:
         assert h_t.shape == (1, 512)
 
 
+class TestWorldModelJoint:
+    """STE-coupled joint-training path (E6.1)."""
+
+    def _make(self, device, fsq_dim=None):
+        from deepdash.world_model import WorldModel
+        return WorldModel(
+            vocab_size=625, embed_dim=512, n_heads=8, n_layers=8,
+            context_frames=4, tokens_per_frame=64, adaln=True,
+            fsq_dim=fsq_dim,
+        ).to(device).eval()
+
+    def _inputs(self, device, B=2, fsq_dim=4):
+        tokens = torch.randint(0, 625, (B, 5, 65), device=device)
+        tokens[:, :, -1] = 625  # ALIVE
+        actions = torch.randint(0, 2, (B, 4), device=device)
+        z_q_ste = torch.randn(B, 4, 64, fsq_dim, device=device)
+        return tokens, actions, z_q_ste
+
+    def test_ste_forward_value_is_byte_identical(self, device, seed):
+        """Zero-sum correction must not alter forward outputs."""
+        torch.manual_seed(0)
+        model = self._make(device, fsq_dim=4)
+        tokens, actions, z_q_ste = self._inputs(device)
+        with torch.no_grad():
+            logits_plain, cpc_plain = model(tokens, actions)
+            logits_ste, cpc_ste = model(tokens, actions,
+                                         z_q_ste_context=z_q_ste)
+        assert torch.allclose(logits_plain, logits_ste, atol=1e-5), (
+            "STE correction changed forward logits; zero-sum violated"
+        )
+        assert torch.allclose(cpc_plain, cpc_ste, atol=1e-5), (
+            "STE correction changed CPC loss; zero-sum violated"
+        )
+
+    def test_ste_routes_gradient_to_z_q(self, device, seed):
+        """Gradient from output must reach z_q_ste via fsq_grad_proj."""
+        torch.manual_seed(0)
+        model = self._make(device, fsq_dim=4).train()
+        tokens, actions, z_q_ste = self._inputs(device)
+        z_q_ste = z_q_ste.requires_grad_(True)
+        logits, _ = model(tokens, actions, z_q_ste_context=z_q_ste)
+        logits.sum().backward()
+        assert z_q_ste.grad is not None, "No gradient reached z_q_ste_context"
+        assert z_q_ste.grad.abs().sum() > 0, (
+            "Zero gradient to z_q_ste_context; STE path is broken"
+        )
+
+    def test_fsq_dim_none_has_no_grad_proj(self, device, seed):
+        """V5 default: no STE module instantiated."""
+        model = self._make(device, fsq_dim=None)
+        assert model.fsq_grad_proj is None
+
+    def test_fsq_dim_none_rejects_z_q_kwarg(self, device, seed):
+        """Passing z_q_ste_context without fsq_dim raises."""
+        model = self._make(device, fsq_dim=None)
+        tokens, actions, z_q_ste = self._inputs(device)
+        with pytest.raises(RuntimeError, match="fsq_grad_proj"):
+            model(tokens, actions, z_q_ste_context=z_q_ste)
+
+
 class TestMLPPolicy:
     """Tests use V4 architecture: h_dim=512 matching world model embed_dim."""
 
@@ -151,3 +211,104 @@ class TestDataSplit:
         from deepdash.data_split import get_val_episodes
         val = get_val_episodes("data/death_episodes", "data/expert_episodes")
         assert len(val) > 0, "Val set is empty"
+
+
+class TestLearnableGamma:
+    """E6.3: γ receives gradient from CE through the per-batch smoothed
+    target distribution, and exposes a sensible shape."""
+
+    def test_soft_targets_shape_and_normalization(self, device, seed):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from train_world_model import _build_soft_targets, _fsq_coords
+
+        levels = [5, 5, 5, 5]
+        vocab = 625
+        full_vocab = 627  # + ALIVE, DEATH
+        coords = _fsq_coords(levels).to(device)
+        gamma = torch.nn.Parameter(torch.zeros(4, device=device))
+        targets = torch.tensor([0, 312, 624, 625, 626], device=device, dtype=torch.long)
+        soft = _build_soft_targets(targets, coords, gamma, sigma=0.9,
+                                    smoothing=0.1, full_vocab_size=full_vocab,
+                                    vocab_size=vocab)
+        assert soft.shape == (5, full_vocab)
+        assert torch.allclose(soft.sum(dim=-1), torch.ones(5, device=device), atol=1e-4)
+        # Status rows (target >= vocab_size) are hard one-hot
+        assert soft[3, 625] > 0.99
+        assert soft[4, 626] > 0.99
+        # Visual rows: (1 - smoothing) at target
+        for i in range(3):
+            assert 1.0 - soft[i, targets[i]].item() < 0.11
+
+    def test_gamma_receives_gradient(self, device, seed):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        from train_world_model import _build_soft_targets, _fsq_coords
+
+        torch.manual_seed(0)
+        levels = [5, 5, 5, 5]
+        vocab = 625
+        full_vocab = 627
+        coords = _fsq_coords(levels).to(device)
+        gamma = torch.nn.Parameter(torch.zeros(4, device=device))
+        targets = torch.randint(0, vocab, (32,), device=device)
+        soft = _build_soft_targets(targets, coords, gamma, sigma=0.9,
+                                    smoothing=0.1, full_vocab_size=full_vocab,
+                                    vocab_size=vocab)
+        logits = torch.randn(32, full_vocab, device=device, requires_grad=True)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        loss = -(soft * log_probs).sum(dim=-1).mean()
+        loss.backward()
+        assert gamma.grad is not None, "gamma got no gradient"
+        assert gamma.grad.abs().sum().item() > 0, "gamma gradient is exactly zero"
+
+
+class TestFSQMarginalUniformReg:
+    def test_uniform_input_gives_near_zero_loss(self, device, seed):
+        """Samples drawn exactly from Uniform[-half_d, +half_d] should
+        produce a CvM statistic ~ O(1/M) which is tiny for large M.
+        """
+        from deepdash.fsq import fsq_marginal_uniform_reg
+        torch.manual_seed(0)
+        levels = [5, 5, 5, 5]
+        half_levels = torch.tensor([L // 2 for L in levels],
+                                    dtype=torch.float32, device=device)
+        D = 4
+        M = 10000
+        # Draw U[-half, +half] per dim
+        z = torch.empty(M, D, 1, 1, device=device)
+        for d in range(D):
+            z[:, d, 0, 0].uniform_(-float(half_levels[d]), float(half_levels[d]))
+        loss = fsq_marginal_uniform_reg(z, half_levels)
+        # CvM on ~10k uniform samples should be well below 1e-3
+        assert loss.item() < 1e-3, f"uniform input gave CvM={loss.item()}"
+
+    def test_concentrated_input_gives_high_loss(self, device, seed):
+        """All-zero samples collapse the empirical CDF to a step at 0,
+        far from Uniform[-half, +half]. CvM should be non-trivial.
+        """
+        from deepdash.fsq import fsq_marginal_uniform_reg
+        levels = [5, 5, 5, 5]
+        half_levels = torch.tensor([L // 2 for L in levels],
+                                    dtype=torch.float32, device=device)
+        D = 4
+        M = 1000
+        z = torch.zeros(M, D, 1, 1, device=device)
+        loss = fsq_marginal_uniform_reg(z, half_levels)
+        # Collapsed samples: CvM >= ~0.08 (analytic for step vs uniform)
+        assert loss.item() > 0.05, f"collapsed input gave CvM={loss.item()}"
+
+    def test_gradient_flows_through(self, device, seed):
+        """Gradient w.r.t. z should be non-zero on non-uniform input."""
+        from deepdash.fsq import fsq_marginal_uniform_reg
+        torch.manual_seed(0)
+        levels = [5, 5, 5, 5]
+        half_levels = torch.tensor([L // 2 for L in levels],
+                                    dtype=torch.float32, device=device)
+        z = torch.randn(500, 4, 1, 1, device=device, requires_grad=True)
+        loss = fsq_marginal_uniform_reg(z, half_levels)
+        loss.backward()
+        assert z.grad is not None
+        assert z.grad.abs().sum().item() > 0
