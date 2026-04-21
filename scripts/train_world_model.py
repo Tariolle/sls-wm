@@ -854,6 +854,22 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
             be = torch.cuda.Event(enable_timing=True)
             bs.record()
         optimizer.zero_grad()
+        if n_batches == 0:
+            # One-shot diagnostic so the epoch-51 frozen-variant backward
+            # failure logs useful state. Printed once per epoch.
+            print(f"[DBG] loss.requires_grad={loss.requires_grad} "
+                  f"grad_fn={loss.grad_fn} value={loss.item():.4f}", flush=True)
+            print(f"[DBG] token_loss.grad_fn={metrics['token_loss'].grad_fn} "
+                  f"recon_loss.grad_fn={metrics['recon_loss'].grad_fn} "
+                  f"uniform_loss.grad_fn={metrics['uniform_loss'].grad_fn} "
+                  f"cpc_loss.grad_fn={metrics['cpc_loss'].grad_fn}", flush=True)
+            wm_tr = sum(1 for p in js.wm.parameters() if p.requires_grad)
+            wm_tot = sum(1 for _ in js.wm.parameters())
+            fsq_tr = sum(1 for p in js.fsq.parameters() if p.requires_grad)
+            fsq_tot = sum(1 for _ in js.fsq.parameters())
+            print(f"[DBG] wm trainable={wm_tr}/{wm_tot} "
+                  f"fsq trainable={fsq_tr}/{fsq_tot} "
+                  f"use_recon={js.use_recon}", flush=True)
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
         # Per-group grad clip: each network gets its own norm=1.0 budget
