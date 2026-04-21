@@ -1441,30 +1441,33 @@ def main():
         scheduler._last_lr = [group["lr"] for group in optimizer.param_groups]
 
     log_path = ckpt_dir / "transformer_log.csv"
+    log_unif = joint and float(getattr(args, "alpha_uniform", 0.0) or 0.0) > 0
+    log_recon = joint and use_recon
     log_header = ["epoch", "train_total", "train_loss", "train_acc",
-                  "train_death_prec", "train_death_rec", "train_death_f1",
-                  "train_cpc",
-                  "val_total", "val_loss", "val_acc",
-                  "val_death_prec", "val_death_rec", "val_death_f1",
-                  "val_cpc",
-                  "gap", "lr", "time_s"]
+                  "train_death_prec", "train_death_rec", "train_death_f1"]
+    if use_cpc:
+        log_header.append("train_cpc")
+    log_header += ["val_total", "val_loss", "val_acc",
+                   "val_death_prec", "val_death_rec", "val_death_f1"]
+    if use_cpc:
+        log_header.append("val_cpc")
+    log_header += ["gap", "lr", "time_s"]
     if joint:
-        # Joint CSV: symmetric FSQ block mirroring the transformer block
-        # (total, per-component, gap, grad_rms, lr). All per-component
-        # losses are the raw (unweighted) values logged separately from
-        # the aggregated fsq_train_total / fsq_val_total so nothing is
-        # lost.
-        log_header += [
-            "fsq_train_total", "train_recon", "train_unif",
-            "fsq_val_total", "val_recon", "val_unif",
-            "fsq_gap",
-            "encoder_grad_rms", "transformer_grad_rms",
-            "fsq_lr",
-            "train_code_usage_pct", "train_code_ppl_pct",
-            "val_code_usage_pct", "val_code_ppl_pct",
-        ]
-        # Learnable γ trajectory: one column per FSQ dim.
-        # The per-dim trajectory is the headline paper plot.
+        log_header.append("fsq_train_total")
+        if log_recon:
+            log_header.append("train_recon")
+        if log_unif:
+            log_header.append("train_unif")
+        log_header.append("fsq_val_total")
+        if log_recon:
+            log_header.append("val_recon")
+        if log_unif:
+            log_header.append("val_unif")
+        log_header += ["fsq_gap",
+                       "encoder_grad_rms", "transformer_grad_rms",
+                       "fsq_lr",
+                       "train_code_usage_pct", "train_code_ppl_pct",
+                       "val_code_usage_pct", "val_code_ppl_pct"]
         if model.sls_gamma is not None:
             for i in range(model.sls_gamma.shape[0]):
                 log_header.append(f"gamma_{i}")
@@ -1572,12 +1575,18 @@ def main():
                 f"gap={gap:+.4f} | LR: {lr:.1e}"
             )
             if joint:
+                train_recon_str = (f"recon={train_metrics['recon']:.4f} "
+                                    if log_recon else "")
+                val_recon_str = (f"recon={val_metrics['recon']:.4f} "
+                                  if log_recon else "")
+                train_unif_str = (f"unif={train_metrics['unif']:.4e} "
+                                   if log_unif else "")
+                val_unif_str = (f"unif={val_metrics['unif']:.4e} "
+                                 if log_unif else "")
                 print(
                     f"  FSQ | "
-                    f"Train: total={fsq_train_total:.4f} recon={train_metrics['recon']:.4f} "
-                    f"unif={train_metrics['unif']:.4e} | "
-                    f"Val: total={fsq_val_total:.4f} recon={val_metrics['recon']:.4f} "
-                    f"unif={val_metrics['unif']:.4e} | "
+                    f"Train: total={fsq_train_total:.4f} {train_recon_str}{train_unif_str}| "
+                    f"Val: total={fsq_val_total:.4f} {val_recon_str}{val_unif_str}| "
                     f"gap={fsq_gap:+.4f} | "
                     f"grad_rms[enc={train_metrics['enc_grad_rms']:.2e} "
                     f"tr={train_metrics['tr_grad_rms']:.2e}]"
@@ -1594,20 +1603,28 @@ def main():
             row = [
                 epoch, f"{train_total:.6f}", f"{train_loss:.6f}", f"{train_acc:.4f}",
                 f"{train_d_prec:.4f}", f"{train_d_rec:.4f}", f"{train_d_f1:.4f}",
-                f"{train_cpc:.4f}",
+            ]
+            if use_cpc:
+                row.append(f"{train_cpc:.4f}")
+            row += [
                 f"{val_total:.6f}", f"{val_loss:.6f}", f"{val_acc:.4f}",
                 f"{val_d_prec:.4f}", f"{val_d_rec:.4f}", f"{val_d_f1:.4f}",
-                f"{val_cpc:.4f}",
-                f"{gap:.4f}", f"{lr:.1e}", f"{dt:.1f}",
             ]
+            if use_cpc:
+                row.append(f"{val_cpc:.4f}")
+            row += [f"{gap:.4f}", f"{lr:.1e}", f"{dt:.1f}"]
             if joint:
+                row.append(f"{fsq_train_total:.6f}")
+                if log_recon:
+                    row.append(f"{train_metrics['recon']:.6f}")
+                if log_unif:
+                    row.append(f"{train_metrics['unif']:.6e}")
+                row.append(f"{fsq_val_total:.6f}")
+                if log_recon:
+                    row.append(f"{val_metrics['recon']:.6f}")
+                if log_unif:
+                    row.append(f"{val_metrics['unif']:.6e}")
                 row += [
-                    f"{fsq_train_total:.6f}",
-                    f"{train_metrics['recon']:.6f}",
-                    f"{train_metrics['unif']:.6e}",
-                    f"{fsq_val_total:.6f}",
-                    f"{val_metrics['recon']:.6f}",
-                    f"{val_metrics['unif']:.6e}",
                     f"{fsq_gap:.4f}",
                     f"{train_metrics['enc_grad_rms']:.6e}",
                     f"{train_metrics['tr_grad_rms']:.6e}",
@@ -1640,18 +1657,10 @@ def main():
                 wandb_payload["transformer/train/cpc"] = train_cpc
                 wandb_payload["transformer/val/cpc"] = val_cpc
             if joint:
-                # FSQ namespace mirrors transformer: train/total, val/total,
-                # gap, lr, grad_rms + per-component raw losses. Same shape
-                # as the transformer block so the wandb overview lines up
-                # side-by-side.
                 wandb_payload.update({
                     "fsq/train/total": fsq_train_total,
-                    "fsq/train/recon": train_metrics["recon"],
-                    "fsq/train/unif": train_metrics["unif"],
                     "fsq/train/grad_rms": train_metrics["enc_grad_rms"],
                     "fsq/val/total": fsq_val_total,
-                    "fsq/val/recon": val_metrics["recon"],
-                    "fsq/val/unif": val_metrics["unif"],
                     "fsq/gap": fsq_gap,
                     "fsq/lr": fsq_lr_now,
                     "fsq/train/code_usage_pct": train_metrics["code_usage_pct"],
@@ -1660,9 +1669,12 @@ def main():
                     "fsq/val/code_ppl_pct": val_metrics["code_ppl_pct"],
                     "transformer/train/grad_rms": train_metrics["tr_grad_rms"],
                 })
-                # Learnable γ trajectory - one key per dim. Headline paper
-                # plot shows how the network reweights FSQ dimensions over
-                # training.
+                if log_recon:
+                    wandb_payload["fsq/train/recon"] = train_metrics["recon"]
+                    wandb_payload["fsq/val/recon"] = val_metrics["recon"]
+                if log_unif:
+                    wandb_payload["fsq/train/unif"] = train_metrics["unif"]
+                    wandb_payload["fsq/val/unif"] = val_metrics["unif"]
                 if model.sls_gamma is not None:
                     gamma_vals = model.sls_gamma.detach().cpu().tolist()
                     for i, v in enumerate(gamma_vals):
