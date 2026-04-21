@@ -24,10 +24,10 @@
 # saves checkpoint and resubmits the job.
 #
 # Submit:  sbatch slurm/train_world_model.sl [config]
-# Example: sbatch slurm/train_world_model.sl configs/v5.yaml
+# Example: sbatch slurm/train_world_model.sl configs/e6.7-recon-cauchysls.yaml
 # Monitor: tail -f slurm/logs/train_world_model.out
 
-CONFIG=${1:-configs/v5.yaml}
+CONFIG=${1:-configs/e6.7-recon-cauchysls.yaml}
 
 # Extract checkpoint_dir from the transformer section of the config.
 CKPT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG')).get('transformer',{}).get('checkpoint_dir','checkpoints'))")

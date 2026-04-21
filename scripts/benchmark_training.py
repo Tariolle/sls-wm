@@ -8,7 +8,7 @@ preventing fragmentation from causing OOM in later configs.
 
 Usage:
     python scripts/benchmark_training.py
-    python scripts/benchmark_training.py --config configs/v5.yaml --warmup 3 --steps 10
+    python scripts/benchmark_training.py --config configs/e6.7-recon-cauchysls.yaml --warmup 3 --steps 10
 """
 
 import argparse

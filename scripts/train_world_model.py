@@ -13,7 +13,7 @@ in-tree - the `tokenize_episodes.py` and `shift_episodes.py` scripts
 were removed 2026-04-19 in favour of on-the-fly encoding and shifting.
 
 Usage:
-    python scripts/train_world_model.py --config configs/e6.1-joint.yaml
+    python scripts/train_world_model.py --config configs/e6.7-recon-cauchysls.yaml
 
 Historical note: this file used to be named scripts/train_transformer.py
 back when it only trained the Transformer on tokenized input. Renamed
@@ -621,7 +621,10 @@ class JointStep(nn.Module):
         self.fsq_noise = float(fsq_noise)
         # E6.5 pure-JEPA: skip decoder forward + recon loss entirely.
         # Anti-collapse falls to CWU-reg alone; encoder is shaped purely
-        # by prediction-CE via STE. See configs/e6.5-jepa.yaml.
+        # by prediction-CE via STE. Currently disabled pending a joint-
+        # distribution anti-collapse regularizer (CWU only enforces
+        # marginal uniformity; E6.5 showed joint collapse can still
+        # happen without a pixel anchor).
         self.use_recon = bool(use_recon)
         # Learnable γ parameters live on self.wm.sls_gamma (so they join
         # the transformer optimizer group via wm.parameters()). We only
@@ -1034,7 +1037,7 @@ def main():
     parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--expert-episodes-dir", default="data/expert_episodes",
                         help="Directory with expert episodes (no death on last frame)")
-    parser.add_argument("--config", default=None, help="YAML config path (default: configs/v4.yaml)")
+    parser.add_argument("--config", default=None, help="YAML config path (default: configs/e6.7-recon-cauchysls.yaml)")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)

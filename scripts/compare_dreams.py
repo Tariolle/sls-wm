@@ -25,11 +25,11 @@ corresponding navigation.
 
 Usage:
     python scripts/compare_dreams.py \
-        --config configs/v5.yaml \
-        --vae-checkpoint checkpoints_v5_fsq/fsq_best.pt \
+        --config configs/e6.7-recon-cauchysls.yaml \
+        --vae-checkpoint checkpoints_e6.7/fsq_best.pt \
         --transformer-checkpoint \
-            checkpoints_v5_fsq/transformer_best.pt \
-            checkpoints_v5_dimweights/transformer_best.pt \
+            checkpoints_e6.4/transformer_best.pt \
+            checkpoints_e6.7/transformer_best.pt \
         --episodes-dir "C:/Users/Florent/sls-wm-data/death_episodes" \
         --expert-episodes-dir "C:/Users/Florent/sls-wm-data/expert_episodes"
 """

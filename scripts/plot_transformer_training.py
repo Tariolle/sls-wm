@@ -1,8 +1,8 @@
 """Plot transformer training curves from one or more CSV logs.
 
 Compare multiple runs by passing multiple logs. Labels default to the parent
-directory name of each log (e.g. `checkpoints_v5_fsq/transformer_log.csv`
-is labelled `v5_baseline`).
+directory name of each log (e.g. `checkpoints_e6.7/transformer_log.csv`
+is labelled `e6.7`).
 
 Usage:
     # single run
@@ -10,9 +10,9 @@ Usage:
 
     # compare two runs
     python scripts/plot_transformer_training.py \
-        --log checkpoints_v5_fsq/transformer_log.csv \
-              checkpoints_v5_dimweights/transformer_log.csv \
-        --output plots/v5_baseline_vs_dimweights.png
+        --log checkpoints_e6.4/transformer_log.csv \
+              checkpoints_e6.7/transformer_log.csv \
+        --output plots/e6.4_vs_e6.7.png
 
     # with explicit labels
     python scripts/plot_transformer_training.py \

@@ -17,7 +17,7 @@ biased neither for nor against the encoder's representational choices.
 This is the "faithful viewer" pattern.
 
 Usage:
-    python scripts/train_posthoc_decoder.py --config configs/e6.5-jepa.yaml
+    python scripts/train_posthoc_decoder.py --config configs/e6.7-recon-cauchysls.yaml
 """
 
 import argparse
