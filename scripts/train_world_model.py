@@ -1106,6 +1106,11 @@ def main():
                         default=None,
                         help="Gamma as nn.Parameter (target distribution rebuilt "
                              "per forward) rather than fixed dim_weights.")
+    parser.add_argument("--fsq-freeze-epoch", type=int, default=None,
+                        help="Epoch at which to freeze FSQ encoder+decoder. "
+                             "After freeze: requires_grad=False on FSQ params, "
+                             "recon loss dropped, decoder forward/backward skipped. "
+                             "0 or unset = never freeze (fully joint).")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
@@ -1483,6 +1488,41 @@ def main():
             soft_target_matrix=soft_tm_for_joint,
             **joint_kwargs_common,
         ).to(device)
+        # Post-freeze variants: same parameters shared with the pre-freeze
+        # instances (fsq + wm are the same objects), only `use_recon=False`
+        # so the compiled graph drops the decoder forward/backward and the
+        # MSE loss term. Built eagerly so there's no mid-run compile stall
+        # at the freeze epoch.
+        freeze_epoch = int(getattr(args, "fsq_freeze_epoch", 0) or 0)
+        will_freeze = 0 < freeze_epoch < args.epochs
+        joint_step_train_frozen = None
+        joint_step_val_frozen = None
+        if will_freeze:
+            joint_step_train_frozen = JointStep(
+                fsq=fsq, wm=model,
+                alpha_uniform=args.alpha_uniform,
+                cpc_weight=args.cpc_weight,
+                label_smoothing=args.label_smoothing,
+                focal_gamma=args.focal_gamma,
+                token_noise=args.token_noise, fsq_noise=args.fsq_noise,
+                shift_max=shift_max, use_recon=False,
+                neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
+                soft_target_matrix=soft_tm_for_joint,
+                **joint_kwargs_common,
+            ).to(device)
+            joint_step_val_frozen = JointStep(
+                fsq=fsq, wm=model,
+                alpha_uniform=args.alpha_uniform,
+                cpc_weight=args.cpc_weight,
+                label_smoothing=args.label_smoothing,
+                focal_gamma=args.focal_gamma,
+                token_noise=0.0, fsq_noise=0.0,
+                shift_max=0, use_recon=False,
+                neighbor_table=None, neighbor_counts=None,
+                soft_target_matrix=soft_tm_for_joint,
+                **joint_kwargs_common,
+            ).to(device)
+
         if compile_mode == "none":
             print("JointStep compile disabled (--compile-mode none)")
         else:
@@ -1496,8 +1536,17 @@ def main():
                     joint_step_train, mode=compile_mode, fullgraph=True)
                 joint_step_val = torch.compile(
                     joint_step_val, mode=compile_mode, fullgraph=True)
-                print(f"JointStep compiled (mode={compile_mode}, "
-                      f"{inductor_cfg.compile_threads} compile threads, train + val)")
+                if will_freeze:
+                    joint_step_train_frozen = torch.compile(
+                        joint_step_train_frozen, mode=compile_mode, fullgraph=True)
+                    joint_step_val_frozen = torch.compile(
+                        joint_step_val_frozen, mode=compile_mode, fullgraph=True)
+                    print(f"JointStep compiled (mode={compile_mode}, "
+                          f"{inductor_cfg.compile_threads} compile threads, "
+                          f"train + val + frozen train + frozen val)")
+                else:
+                    print(f"JointStep compiled (mode={compile_mode}, "
+                          f"{inductor_cfg.compile_threads} compile threads, train + val)")
             except Exception as e:
                 print(f"JointStep compile failed, running eager: {e}")
 
@@ -1581,17 +1630,45 @@ def main():
 
     log_writer = csv.writer(log_file)
 
+    # FSQ freeze state. If `fsq_freeze_epoch` is set and we resume past that
+    # point, apply the freeze immediately; otherwise the per-epoch check at
+    # the top of the loop handles the live transition.
+    fsq_frozen = False
+    def _freeze_fsq():
+        nonlocal fsq_frozen
+        if fsq_frozen:
+            return
+        for p in fsq.parameters():
+            p.requires_grad_(False)
+        for group in optimizer.param_groups:
+            if group.get("name") == "fsq_encoder":
+                group["lr"] = 0.0
+        fsq_frozen = True
+        print(f"=== FSQ frozen (epoch {epoch}): encoder/decoder requires_grad=False, "
+              f"recon loss dropped, fsq_encoder LR -> 0 ===")
+
+    if joint and will_freeze and start_epoch > freeze_epoch:
+        epoch = start_epoch - 1  # for the print in _freeze_fsq
+        _freeze_fsq()
+
     if compile_mode != "none":
         print("First epoch will be slower due to torch.compile tracing...")
     try:
         for epoch in range(start_epoch, args.epochs + 1):
+            # Trigger freeze at the start of the first epoch past the cutoff.
+            if joint and will_freeze and epoch > freeze_epoch and not fsq_frozen:
+                _freeze_fsq()
             t0 = time.time()
             if joint:
+                active_train = (joint_step_train_frozen if fsq_frozen
+                                else joint_step_train)
+                active_val = (joint_step_val_frozen if fsq_frozen
+                              else joint_step_val)
                 train_metrics = train_epoch_joint(
-                    joint_step_train, train_loader, optimizer, scaler, device,
+                    active_train, train_loader, optimizer, scaler, device,
                     amp_dtype=amp_dtype)
                 val_metrics = val_epoch_joint(
-                    joint_step_val, val_loader, device, amp_dtype=amp_dtype)
+                    active_val, val_loader, device, amp_dtype=amp_dtype)
                 train_loss = train_metrics["loss"]
                 train_acc = train_metrics["acc"]
                 train_d_prec = train_metrics["death_prec"]

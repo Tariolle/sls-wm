@@ -46,21 +46,24 @@ def main():
         kernel="laplace",
     ).to(device)
 
-    js = JointStep(
+    common = dict(
         fsq=fsq, wm=wm,
         alpha_uniform=0.0, cpc_weight=1.0,
         label_smoothing=0.1, focal_gamma=2.0,
         token_noise=0.05, fsq_noise=0.05,
-        shift_max=4, use_recon=True,
+        shift_max=4,
         neighbor_table=nt, neighbor_counts=nc,
         soft_target_matrix=stm,
         fsq_levels=levels, fsq_sigma=1.0,
-    ).to(device)
+    )
+    js = JointStep(use_recon=True, **common).to(device)
+    js_frozen = JointStep(use_recon=False, **common).to(device)
 
-    print("compiling JointStep with fullgraph=True ...")
     t0 = time.perf_counter()
     try:
+        print("compiling JointStep variants with fullgraph=True ...")
         js_c = torch.compile(js, mode=compile_mode, fullgraph=True)
+        js_frozen_c = torch.compile(js_frozen, mode=compile_mode, fullgraph=True)
     except Exception as e:
         print(f"COMPILE FAILED: {type(e).__name__}: {e}")
         return 1
@@ -68,26 +71,29 @@ def main():
     raw = torch.randint(0, 256, (B, K + 1, 64, 64), dtype=torch.uint8, device=device)
     act = torch.randint(0, 2, (B, K), dtype=torch.long, device=device)
     isd = torch.zeros(B, dtype=torch.bool, device=device)
-
-    print("first forward (traces the graph) ...")
     amp = torch.bfloat16 if device.type == "cuda" else torch.float32
-    try:
-        with torch.autocast(device.type, dtype=amp, enabled=device.type == "cuda"):
-            loss, metrics = js_c(raw, act, isd)
-        print(f"  loss={loss.item():.4f}")
-    except Exception as e:
-        print(f"FORWARD FAILED: {type(e).__name__}: {e}")
-        return 1
 
-    print("backward ...")
-    try:
-        loss.backward()
-    except Exception as e:
-        print(f"BACKWARD FAILED: {type(e).__name__}: {e}")
-        return 1
+    for label, step in [("use_recon=True", js_c), ("use_recon=False (frozen)", js_frozen_c)]:
+        print(f"first forward ({label}) ...")
+        try:
+            with torch.autocast(device.type, dtype=amp, enabled=device.type == "cuda"):
+                loss, metrics = step(raw, act, isd)
+            print(f"  loss={loss.item():.4f}")
+        except Exception as e:
+            print(f"FORWARD FAILED ({label}): {type(e).__name__}: {e}")
+            return 1
+        print(f"backward ({label}) ...")
+        try:
+            loss.backward()
+        except Exception as e:
+            print(f"BACKWARD FAILED ({label}): {type(e).__name__}: {e}")
+            return 1
+        for p in list(js.parameters()) + list(js_frozen.parameters()):
+            if p.grad is not None:
+                p.grad = None
 
     dt = time.perf_counter() - t0
-    print(f"OK — compile + fwd + bwd completed in {dt:.1f}s")
+    print(f"OK: compile + fwd + bwd on both variants in {dt:.1f}s")
     return 0
 
 
