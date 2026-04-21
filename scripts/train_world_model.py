@@ -1496,40 +1496,19 @@ def main():
             soft_target_matrix=soft_tm_for_joint,
             **joint_kwargs_common,
         ).to(device)
-        # Post-freeze variants: same parameters shared with the pre-freeze
-        # instances (fsq + wm are the same objects), only `use_recon=False`
-        # so the compiled graph drops the decoder forward/backward and the
-        # MSE loss term. Built eagerly so there's no mid-run compile stall
-        # at the freeze epoch.
+        # FSQ freeze is implemented solely via LR=0 on the fsq_encoder
+        # optimizer group (see _freeze_fsq below). The pre-freeze JointStep
+        # runs for all epochs; after freeze, fsq params accumulate grads
+        # but none are applied. An earlier attempt used a use_recon=False
+        # variant to skip decoder fwd+bwd during the frozen phase, but it
+        # reproducibly produced loss.grad_fn=None under torch.compile +
+        # AOT autograd at the resume+freeze boundary, across multiple
+        # configurations (detach/no-detach, reduce-overhead/default,
+        # fullgraph=True/False, eager). Root cause unconfirmed. The
+        # decoder-skip optimization was incremental; give it up for
+        # reliability.
         freeze_epoch = int(getattr(args, "fsq_freeze_epoch", 0) or 0)
         will_freeze = 0 < freeze_epoch < args.epochs
-        joint_step_train_frozen = None
-        joint_step_val_frozen = None
-        if will_freeze:
-            joint_step_train_frozen = JointStep(
-                fsq=fsq, wm=model,
-                alpha_uniform=args.alpha_uniform,
-                cpc_weight=args.cpc_weight,
-                label_smoothing=args.label_smoothing,
-                focal_gamma=args.focal_gamma,
-                token_noise=args.token_noise, fsq_noise=args.fsq_noise,
-                shift_max=shift_max, use_recon=False,
-                neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
-                soft_target_matrix=soft_tm_for_joint,
-                **joint_kwargs_common,
-            ).to(device)
-            joint_step_val_frozen = JointStep(
-                fsq=fsq, wm=model,
-                alpha_uniform=args.alpha_uniform,
-                cpc_weight=args.cpc_weight,
-                label_smoothing=args.label_smoothing,
-                focal_gamma=args.focal_gamma,
-                token_noise=0.0, fsq_noise=0.0,
-                shift_max=0, use_recon=False,
-                neighbor_table=None, neighbor_counts=None,
-                soft_target_matrix=soft_tm_for_joint,
-                **joint_kwargs_common,
-            ).to(device)
 
         if compile_mode == "none":
             print("JointStep compile disabled (--compile-mode none)")
@@ -1544,19 +1523,8 @@ def main():
                     joint_step_train, mode=compile_mode, fullgraph=True)
                 joint_step_val = torch.compile(
                     joint_step_val, mode=compile_mode, fullgraph=True)
-                if will_freeze:
-                    joint_step_train_frozen = torch.compile(
-                        joint_step_train_frozen, mode=compile_mode,
-                        fullgraph=True)
-                    joint_step_val_frozen = torch.compile(
-                        joint_step_val_frozen, mode=compile_mode,
-                        fullgraph=True)
-                    print(f"JointStep compiled (mode={compile_mode}, "
-                          f"{inductor_cfg.compile_threads} compile threads, "
-                          f"train + val + frozen train + frozen val)")
-                else:
-                    print(f"JointStep compiled (mode={compile_mode}, "
-                          f"{inductor_cfg.compile_threads} compile threads, train + val)")
+                print(f"JointStep compiled (mode={compile_mode}, "
+                      f"{inductor_cfg.compile_threads} compile threads, train + val)")
             except Exception as e:
                 print(f"JointStep compile failed, running eager: {e}")
 
@@ -1675,15 +1643,11 @@ def main():
                 _freeze_fsq()
             t0 = time.time()
             if joint:
-                active_train = (joint_step_train_frozen if fsq_frozen
-                                else joint_step_train)
-                active_val = (joint_step_val_frozen if fsq_frozen
-                              else joint_step_val)
                 train_metrics = train_epoch_joint(
-                    active_train, train_loader, optimizer, scaler, device,
+                    joint_step_train, train_loader, optimizer, scaler, device,
                     amp_dtype=amp_dtype)
                 val_metrics = val_epoch_joint(
-                    active_val, val_loader, device, amp_dtype=amp_dtype)
+                    joint_step_val, val_loader, device, amp_dtype=amp_dtype)
                 train_loss = train_metrics["loss"]
                 train_acc = train_metrics["acc"]
                 train_d_prec = train_metrics["death_prec"]
