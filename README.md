@@ -86,15 +86,13 @@ Cluster launches (SLURM, A100): `sbatch slurm/train_world_model.sl`, `sbatch slu
 - Burchi & Timofte (2025). [TWISTER: Transformer World Models with AC-CPC](https://arxiv.org/abs/2503.04416). ICLR.
 - Hafner et al. (2025). [DreamerV3](https://arxiv.org/abs/2301.04104). Nature.
 - Hafner et al. (2025). [Dreamer 4](https://arxiv.org/abs/2509.24527). Preprint.
-
-### Joint-embedding predictive architectures
 - Maes et al. (2026). [LeWorldModel: Stable End-to-End JEPA from Pixels](https://arxiv.org/abs/2603.19312). Preprint.
 
 ### Quantization
 - Mentzer et al. (2024). [FSQ: Finite Scalar Quantization](https://arxiv.org/abs/2309.15505). ICLR.
 - Vali et al. (2026). [iFSQ: Improving FSQ for Image Generation](https://arxiv.org/abs/2601.17124). ICLR.
 
-### Label smoothing and descendants
+### Training objectives
 - Szegedy et al. (2016). [Rethinking Inception](https://arxiv.org/abs/1512.00567). CVPR.
 - Lin et al. (2017). [Focal Loss](https://arxiv.org/abs/1708.02002). ICCV.
 
@@ -103,10 +101,10 @@ Cluster launches (SLURM, A100): `sbatch slurm/train_world_model.sl`, `sbatch slu
 - Esser et al. (2024). [SD3 / MMDiT (QK-norm)](https://arxiv.org/abs/2403.03206). ICML.
 - Su et al. (2024). [RoFormer / RoPE](https://arxiv.org/abs/2104.09864). Neurocomputing.
 
-### Contrastive / slowness / uniformity
+### Representation learning
 - van den Oord et al. (2018). [CPC / InfoNCE](https://arxiv.org/abs/1807.03748).
-- Huh et al. (2023). [GRWM temporal slowness](https://arxiv.org/abs/2311.17009).
 - Wang & Isola (2020). [Alignment and Uniformity on the Hypersphere](https://arxiv.org/abs/2005.10242). ICML.
+- Huh et al. (2023). [GRWM temporal slowness](https://arxiv.org/abs/2311.17009).
 
 ### RL
 - Schulman et al. (2017). [PPO](https://arxiv.org/abs/1707.06347).
