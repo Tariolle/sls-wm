@@ -13,10 +13,10 @@
 # Joint FSQ + Transformer training on A100 with USR1 auto-resume.
 #
 # Submit:  sbatch slurm/train_world_model.sl [config]
-# Example: sbatch slurm/train_world_model.sl configs/e6.7-recon-cauchysls.yaml
+# Example: sbatch slurm/train_world_model.sl configs/e6.8-recon-laplacesls.yaml
 # Monitor: tail -f slurm/logs/train_world_model.out
 
-CONFIG=${1:-configs/e6.7-recon-cauchysls.yaml}
+CONFIG=${1:-configs/e6.8-recon-laplacesls.yaml}
 
 # Extract checkpoint_dir from the transformer section of the config.
 CKPT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG')).get('transformer',{}).get('checkpoint_dir','checkpoints'))")

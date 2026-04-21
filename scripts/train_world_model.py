@@ -641,15 +641,16 @@ class JointStep(nn.Module):
         frame_last = frames_f[:, K - 1]
         frame_tgt = frames_f[:, K]
 
-        B_, K1_, D_, H_, W_ = z_e_all.shape
-        z_bounded_all = self.fsq.fsq.bound(
-            z_e_all.reshape(B_ * K1_, D_, H_, W_)
-        ).view(B_, K1_, D_, H_, W_)
-        half_levels = self.fsq.fsq.half_levels
-        uniform_loss = torch.stack([
-            fsq_marginal_uniform_reg(z_bounded_all[:, t], half_levels)
-            for t in range(K1_)
-        ]).mean()
+        if self.alpha_uniform > 0.0:
+            B_, K1_, D_, H_, W_ = z_e_all.shape
+            z_bounded_all = self.fsq.fsq.bound(
+                z_e_all.reshape(B_ * K1_, D_, H_, W_)
+            ).view(B_, K1_, D_, H_, W_)
+            uniform_loss = fsq_marginal_uniform_reg(
+                z_bounded_all, self.fsq.fsq.half_levels)
+        else:
+            uniform_loss = torch.zeros((), device=raw_frames.device,
+                                       dtype=frames_f.dtype)
 
         if self.use_recon:
             recon_last = recon_all[:, K - 1]
@@ -793,11 +794,16 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
     FSQ encode + aux losses + transformer + token/cpc losses as a single
     graph. The training loop here only handles data transfer, the
     optimizer step, grad-norm diagnostics, and metric accumulation.
+
+    Per-stage timings are accumulated into ``bottlenecks`` (keys: data,
+    fwd, bwd, step, metrics). GPU-side stages use CUDA events batched to
+    a single synchronize() at epoch end — they don't stall the pipeline.
     """
     joint_step.train()
     js = _unwrap(joint_step)
     tpf = _unwrap(js.wm).tokens_per_frame
     use_amp = device.type == "cuda"
+    is_cuda = device.type == "cuda"
 
     total_token_loss = 0.0
     total_cpc = 0.0
@@ -810,15 +816,32 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
     n_batches = 0
     code_counts_total = None
 
+    fwd_events, bwd_events, step_events = [], [], []
+    cpu_data_s = 0.0
+    cpu_metrics_s = 0.0
+    code_counts_gpu = None
+    t_data_start = time.perf_counter()
+
     for raw_frames, actions, is_death in loader:
         raw_frames = raw_frames.to(device, non_blocking=True)
         actions = actions.to(device, non_blocking=True)
         is_death = is_death.to(device, non_blocking=True).bool()
         B = raw_frames.size(0)
+        cpu_data_s += time.perf_counter() - t_data_start
 
+        if is_cuda:
+            fs = torch.cuda.Event(enable_timing=True)
+            fe = torch.cuda.Event(enable_timing=True)
+            fs.record()
         with torch.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
             loss, metrics = joint_step(raw_frames, actions, is_death)
+        if is_cuda:
+            fe.record()
+            fwd_events.append((fs, fe))
 
+            bs = torch.cuda.Event(enable_timing=True)
+            be = torch.cuda.Event(enable_timing=True)
+            bs.record()
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -828,35 +851,80 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
         # the transformer's (already smaller) gradient by the encoder-to-
         # transformer ratio, severely slowing transformer learning.
         # Per-group matches the per-group LR design philosophy.
-        torch.nn.utils.clip_grad_norm_(list(js.wm.parameters()), 1.0)
-        torch.nn.utils.clip_grad_norm_(list(js.fsq.parameters()), 1.0)
+        wm_norm = torch.nn.utils.clip_grad_norm_(list(js.wm.parameters()), 1.0)
+        fsq_norm = torch.nn.utils.clip_grad_norm_(list(js.fsq.parameters()), 1.0)
+        if is_cuda:
+            be.record()
+            bwd_events.append((bs, be))
 
-        with torch.no_grad():
-            e = sum(p.grad.detach().pow(2).sum().item()
-                    for p in js.fsq.parameters() if p.grad is not None)
-            t = sum(p.grad.detach().pow(2).sum().item()
-                    for p in js.wm.parameters() if p.grad is not None)
-            enc_grad_sq += e
-            tr_grad_sq += t
-
+            ss = torch.cuda.Event(enable_timing=True)
+            se = torch.cuda.Event(enable_timing=True)
+            ss.record()
         scaler.step(optimizer)
         scaler.update()
+        if is_cuda:
+            se.record()
+            step_events.append((ss, se))
 
-        total_token_loss += metrics["token_loss"].item() * B
-        total_cpc += metrics["cpc_loss"].item() * B
-        total_recon += metrics["recon_loss"].item() * B
-        total_unif += metrics["uniform_loss"].item() * B
-        total_correct += int(metrics["correct"].item())
-        total_tokens += int(metrics["n_tokens"].item())
-        tp += int(metrics["death_tp"].item())
-        fp += int(metrics["death_fp"].item())
-        fn += int(metrics["death_fn"].item())
-        batch_counts = metrics["code_counts"].detach().cpu()
-        if code_counts_total is None:
-            code_counts_total = batch_counts.clone()
-        else:
-            code_counts_total += batch_counts
+        # GPU-side accumulator (copied out once at epoch end). Avoids a
+        # per-batch D2H sync for code_counts.
+        if code_counts_gpu is None:
+            code_counts_gpu = torch.zeros_like(metrics["code_counts"])
+        code_counts_gpu += metrics["code_counts"]
+
+        t_m = time.perf_counter()
+        # Stack every scalar we need off-GPU into one tensor, then one
+        # .tolist() call = one CPU-GPU sync instead of 11. clip_grad_norm_
+        # returns the pre-clip L2 norm; squared = sum of per-param squared
+        # grads (replaces the 800+ per-parameter .item() loop that used
+        # to live here).
+        scalars = torch.stack([
+            fsq_norm.detach().float(),
+            wm_norm.detach().float(),
+            metrics["token_loss"].detach().float(),
+            metrics["cpc_loss"].detach().float(),
+            metrics["recon_loss"].detach().float(),
+            metrics["uniform_loss"].detach().float(),
+            metrics["correct"].detach().float(),
+            metrics["n_tokens"].detach().float(),
+            metrics["death_tp"].detach().float(),
+            metrics["death_fp"].detach().float(),
+            metrics["death_fn"].detach().float(),
+        ]).tolist()
+        (fsq_n, wm_n, tok_l, cpc_l, rec_l, unif_l,
+         cor, nt, d_tp, d_fp, d_fn) = scalars
+        enc_grad_sq += fsq_n ** 2
+        tr_grad_sq += wm_n ** 2
+        total_token_loss += tok_l * B
+        total_cpc += cpc_l * B
+        total_recon += rec_l * B
+        total_unif += unif_l * B
+        total_correct += int(cor)
+        total_tokens += int(nt)
+        tp += int(d_tp)
+        fp += int(d_fp)
+        fn += int(d_fn)
         n_batches += 1
+        cpu_metrics_s += time.perf_counter() - t_m
+        t_data_start = time.perf_counter()
+
+    if code_counts_gpu is not None:
+        code_counts_total = code_counts_gpu.detach().cpu()
+
+    if is_cuda:
+        torch.cuda.synchronize()
+        fwd_s = sum(s.elapsed_time(e) for s, e in fwd_events) / 1000.0
+        bwd_s = sum(s.elapsed_time(e) for s, e in bwd_events) / 1000.0
+        step_s = sum(s.elapsed_time(e) for s, e in step_events) / 1000.0
+    else:
+        fwd_s = bwd_s = step_s = 0.0
+    bottlenecks = {
+        "data": cpu_data_s,
+        "fwd": fwd_s,
+        "bwd": bwd_s,
+        "step": step_s,
+        "metrics": cpu_metrics_s,
+    }
 
     n_samples = max(1, total_tokens // tpf)
     death_prec = tp / (tp + fp + 1e-8)
@@ -878,6 +946,7 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
         "tr_grad_rms": (tr_grad_sq / max(1, n_batches)) ** 0.5,
         "code_usage_pct": code_usage_pct,
         "code_ppl_pct": code_ppl_pct,
+        "bottlenecks": bottlenecks,
     }
 
 
@@ -904,6 +973,7 @@ def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
     tp = fp = fn = 0
     code_counts_total = None
 
+    code_counts_gpu = None
     for raw_frames, actions, is_death in loader:
         raw_frames = raw_frames.to(device, non_blocking=True)
         actions = actions.to(device, non_blocking=True)
@@ -911,20 +981,33 @@ def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
         B = raw_frames.size(0)
         with torch.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
             _, metrics = joint_step(raw_frames, actions, is_death)
-        total_token_loss += metrics["token_loss"].item() * B
-        total_cpc += metrics["cpc_loss"].item() * B
-        total_recon += metrics["recon_loss"].item() * B
-        total_unif += metrics["uniform_loss"].item() * B
-        total_correct += int(metrics["correct"].item())
-        total_tokens += int(metrics["n_tokens"].item())
-        tp += int(metrics["death_tp"].item())
-        fp += int(metrics["death_fp"].item())
-        fn += int(metrics["death_fn"].item())
-        batch_counts = metrics["code_counts"].detach().cpu()
-        if code_counts_total is None:
-            code_counts_total = batch_counts.clone()
-        else:
-            code_counts_total += batch_counts
+        if code_counts_gpu is None:
+            code_counts_gpu = torch.zeros_like(metrics["code_counts"])
+        code_counts_gpu += metrics["code_counts"]
+        scalars = torch.stack([
+            metrics["token_loss"].detach().float(),
+            metrics["cpc_loss"].detach().float(),
+            metrics["recon_loss"].detach().float(),
+            metrics["uniform_loss"].detach().float(),
+            metrics["correct"].detach().float(),
+            metrics["n_tokens"].detach().float(),
+            metrics["death_tp"].detach().float(),
+            metrics["death_fp"].detach().float(),
+            metrics["death_fn"].detach().float(),
+        ]).tolist()
+        (tok_l, cpc_l, rec_l, unif_l,
+         cor, nt, d_tp, d_fp, d_fn) = scalars
+        total_token_loss += tok_l * B
+        total_cpc += cpc_l * B
+        total_recon += rec_l * B
+        total_unif += unif_l * B
+        total_correct += int(cor)
+        total_tokens += int(nt)
+        tp += int(d_tp)
+        fp += int(d_fp)
+        fn += int(d_fn)
+    if code_counts_gpu is not None:
+        code_counts_total = code_counts_gpu.detach().cpu()
 
     n_samples = max(1, total_tokens // tpf)
     death_prec = tp / (tp + fp + 1e-8)
@@ -1599,6 +1682,17 @@ def main():
                     f"Val: usage={val_metrics['code_usage_pct']:.1f}% "
                     f"ppl={val_metrics['code_ppl_pct']:.1f}%"
                 )
+                b = train_metrics.get("bottlenecks")
+                if b is not None:
+                    tot = max(1e-6, sum(b.values()))
+                    print(
+                        f"  Bottleneck | "
+                        f"data={b['data']:.1f}s ({100*b['data']/tot:.0f}%) "
+                        f"fwd={b['fwd']:.1f}s ({100*b['fwd']/tot:.0f}%) "
+                        f"bwd={b['bwd']:.1f}s ({100*b['bwd']/tot:.0f}%) "
+                        f"step={b['step']:.1f}s ({100*b['step']/tot:.0f}%) "
+                        f"metrics={b['metrics']:.1f}s ({100*b['metrics']/tot:.0f}%)"
+                    )
 
             row = [
                 epoch, f"{train_total:.6f}", f"{train_loss:.6f}", f"{train_acc:.4f}",

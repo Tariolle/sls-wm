@@ -226,36 +226,38 @@ def grwm_uniformity(z_e, t=2.0):
 
 
 def fsq_marginal_uniform_reg(z_bounded, half_levels):
-    """Anti-collapse regularizer: per-dim Cramér-von Mises distance from
-    Uniform[-half_d, +half_d].
+    """Per-dim Cramér-von Mises distance from Uniform[-half_d, +half_d].
 
-    FSQ dimensions are factorized by construction (each dim quantized
-    independently). The joint target Uniform([-half_1, half_1] x ... x
-    [-half_D, half_D]) factorizes into D independent 1D uniforms, so we
-    can test each 1D marginal directly — no Cramér-Wold sketching needed
-    (unlike SIGReg for continuous embeddings with non-factorized targets).
+    FSQ dims are factorised by construction, so each 1D marginal can be
+    tested directly — no Cramér-Wold sketching needed. CvM is used
+    instead of KS for smoother gradients.
 
-    Cramér-von Mises is used instead of KS because it's smooth throughout
-    (no sup), giving better gradients. For sorted samples h_(1) <= ... <=
-    h_(M) with target CDF F, CvM = mean_i (F(h_(i)) - (i-0.5)/M)^2.
-
-    Args:
-        z_bounded: (..., D, H, W) tensor with values in [-half_d, +half_d]
-                   per channel d (post-sigmoid-bound, pre-round).
-        half_levels: (D,) float tensor of per-dim half-levels.
-
-    Returns:
-        scalar CvM statistic averaged across D dims.
+    Accepts (B, D, H, W) [single batch] or (B, T, D, H, W) [T independent
+    frames share the regulariser]. In the 5D case each frame contributes
+    its own CvM-per-channel over B*H*W samples; the returned scalar is
+    the mean across T and D. Single fused sort replaces the per-frame
+    Python loop that was here before.
     """
-    # Flatten all non-channel dims to (D, M)
-    D = z_bounded.shape[-3]
-    z_flat = z_bounded.transpose(0, -3).reshape(D, -1)  # (D, M_total)
-    M = z_flat.shape[1]
-    # Empirical CDF evaluation points for sorted samples: (i-0.5)/M
-    i_emp = (torch.arange(M, device=z_flat.device, dtype=z_flat.dtype) + 0.5) / M
-    h_sorted, _ = z_flat.sort(dim=1)  # (D, M)
-    half = half_levels.to(z_flat.device, dtype=z_flat.dtype).view(D, 1)
-    # Target CDF of Uniform[-half_d, +half_d] evaluated at sorted samples
-    cdf_target = ((h_sorted + half) / (2.0 * half)).clamp(0.0, 1.0)
-    cvm = (cdf_target - i_emp.unsqueeze(0)).pow(2).mean(dim=1)  # (D,)
-    return cvm.mean()
+    half = half_levels.to(z_bounded.device, dtype=z_bounded.dtype)
+    if z_bounded.ndim == 4:
+        B, D, H, W = z_bounded.shape
+        z_flat = (z_bounded.permute(1, 0, 2, 3)
+                  .reshape(D, B * H * W)
+                  .contiguous())
+        M = z_flat.size(1)
+        h_sorted, _ = z_flat.sort(dim=1)
+        i_emp = (torch.arange(M, device=z_flat.device, dtype=z_flat.dtype) + 0.5) / M
+        cdf = ((h_sorted + half.view(D, 1)) / (2.0 * half.view(D, 1))).clamp(0.0, 1.0)
+        return (cdf - i_emp.view(1, M)).pow(2).mean()
+    if z_bounded.ndim == 5:
+        B, T, D, H, W = z_bounded.shape
+        z_flat = (z_bounded.permute(1, 2, 0, 3, 4)
+                  .reshape(T, D, B * H * W)
+                  .contiguous())
+        M = z_flat.size(-1)
+        h_sorted, _ = z_flat.sort(dim=-1)
+        i_emp = (torch.arange(M, device=z_flat.device, dtype=z_flat.dtype) + 0.5) / M
+        cdf = ((h_sorted + half.view(1, D, 1))
+               / (2.0 * half.view(1, D, 1))).clamp(0.0, 1.0)
+        return (cdf - i_emp.view(1, 1, M)).pow(2).mean()
+    raise ValueError(f"expected 4D or 5D input, got {z_bounded.ndim}D")
