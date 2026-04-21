@@ -1,0 +1,129 @@
+# E6.7 recon + isotropic-Cauchy SLS: the E6.4 architecture (recon + CWU
+# + prediction) with SLS reintroduced on the new codebook using the
+# zero-calibration kernel config derived from fsq_sensitivity (2026-04-21).
+#
+# Why this config (2026-04-21):
+#   E6.5 (pure JEPA, recon off, CWU as sole anti-collapse) failed with
+#   val codebook collapse at ep22+ (val usage 18%, ppl 8%). Diagnosis: CWU
+#   enforces per-dim MARGINAL uniformity, which is weaker than JOINT
+#   uniformity — the encoder can satisfy uniform marginals while the
+#   joint distribution collapses to a small subset of codes. Recon, by
+#   forcing the decoder to reproduce varied frames, implicitly enforces
+#   joint-distribution coverage.
+#
+# Decision: keep recon anchor (E6.4 known-good recipe), keep CWU at
+# alpha_uniform=1.0 where it sits at ~0.3% of total loss (inert but
+# harmless companion to recon), and change the ONE thing we actually
+# wanted to test: SLS kernel choice.
+#
+# SLS config: isotropic Cauchy with sigma=1.0 derived from first-neighbor
+# HWHM rule (k(d=1) = 1/(1+1) = 0.5, first FSQ neighbor gets half the
+# target's mass). dim_weights = [1, 1, 1, 1] (no calibration). Zero
+# data-derived hyperparameters. Rationale detailed in
+# memory/project_sls_kernel_choice.md — on E6.4's fsq_best.pt Cauchy
+# dominated kernel families (MSE Pearson r=0.981 vs Gaussian 0.908);
+# anisotropy was mild (0.085) so isotropic is within ~5% of calibrated;
+# cross-dim coupling strong (+0.29) makes aniso-Gaussian no better than
+# isotropic anyway.
+#
+# Hypothesis: under joint training with the loss rewarding Cauchy-shaped
+# metric in FSQ coords, the encoder will adapt its codebook toward that
+# structure. Isotropic kernel + adaptive encoder > calibrated kernel on
+# a frozen codebook (tested on the V5/E6.4 codebook geometry, which was
+# shaped without SLS pressure).
+#
+# Future work (post-E6.7): replace CWU with a joint-distribution
+# anti-collapse regularizer (CWU measures marginals only; doesn't
+# prevent joint collapse as E6.5 empirically demonstrated).
+
+model:
+  vocab_size: 625
+  embed_dim: 512
+  n_heads: 8
+  n_layers: 8
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [5, 5, 5, 5]
+  dropout: 0.15
+  adaln: true
+
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 140             # fits one 8h A100 slot at ~200s/epoch
+  batch_size: 896
+  lr: 0.004
+  lr_min: 0.0002
+  weight_decay: 0.01
+  cpc_weight: 1.0         # inert when use_cpc=false
+  token_noise: 0.05
+  fsq_noise: 0.05
+  label_smoothing: 0.1    # SLS enabled
+  # SLS kernel: isotropic Cauchy, sigma=1.0 (first-neighbor HWHM).
+  # Zero data-derived hyperparameters. See fsq_sensitivity result on
+  # E6.4 fsq_best.pt and memory/project_sls_kernel_choice.md.
+  fsq_kernel: cauchy
+  fsq_sigma: 1.0
+  fsq_dim_weights: [1.0, 1.0, 1.0, 1.0]
+  focal_gamma: 2.0
+  death_oversample: 4
+  seed: 42
+  checkpoint_dir: checkpoints_e6.7
+  # Joint
+  joint: true
+  fsq_lr: 0.001
+  alpha_uniform: 1.0      # CWU kept as low-weight companion. E6.4 showed
+                          # its contribution is ~0.3% of loss when recon
+                          # is present — inert but harmless. Consider
+                          # dropping to 0.0 as an ablation row post-E6.7.
+  shift_max: 4
+  # Architectural flags
+  use_cpc: false          # AC-CPC off (E6.2+ JEPA-style prediction)
+  use_recon: true         # recon ON — this is the E6.4 anti-collapse anchor
+  learnable_gamma: false
+
+# Post-hoc decoder is not needed when use_recon=true (training decoder
+# is already shaped by the recon loss). Kept in the config so apply_config
+# works without complaint if the section is referenced later.
+posthoc_decoder:
+  transformer_checkpoint: checkpoints_e6.7/transformer_best.pt
+  fsq_checkpoint: checkpoints_e6.7/fsq_best.pt
+  epochs: 30
+  batch_size: 512
+  lr: 0.001
+  seed: 42
+  checkpoint_dir: checkpoints_e6.7
+
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_e6.7/transformer_best.pt
+  epochs: 50
+  batch_size: 512
+  lr: 0.001
+  weight_decay: 0.0001
+  val_ratio: 0.1
+  seed: 42
+  checkpoint_dir: checkpoints_e6.7
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_e6.7/transformer_best.pt
+  pretrained: checkpoints_e6.7/controller_bc_best.pt
+  amp_dtype: bfloat16
+  n_iterations: 50000
+  n_episodes: 512
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 512
+  entropy_coeff: 0.01
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 45
+  death_threshold: 0.5
+  mlp_hidden: 512
+  n_eval_episodes: 512
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_e6.7
