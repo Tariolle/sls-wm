@@ -1548,16 +1548,26 @@ def main():
                 joint_step_val = torch.compile(
                     joint_step_val, mode=compile_mode, fullgraph=True)
                 if will_freeze:
-                    # Frozen variants run eager. The use_recon=True variant
-                    # under torch.compile + fullgraph + resume+freeze
-                    # reproducibly yielded loss.grad_fn=None at the first
-                    # backward of epoch freeze+1, despite the smoke test
-                    # passing in a fresh process. Eager costs a small
-                    # per-step overhead for the second half of the run;
-                    # keeps the first half's compiled speed win intact.
+                    # Frozen variants: compile with mode="default" and
+                    # fullgraph=False. The smoke test passed with
+                    # reduce-overhead + fullgraph in a fresh process, but
+                    # the resume+freeze path reproducibly yielded
+                    # loss.grad_fn=None at the first backward of epoch
+                    # freeze+1 -- the suspect is reduce-overhead's CUDA
+                    # graph capture interacting with the state-dict
+                    # reload. mode="default" keeps Inductor fusion for
+                    # memory (eager OOMs at batch 1024) but skips the
+                    # CUDA-graph layer.
+                    joint_step_train_frozen = torch.compile(
+                        joint_step_train_frozen, mode="default",
+                        fullgraph=False)
+                    joint_step_val_frozen = torch.compile(
+                        joint_step_val_frozen, mode="default",
+                        fullgraph=False)
                     print(f"JointStep compiled (mode={compile_mode}, "
                           f"{inductor_cfg.compile_threads} compile threads, "
-                          f"train + val; frozen variants eager)")
+                          f"train + val; frozen variants mode=default, "
+                          f"fullgraph=False)")
                 else:
                     print(f"JointStep compiled (mode={compile_mode}, "
                           f"{inductor_cfg.compile_threads} compile threads, train + val)")
