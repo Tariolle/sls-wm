@@ -119,11 +119,10 @@ def main():
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
     model.load_state_dict(state)
     model.eval()
-    if sys.platform != "win32":
-        try:
-            model._backbone_forward = torch.compile(model._backbone_forward)
-        except Exception:
-            pass
+    try:
+        model._backbone_forward = torch.compile(model._backbone_forward)
+    except Exception:
+        pass
     _m = model
 
     # Find episodes

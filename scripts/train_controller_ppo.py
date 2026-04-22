@@ -450,21 +450,11 @@ def main():
     amp_dtype = getattr(torch, amp_dtype_str, torch.bfloat16)
     print(f"AMP dtype: {amp_dtype}")
 
-    # torch.compile re-enabled on H200. The A100 crashes
-    # (CUBLAS_STATUS_NOT_INITIALIZED) may not have been caused by compile
-    # at all -- PPO only calls model.predict_next_frame(), and
-    # torch.compile on a Module only wraps forward(); attribute access
-    # on OptimizedModule delegates to _orig_mod, so the rollout path
-    # was eager either way. Two things changed when PPO started working:
-    # compile off AND GPU A100 -> H200. This tests whether H200 was the
-    # real fix. Start with mode=default (no CUDA graphs); if stable,
-    # promote to reduce-overhead for the bigger speedup.
-    if sys.platform != "win32":
-        try:
-            model = torch.compile(model, mode="default")
-            print("torch.compile enabled (default)")
-        except Exception as e:
-            print(f"torch.compile not available: {e}")
+    try:
+        model = torch.compile(model, mode="reduce-overhead")
+        print("torch.compile enabled (reduce-overhead)")
+    except Exception as e:
+        print(f"torch.compile not available: {e}")
 
     vae = None
     if args.fsq_checkpoint is not None:
