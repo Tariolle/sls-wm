@@ -410,11 +410,11 @@
 \begin{frame}{FSQ-VAE: Training}
   \begin{itemize}
     \item $\sim$252K frames ($\sim$\naugeps{} episodes), batch 1024
-    \item \textbf{Jointly} optimized with the transformer: no frozen pre-stage
+    \item \textbf{Jointly} optimized with the transformer: no frozen pre-stage, encoder kept active for the full schedule
     \item Pixel MSE kept as an \textbf{anchor} on codebook semantics
     \item Prediction gradients route back into the encoder via a straight-through estimator (STE) through a learnable linear projection \texttt{fsq\_grad\_proj}
-    \item \textbf{Encoder frozen halfway}: FSQ converges fast, transformer needs more budget. Second half is transformer-only on a fixed codebook; recon loss dropped, decoder forward/backward skipped.
-    \item Cosine LR schedule + 10\% warmup, AdamW, weight decay $1e^{-4}$, 100 epochs total
+    \item \textbf{Single-group optimizer} (encoder + transformer share one AdamW group, LR $10^{-3}$, weight decay $10^{-3}$) + \textbf{single global grad clip at 10.0} (sized to the recon-dominated encoder gradient scale)
+    \item Cosine LR schedule + linear warmup, 200 epochs
   \end{itemize}
 \end{frame}
 

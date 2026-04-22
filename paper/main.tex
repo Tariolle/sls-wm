@@ -163,16 +163,16 @@ We keep the pixel-MSE reconstruction loss as a semantics anchor.
 A pure-JEPA variant without the pixel decoder collapses in our experiments; our adaptation of SIGReg~\citep{maes2026leworldmodel} to the discrete factorized FSQ case, using a Cramér-von-Mises test against a factorized uniform target, was insufficient to prevent joint-distribution degeneracy when the prediction target comes from the online encoder.
 Finding an anti-collapse regularizer strong enough to remove the pixel anchor is left as future work.
 
-\paragraph{Per-group gradient clipping.}
-The pixel-MSE and cross-entropy gradients live on different scales and have different spatial statistics.
-We clip the encoder and the transformer gradient groups independently at the same norm, so that a large reconstruction gradient does not consume the clipping budget that would otherwise apply to the prediction side.
+\paragraph{Single-group optimization and global gradient clipping.}
+Under joint training the pixel-MSE and cross-entropy gradients live on different scales, but we do not separate them into different parameter groups.
+Following the joint-training recipe of~\citet{maes2026leworldmodel}, the encoder and transformer sit in a single AdamW group with a shared learning rate and weight decay, and a single global gradient-norm clip is applied across the combined parameter set.
+The clip threshold is set large enough (empirically $\sim 10\times$ the transformer gradient norm at convergence) that the reconstruction signal is preserved while residual spikes on either side are still caught.
+Separating the two into per-group clips with a tight threshold, as in our earlier iterations, consistently produced a positive train-validation gap on the same budget; single-group with a wide clip yielded smoother training curves and closes that gap.
 
-\paragraph{Halfway encoder freeze.}
-FSQ converges much faster than the transformer: in an earlier two-stage setup, tokenizer training consumed roughly an order of magnitude less wall-clock time than transformer training.
-In a fully-joint schedule with equal wall-clock time, this overshoots for the encoder (which keeps drifting long after reconstruction has saturated) and starves the transformer (which still has headroom on a stable codebook).
-We therefore freeze the encoder, decoder, and iFSQ bounding at a pre-set fraction of training.
-After the freeze epoch, \texttt{requires\_grad} is set to \texttt{False} on the encoder and decoder, the pixel-MSE loss is dropped, and the decoder forward and backward passes are skipped.
-The second half is transformer-only on a fixed codebook.
+\paragraph{No encoder freeze.}
+We also tried freezing the encoder at a pre-set fraction of training (motivated by the observation that FSQ converges faster than the transformer in two-stage setups).
+In practice this removed a source of slow codebook adaptation that the transformer continued to exploit late in training, and the resulting runs did not dominate their unfrozen counterparts on any metric we tracked.
+We therefore keep the encoder unfrozen for the full schedule, and the pixel-MSE anchor stays active throughout.
 
 % ---------------------------------------------------------------------------
 \subsection{Structured Label Smoothing}
@@ -287,11 +287,11 @@ We kept only the FSQ-neighbor branch so that context and loss agree on what coun
 
 \paragraph{Output projection and total loss.}
 The output projection shares weights with the input embedding (weight tying).
-The total training loss during the joint phase is
+The total training loss is
 \begin{equation}
   \mathcal{L} = \mathcal{L}_\text{SLS-focal} + \lambda_\text{recon} \mathcal{L}_\text{MSE},
 \end{equation}
-reducing to $\mathcal{L} = \mathcal{L}_\text{SLS-focal}$ after the halfway encoder freeze.
+applied to all parameters (encoder + transformer) throughout training.
 
 % ---------------------------------------------------------------------------
 \subsection{PPO controller (Controller)}
@@ -335,12 +335,12 @@ Frames are preprocessed with Sobel edge detection and resized to $\imgsize$.
 
 \paragraph{Training details.}
 The FSQ-VAE and transformer are trained jointly with AdamW using cosine annealing and warmup.
+Both subnetworks sit in a single optimizer group sharing one learning rate ($10^{-3}$) and one weight decay ($10^{-3}$), following the recipe of~\citet{maes2026leworldmodel}; earlier two-group configurations (separate encoder and transformer learning rates, larger weight decay on the transformer) produced noisier training curves and a positive train-validation gap on the same budget.
 We apply 5\% FSQ-neighbor token noise on context tokens.
 Death frames are oversampled $4\times$ via weighted sampling.
 BF16 mixed-precision training is used throughout; BF16 requires no loss scaling and is numerically more stable than FP16.
-Encoder and transformer gradients are clipped independently at a common norm.
-The encoder is frozen halfway through training; the pixel-MSE loss, decoder forward pass, and decoder backward pass are dropped thereafter.
-All training runs on a single NVIDIA A100 GPU.
+A single global gradient-norm clip at $10.0$ is applied to the combined parameter set; this value is sized to the empirical encoder gradient scale under the recon-dominated joint objective, so the pixel-MSE gradient does not crowd out the prediction side while residual spikes are still caught.
+Training runs for 200 epochs on a single NVIDIA A100 GPU; the FSQ encoder is updated throughout, jointly with the transformer (an earlier halfway-freeze schedule was explored but abandoned as it removes a source of slow codebook adaptation that remains informative to the transformer late in training).
 
 \paragraph{Training throughput.}
 We benchmarked \texttt{torch.compile} modes under BF16 on our joint-training workload using subprocess isolation to prevent CUDA allocator fragmentation across runs.
@@ -367,7 +367,7 @@ We evaluate on: (1) next-token prediction accuracy and cross-entropy on held-out
 % Expected contents:
 % - Table 1: Main results (level progress %, accuracy, Death F1) across model versions
 % - Table 2: SLS ablation (with vs without, kernel family, sigma sweep, isotropic vs per-dim)
-% - Table 3: Joint vs frozen FSQ, halfway freeze vs fully joint, pixel anchor vs pure-JEPA
+% - Table 3: Joint vs frozen FSQ, pixel anchor vs pure-JEPA, single-group vs two-group optimizer
 % - Table 4: Context length, action conditioning, death oversampling, BC pretraining
 % - Table 5: Baselines (random, open-loop, heuristic, BC-only, frame-prediction-free)
 % - Figure: dreamed rollout vs ground truth frames
@@ -410,7 +410,7 @@ The pixel-MSE anchor in the joint-training setup is a practical solution, not a 
 
 We introduced Structured Label Smoothing, a training objective that exploits the coordinate geometry of FSQ codebooks, and studied it under a joint-training setup in which prediction gradients shape the codebook through a straight-through estimator with a pixel-reconstruction anchor.
 A kernel-family study over Gaussian, Laplace, and Cauchy families, combined with an isotropic first-neighbour bandwidth, gives a zero-calibration hyperparameter that is robust to the codebook drift induced by joint training.
-Halfway through training the encoder is frozen so that the second half runs on a stable codebook; this is a compute-accounting trick that separates tokenizer convergence from transformer convergence inside a single run, without returning to the two-stage pipeline that discards prediction gradients at the encoder boundary.
+The resulting system is trained end-to-end, with a single AdamW group, a single global gradient clip, and the encoder kept active for the full schedule alongside the transformer.
 Integrated into a full V-M-C pipeline with AdaLN-conditioned transformers and PPO-in-dreams, the system runs in real time at 30\,FPS on Geometry Dash.
 SLS is in principle applicable to any model that predicts over a discrete latent space with a coordinate metric.
 A natural extension is to make the kernel bandwidth $\sigma$ learnable and jointly optimized with the world model, moving SLS from a fixed prior to a fully end-to-end objective; care must be taken to prevent degenerate solutions in which the learned targets collapse to uniform smoothing.
@@ -434,8 +434,7 @@ A natural extension is to make the kernel bandwidth $\sigma$ learnable and joint
 % C. Per-position accuracy analysis
 % D. Inference latency breakdown
 % E. Anti-collapse loss ablations (SIGReg adaptations, CvM factorized-uniform, alternatives)
-% F. Freeze-halfway compute comparison (fully-joint vs halfway-frozen vs two-stage)
-% G. Pure-JEPA collapse analysis (joint-distribution degeneracy diagnostics)
+% F. Pure-JEPA collapse analysis (joint-distribution degeneracy diagnostics)
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 

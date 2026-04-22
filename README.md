@@ -40,23 +40,23 @@ The transformer predicts next-frame token logits; cross-entropy targets come fro
 
 **Train the world model (V + M jointly):**
 ```bash
-python scripts/train_world_model.py --config configs/e6.8-recon-laplacesls.yaml
+python scripts/train_world_model.py --config configs/e6.10-gaussian-single-group.yaml
 ```
 
 **Train the controller (BC warm-start, then PPO in imagination):**
 ```bash
-python scripts/train_controller_bc.py  --config configs/e6.8-recon-laplacesls.yaml
-python scripts/train_controller_ppo.py --config configs/e6.8-recon-laplacesls.yaml
+python scripts/train_controller_bc.py  --config configs/e6.10-gaussian-single-group.yaml
+python scripts/train_controller_ppo.py --config configs/e6.10-gaussian-single-group.yaml
 ```
 
 **Deploy to the live game (screen capture, 30 FPS):**
 ```bash
-python scripts/deploy.py --config configs/e6.8-recon-laplacesls.yaml
+python scripts/deploy.py --config configs/e6.10-gaussian-single-group.yaml
 ```
 
 **Analyse the learned codebook** (kernel fit per family, anisotropy, coupling):
 ```bash
-python scripts/fsq_sensitivity.py --checkpoint checkpoints_e6.8/fsq_best.pt --levels 5 5 5 5
+python scripts/fsq_sensitivity.py --checkpoint checkpoints_e6.10/fsq_best.pt --levels 5 5 5 5
 ```
 
 Cluster launches (SLURM, A100): `sbatch slurm/train_world_model.sl`, `sbatch slurm/train_controller.sl`.
@@ -72,10 +72,12 @@ Cluster launches (SLURM, A100): `sbatch slurm/train_world_model.sl`, `sbatch slu
 | Tag | Stage | Status |
 |-----|-------|--------|
 | V5 | Frozen-FSQ + transformer + calibrated-SLS baseline | shipped (tagged on `main`) |
-| E6.4 | First joint training iteration (CWU anti-collapse) | done, strong representation signal |
+| E6.4 | First joint training iteration (CWU anti-collapse, SLS off) | done, strong representation signal, mild overfit |
 | E6.5 | Pure-JEPA ablation (no pixel anchor) | done, confirmed marginal CWU insufficient for joint collapse |
 | E6.7 | Joint training + isotropic Cauchy SLS | done, confirmed Cauchy tail over-smooths dream rollouts |
-| E6.8 | Joint training + isotropic Laplace SLS (current) | running |
+| E6.8 | Joint training + isotropic Laplace SLS | done, same over-smoothing as Cauchy |
+| E6.9 | Gaussian SLS $\sigma = 0.7$ (interrupted by training bug) | invalid; informed E6.10 recipe |
+| **E6.10** | **Joint training + Gaussian SLS $\sigma = 0.7$, LeWM-style single-group optimizer, 200 epochs** | **current baseline**: val death F1 0.773, 100% codebook usage, 80% perplexity ratio, negative train-val gap, clean auto-correcting dream rollouts |
 | V6 | Final architecture post E6.x sweep | pre-freeze, 2026-05-31 target |
 
 ## References
