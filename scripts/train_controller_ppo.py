@@ -136,11 +136,8 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
 
         if step >= warmup_steps:
             alive_mask = alive.float()
-            # Clone h_t: torch.compile(mode="reduce-overhead") returns tensors
-            # pointing into a CUDA-graph memory pool that is overwritten on the
-            # next replay. Storing the un-cloned reference corrupts rollout
-            # data and surfaces later as CUBLAS_STATUS_NOT_INITIALIZED on the
-            # next cuBLAS call.
+            # .clone() so stored h_t is not aliased to any upstream buffer
+            # that might be reused on the next iteration.
             all_h_t.append(h_t.float().clone())
             all_actions.append(action)
             all_old_log_probs.append(log_prob)
@@ -455,8 +452,14 @@ def main():
 
     if sys.platform != "win32":
         try:
-            model = torch.compile(model, mode="reduce-overhead")
-            print("torch.compile enabled (reduce-overhead)")
+            # mode="default" (no CUDA graphs): reduce-overhead and max-autotune
+            # reproducibly produce CUBLAS_STATUS_NOT_INITIALIZED in the
+            # controller's tiny actor/critic heads on torch 2.x / CUDA 12.6
+            # A100. The graph pool coexists badly with non-graph fp32
+            # allocations; the crash surfaces at arbitrary downstream cuBLAS
+            # calls (see commit aafe801 for the original diagnosis).
+            model = torch.compile(model, mode="default")
+            print("torch.compile enabled (default)")
         except Exception as e:
             print(f"torch.compile not available: {e}")
 
