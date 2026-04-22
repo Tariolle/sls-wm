@@ -13,7 +13,7 @@
 # BC pretraining then PPO fine-tuning, USR1 auto-resume.
 # Submit: sbatch slurm/train_controller.sl [config]
 
-CONFIG=${1:-configs/e6.8-recon-laplacesls.yaml}
+CONFIG=${1:-configs/e6.10-gaussian-single-group.yaml}
 
 # Extract checkpoint_dir from the transformer section of the config.
 CKPT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG')).get('transformer',{}).get('checkpoint_dir','checkpoints'))")
