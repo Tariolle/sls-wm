@@ -73,7 +73,7 @@ controller_ppo:
   pretrained: checkpoints_e6.10/controller_bc_best.pt
   amp_dtype: bfloat16
   n_iterations: 5000
-  n_episodes: 1920
+  n_episodes: 512
   lr: 0.0001
   gamma: 0.995
   lam: 0.95
