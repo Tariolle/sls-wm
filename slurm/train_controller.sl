@@ -2,12 +2,14 @@
 #SBATCH -J "train_ctrl"
 #SBATCH -o slurm/logs/train_controller.out
 #SBATCH -e slurm/logs/train_controller.err
-#SBATCH -p ar_a100
-#SBATCH --gres=gpu:a100:1
+# MIG 40GB slice for fast-queue diagnostic runs on the E6.10 cuBLAS crash.
+# Revert to `-p ar_a100` + `--gres=gpu:a100:1` once PPO runs end to end.
+#SBATCH -p ar_mig
+#SBATCH --gres=gpu:a100_3g.40gb:1
 #SBATCH -n 1
 #SBATCH --cpus-per-gpu 8
 #SBATCH --mem 64G
-#SBATCH --time=08:00:00
+#SBATCH --time=02:00:00
 #SBATCH --signal=B:USR1@300
 
 # BC pretraining then PPO fine-tuning, USR1 auto-resume.
@@ -32,6 +34,10 @@ module purge
 module load aidl/pytorch/2.10.0-py3.12-cuda12.6
 export PATH="$HOME/.local/bin:$PATH"
 pip install --user --upgrade wandb "protobuf>=6.32" 2>/dev/null
+
+# Uncomment to force synchronous CUDA launches for debugging (slow, but
+# reports the actual faulting kernel instead of CUBLAS_NOT_INITIALIZED).
+# export CUDA_LAUNCH_BLOCKING=1
 
 echo "$(date): Starting on $(hostname), Job ID: $SLURM_JOB_ID"
 
