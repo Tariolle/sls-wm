@@ -144,6 +144,8 @@ def main():
     parser.add_argument("--tokens-per-frame", type=int, default=None)
     parser.add_argument("--context-frames", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
+    parser.add_argument("--controller-dropout", type=float, default=0.1,
+                        help="Dropout in MLPPolicy trunk (BC only).")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
@@ -250,7 +252,9 @@ def main():
     print(f"Jump class weight: {pos_weight.item():.2f}x (data ratio: {(1-jump_ratio)/jump_ratio:.2f}x)")
 
     # Initialize controller
-    controller = MLPPolicy(h_dim=args.embed_dim).to(device)
+    controller = MLPPolicy(h_dim=args.embed_dim,
+                           dropout=args.controller_dropout).to(device)
+    print(f"MLPPolicy dropout: {args.controller_dropout}")
     optimizer = torch.optim.AdamW(controller.parameters(),
                                   lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
