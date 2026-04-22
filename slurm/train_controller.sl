@@ -2,10 +2,11 @@
 #SBATCH -J "train_ctrl"
 #SBATCH -o slurm/logs/train_controller.out
 #SBATCH -e slurm/logs/train_controller.err
-# MIG 40GB slice for fast-queue diagnostic runs on the E6.10 cuBLAS crash.
+# H200 for fast-queue diagnostic runs on the E6.10 cuBLAS crash
+# (c23meso2 had free H200s while all A100s and the 40GB MIG pool were booked).
 # Revert to `-p ar_a100` + `--gres=gpu:a100:1` once PPO runs end to end.
-#SBATCH -p ar_mig
-#SBATCH --gres=gpu:a100_3g.40gb:1
+#SBATCH -p ar_h200
+#SBATCH --gres=gpu:h200:1
 #SBATCH -n 1
 #SBATCH --cpus-per-gpu 8
 #SBATCH --mem 64G
