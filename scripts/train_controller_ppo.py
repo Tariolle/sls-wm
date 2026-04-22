@@ -136,7 +136,12 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
 
         if step >= warmup_steps:
             alive_mask = alive.float()
-            all_h_t.append(h_t.float())
+            # Clone h_t: torch.compile(mode="reduce-overhead") returns tensors
+            # pointing into a CUDA-graph memory pool that is overwritten on the
+            # next replay. Storing the un-cloned reference corrupts rollout
+            # data and surfaces later as CUBLAS_STATUS_NOT_INITIALIZED on the
+            # next cuBLAS call.
+            all_h_t.append(h_t.float().clone())
             all_actions.append(action)
             all_old_log_probs.append(log_prob)
             reward = alive_mask.clone()
