@@ -450,15 +450,21 @@ def main():
     amp_dtype = getattr(torch, amp_dtype_str, torch.bfloat16)
     print(f"AMP dtype: {amp_dtype}")
 
-    # torch.compile disabled on the E6 joint-trained WM for PPO:
-    # every compile mode (reduce-overhead, max-autotune, default) ended
-    # with CUBLAS_STATUS_NOT_INITIALIZED at the controller's tiny fp32
-    # Sgemm on the first ppo_update. Classic sticky-CUDA-error pattern:
-    # a kernel compiled by Inductor fails async inside dream_rollout and
-    # surfaces later at the next synchronizing cuBLAS call. Eager-mode
-    # WM inference runs clean on V5 and E6 alike; the inference-only
-    # speedup (<2x on predict_next_frame) is not worth the crash.
-    print("torch.compile disabled (eager WM inference for PPO)")
+    # torch.compile re-enabled on H200. The A100 crashes
+    # (CUBLAS_STATUS_NOT_INITIALIZED) may not have been caused by compile
+    # at all -- PPO only calls model.predict_next_frame(), and
+    # torch.compile on a Module only wraps forward(); attribute access
+    # on OptimizedModule delegates to _orig_mod, so the rollout path
+    # was eager either way. Two things changed when PPO started working:
+    # compile off AND GPU A100 -> H200. This tests whether H200 was the
+    # real fix. Start with mode=default (no CUDA graphs); if stable,
+    # promote to reduce-overhead for the bigger speedup.
+    if sys.platform != "win32":
+        try:
+            model = torch.compile(model, mode="default")
+            print("torch.compile enabled (default)")
+        except Exception as e:
+            print(f"torch.compile not available: {e}")
 
     vae = None
     if args.fsq_checkpoint is not None:
