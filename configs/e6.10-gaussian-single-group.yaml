@@ -1,5 +1,12 @@
-# Joint FSQ + Transformer training, Gaussian SLS kernel at sigma=0.7
-# (k(1) ~ 0.37, matches Laplace sigma=1).
+# E6.10 -- Gaussian SLS, single-group optimizer.
+# LeWM-style joint training recipe:
+#   - one optimizer group (encoder + transformer), single LR, single WD
+#   - global grad clip sized to our recon-dominated gradients (10.0, not 1.0)
+#   - lr=1e-3 (between our historical 4e-3 and LeWM's batch-scaled 4e-4)
+#   - weight_decay=1e-3 globally (10x less than our former 1e-2 transformer WD)
+# Kernel stays Gaussian sigma=0.7 (best-behaved in the E6.7/E6.8/E6.9 sweep).
+# No freeze. 200 epochs (E6.9 val curves still descending at 100;
+# conservative bump to cover the long tail).
 
 model:
   vocab_size: 625
@@ -15,11 +22,11 @@ model:
 transformer:
   episodes_dir: data/death_episodes
   expert_episodes_dir: data/expert_episodes
-  epochs: 100
+  epochs: 200
   batch_size: 1024
-  lr: 0.004
-  lr_min: 0.0002
-  weight_decay: 0.01
+  lr: 0.001
+  lr_min: 0.00005
+  weight_decay: 0.001
   cpc_weight: 1.0
   token_noise: 0.0
   fsq_noise: 0.05
@@ -30,9 +37,10 @@ transformer:
   focal_gamma: 2.0
   death_oversample: 4
   seed: 42
-  checkpoint_dir: checkpoints_e6.9
+  checkpoint_dir: checkpoints_e6.10
   joint: true
-  fsq_lr: 0.001
+  single_group: true
+  grad_clip: 10.0
   alpha_uniform: 0.0
   shift_max: 4
   use_cpc: false
@@ -40,28 +48,28 @@ transformer:
   learnable_gamma: false
 
 posthoc_decoder:
-  transformer_checkpoint: checkpoints_e6.9/transformer_best.pt
-  fsq_checkpoint: checkpoints_e6.9/fsq_best.pt
+  transformer_checkpoint: checkpoints_e6.10/transformer_best.pt
+  fsq_checkpoint: checkpoints_e6.10/fsq_best.pt
   epochs: 30
   batch_size: 512
   lr: 0.001
   seed: 42
-  checkpoint_dir: checkpoints_e6.9
+  checkpoint_dir: checkpoints_e6.10
 
 controller_bc:
   expert_episodes_dir: data/expert_episodes
-  transformer_checkpoint: checkpoints_e6.9/transformer_best.pt
+  transformer_checkpoint: checkpoints_e6.10/transformer_best.pt
   epochs: 50
   batch_size: 512
   lr: 0.001
   weight_decay: 0.0001
   val_ratio: 0.1
   seed: 42
-  checkpoint_dir: checkpoints_e6.9
+  checkpoint_dir: checkpoints_e6.10
 
 controller_ppo:
-  transformer_checkpoint: checkpoints_e6.9/transformer_best.pt
-  pretrained: checkpoints_e6.9/controller_bc_best.pt
+  transformer_checkpoint: checkpoints_e6.10/transformer_best.pt
+  pretrained: checkpoints_e6.10/controller_bc_best.pt
   amp_dtype: bfloat16
   n_iterations: 50000
   n_episodes: 512
@@ -80,4 +88,4 @@ controller_ppo:
   n_eval_episodes: 512
   eval_interval: 10
   seed: 42
-  checkpoint_dir: checkpoints_e6.9
+  checkpoint_dir: checkpoints_e6.10

@@ -49,11 +49,23 @@ def _unwrap(model):
     return model._orig_mod if hasattr(model, "_orig_mod") else model
 
 
-def build_optimizer(transformer, args, fsq_encoder=None, fsq_lr=None):
-    """AdamW with one param group (transformer only) or two (joint: encoder
-    + transformer). Both groups share the same LambdaLR factor; peak LRs
-    differ via their base_lr. Encoder group uses weight_decay=0.
+def build_optimizer(transformer, args, fsq_encoder=None, fsq_lr=None,
+                    single_group=False):
+    """AdamW optimizer. Three shapes:
+      - transformer-only (fsq_encoder=None): one group.
+      - joint + single_group=True: one group over all params, uses args.lr /
+        args.weight_decay. LeWM-style recipe.
+      - joint + single_group=False (default): two groups (transformer at
+        args.lr/wd, fsq_encoder at fsq_lr/wd=0) sharing the LambdaLR factor.
     """
+    if fsq_encoder is not None and single_group:
+        return torch.optim.AdamW([{
+            "params": list(transformer.parameters())
+                      + list(fsq_encoder.parameters()),
+            "lr": args.lr,
+            "weight_decay": args.weight_decay,
+            "name": "all",
+        }])
     groups = [{
         "params": list(transformer.parameters()),
         "lr": args.lr,
@@ -795,7 +807,8 @@ def _codebook_stats(code_counts):
 
 
 def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
-                      amp_dtype=torch.bfloat16):
+                      amp_dtype=torch.bfloat16, grad_clip=1.0,
+                      single_group=False):
     """Run one training epoch by calling the compiled JointStep per batch.
 
     The joint_step module (typically torch.compile-wrapped) captures
@@ -853,14 +866,24 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        # Per-group grad clip: each network gets its own norm=1.0 budget
-        # independently. A global clip would let the encoder's large
-        # recon-driven gradient saturate the whole budget and attenuate
-        # the transformer's (already smaller) gradient by the encoder-to-
-        # transformer ratio, severely slowing transformer learning.
-        # Per-group matches the per-group LR design philosophy.
-        wm_norm = torch.nn.utils.clip_grad_norm_(list(js.wm.parameters()), 1.0)
-        fsq_norm = torch.nn.utils.clip_grad_norm_(list(js.fsq.parameters()), 1.0)
+        if single_group:
+            # Global clip across all params. Caller sized grad_clip to
+            # match observed encoder-grad scale under recon dominance
+            # (transformer grads are far smaller and pass through freely).
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                list(js.wm.parameters()) + list(js.fsq.parameters()),
+                grad_clip)
+            wm_norm = fsq_norm = total_norm
+        else:
+            # Per-group clip: each network gets its own grad_clip budget
+            # independently. A global clip would let the encoder's large
+            # recon-driven gradient saturate the whole budget and attenuate
+            # the transformer's (already smaller) gradient by the encoder-
+            # to-transformer ratio, severely slowing transformer learning.
+            wm_norm = torch.nn.utils.clip_grad_norm_(
+                list(js.wm.parameters()), grad_clip)
+            fsq_norm = torch.nn.utils.clip_grad_norm_(
+                list(js.fsq.parameters()), grad_clip)
         if is_cuda:
             be.record()
             bwd_events.append((bs, be))
@@ -1114,11 +1137,14 @@ def main():
                         default=None,
                         help="Gamma as nn.Parameter (target distribution rebuilt "
                              "per forward) rather than fixed dim_weights.")
-    parser.add_argument("--fsq-freeze-epoch", type=int, default=None,
-                        help="Epoch at which to freeze FSQ encoder+decoder. "
-                             "After freeze: requires_grad=False on FSQ params, "
-                             "recon loss dropped, decoder forward/backward skipped. "
-                             "0 or unset = never freeze (fully joint).")
+    parser.add_argument("--single-group", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Merge encoder + transformer into a single AdamW "
+                             "param group with shared LR and weight_decay "
+                             "(LeWM-style). Default: two groups.")
+    parser.add_argument("--grad-clip", type=float, default=None,
+                        help="Gradient clip max_norm. Global (single-group) or "
+                             "per-group (two-group). Default 1.0.")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
@@ -1314,11 +1340,17 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
                             shuffle=True, num_workers=0, pin_memory=True)
 
+    single_group = bool(getattr(args, "single_group", None) or False)
+    grad_clip = float(getattr(args, "grad_clip", None) or 1.0)
     if joint:
         fsq_lr_val = args.fsq_lr if args.fsq_lr is not None else 1e-3
-        optimizer = build_optimizer(model, args, fsq_encoder=fsq, fsq_lr=fsq_lr_val)
+        optimizer = build_optimizer(
+            model, args, fsq_encoder=fsq, fsq_lr=fsq_lr_val,
+            single_group=single_group)
     else:
         optimizer = build_optimizer(model, args)
+    print(f"Optimizer groups: {len(optimizer.param_groups)} "
+          f"(single_group={single_group}, grad_clip={grad_clip})")
 
     # Resolve AMP dtype and compile mode with A100 defaults; local configs
     # (RTX 2060 SUPER / Turing) override via --amp-dtype float16 and
@@ -1496,19 +1528,6 @@ def main():
             soft_target_matrix=soft_tm_for_joint,
             **joint_kwargs_common,
         ).to(device)
-        # FSQ freeze is implemented solely via LR=0 on the fsq_encoder
-        # optimizer group (see _freeze_fsq below). The pre-freeze JointStep
-        # runs for all epochs; after freeze, fsq params accumulate grads
-        # but none are applied. An earlier attempt used a use_recon=False
-        # variant to skip decoder fwd+bwd during the frozen phase, but it
-        # reproducibly produced loss.grad_fn=None under torch.compile +
-        # AOT autograd at the resume+freeze boundary, across multiple
-        # configurations (detach/no-detach, reduce-overhead/default,
-        # fullgraph=True/False, eager). Root cause unconfirmed. The
-        # decoder-skip optimization was incremental; give it up for
-        # reliability.
-        freeze_epoch = int(getattr(args, "fsq_freeze_epoch", 0) or 0)
-        will_freeze = 0 < freeze_epoch < args.epochs
 
         if compile_mode == "none":
             print("JointStep compile disabled (--compile-mode none)")
@@ -1608,44 +1627,16 @@ def main():
 
     log_writer = csv.writer(log_file)
 
-    # FSQ freeze state. If `fsq_freeze_epoch` is set and we resume past that
-    # point, apply the freeze immediately; otherwise the per-epoch check at
-    # the top of the loop handles the live transition.
-    fsq_frozen = False
-    def _freeze_fsq():
-        nonlocal fsq_frozen
-        if fsq_frozen:
-            return
-        # Zero the fsq_encoder optimizer group LR rather than flipping
-        # requires_grad=False on fsq params. Under fullgraph=True the
-        # compiled JointStep was traced with fsq params requiring grad;
-        # severing that at runtime breaks the graph's grad path. LR=0
-        # alone is sufficient: the use_recon=False JointStep variant
-        # already drops the recon loss, so the only residual gradient
-        # into fsq is the STE path, which LR=0 renders a no-op.
-        for group in optimizer.param_groups:
-            if group.get("name") == "fsq_encoder":
-                group["lr"] = 0.0
-        fsq_frozen = True
-        print(f"=== FSQ frozen (epoch {epoch}): recon loss dropped, "
-              f"fsq_encoder LR -> 0 ===")
-
-    if joint and will_freeze and start_epoch > freeze_epoch:
-        epoch = start_epoch - 1  # for the print in _freeze_fsq
-        _freeze_fsq()
-
     if compile_mode != "none":
         print("First epoch will be slower due to torch.compile tracing...")
     try:
         for epoch in range(start_epoch, args.epochs + 1):
-            # Trigger freeze at the start of the first epoch past the cutoff.
-            if joint and will_freeze and epoch > freeze_epoch and not fsq_frozen:
-                _freeze_fsq()
             t0 = time.time()
             if joint:
                 train_metrics = train_epoch_joint(
                     joint_step_train, train_loader, optimizer, scaler, device,
-                    amp_dtype=amp_dtype)
+                    amp_dtype=amp_dtype, grad_clip=grad_clip,
+                    single_group=single_group)
                 val_metrics = val_epoch_joint(
                     joint_step_val, val_loader, device, amp_dtype=amp_dtype)
                 train_loss = train_metrics["loss"]
