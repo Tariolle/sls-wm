@@ -63,7 +63,7 @@ controller_bc:
   batch_size: 512
   lr: 0.0005
   weight_decay: 0.0001
-  controller_dropout: 0.1
+  controller_dropout: 0.0
   val_ratio: 0.1
   mlp_layers: 2
   seed: 42
@@ -90,7 +90,7 @@ controller_ppo:
   death_threshold: 0.5
   mlp_hidden: 512
   mlp_layers: 2
-  controller_dropout: 0.1
+  controller_dropout: 0.0
   n_eval_episodes: 512
   eval_interval: 10
   seed: 42
