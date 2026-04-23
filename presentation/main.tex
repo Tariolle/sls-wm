@@ -33,11 +33,11 @@
 \newcommand{\vocabsize}{627}         % full vocab (\fsqcodes + ALIVE + DEATH)
 \newcommand{\contextK}{4}            % context frames K
 \newcommand{\seqlen}{329}            % input sequence length (\contextK*65 + \contextK + 65)
-\newcommand{\nshifts}{5}             % number of vertical augmentation shifts
-\newcommand{\nbaseepisodes}{4{,}264} % base episode count
-\newcommand{\naugeps}{21{,}320}      % augmented episodes (\nshifts * \nbaseepisodes)
-\newcommand{\ndeatheps}{4{,}200}     % death episodes (approx)
-\newcommand{\nexperteps}{36}         % expert episodes
+\newcommand{\nshifts}{9}             % number of vertical augmentation shifts
+\newcommand{\nbaseepisodes}{4{,}250} % base episode count
+\newcommand{\naugeps}{38{,}250}      % augmented episodes (\nshifts * \nbaseepisodes)
+\newcommand{\ndeatheps}{4{,}250}     % death episodes (approx)
+\newcommand{\nexperteps}{35}         % expert episodes
 
 \title{DeepDash}
 \subtitle{World Models for Geometry Dash}
@@ -69,7 +69,7 @@
     \item Model-free RL $\to$ \textbf{millions of interactions}
     \item World Models: learned environment, training \textbf{in imagination}
     \item \textbf{Geometry Dash}: deterministic, binary action, precision timing
-    \item \textbf{Real-time}: 30 FPS $\to$ no MCTS, reaction $<$33ms
+    \item \textbf{Real-time}: 30 FPS $\to$ reaction in $<$33ms
     \item \textbf{Goal}: master unseen levels, trained \emph{entirely} in imagination
   \end{itemize}
   \vfill
@@ -79,7 +79,7 @@
 \section{Architecture Overview}
 % ==========================================================
 
-\begin{frame}{V $\to$ M $\to$ C: High-Level Pipeline}
+\begin{frame}{Inference Pipeline}
   \vspace{1em}
   \begin{center}
   \resizebox{\textwidth}{!}{%
@@ -114,6 +114,41 @@
       $\mathbf{h}_t \in \mathbb{R}^{\hdim}$: hidden state &
       $a_t \in \{0, 1\}$: jump/idle
     \end{tabular}
+  \end{center}
+\end{frame}
+
+\begin{frame}{Training: Two Phases}
+  \vspace{1em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    phase/.style={rectangle, draw, rounded corners, minimum height=2.2cm, minimum width=4.5cm, align=center, font=\small, line width=1.2pt},
+    sub/.style={font=\scriptsize, text=gray!70, align=center},
+    arr/.style={-{Stealth[length=4mm]}, thick},
+    lbl/.style={font=\scriptsize, align=center},
+  ]
+    \node[phase, fill=vcolor!10, draw=vcolor!60] (wm) {
+      \textbf{Phase 1 -- World Model}\\[0.4em]
+      \scriptsize FSQ-VAE + Transformer\\
+      \scriptsize jointly trained end-to-end
+    };
+    \node[phase, fill=ccolor!10, draw=ccolor!60, right=2.5cm of wm] (ctrl) {
+      \textbf{Phase 2 -- Controller}\\[0.4em]
+      \scriptsize BC pretraining\\
+      \scriptsize $\downarrow$\\
+      \scriptsize PPO in dreams (WM frozen)
+    };
+
+    \draw[arr] (wm) -- node[above, lbl] {frozen WM} node[below, lbl] {$\mathbf{h}_t$ representations} (ctrl);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.5em}
+  \begin{center}
+    \small
+    V and M are inseparable: prediction gradients flow back into the encoder.\\
+    C is trained entirely in imagination on frozen WM rollouts.
   \end{center}
 \end{frame}
 
@@ -234,13 +269,13 @@
   \begin{itemize}
     \item Live gameplay at \textbf{30 FPS}, death detection via process memory reading
     \item Frames + actions recorded simultaneously, saved as \texttt{.npy} per episode
-    \item \textbf{Death episodes}: $\sim$\ndeatheps{} episodes, $\sim$219K frames (intentional deaths)
-    \item \textbf{Expert episodes}: $\sim$\nexperteps{} clean runs, $\sim$33K frames (for BC + rebalancing)
+    \item \textbf{Death episodes}: $\sim$\ndeatheps{} episodes, $\sim$220K frames (intentional deaths)
+    \item \textbf{Expert episodes}: \nexperteps{} clean runs, $\sim$30K frames (for BC + rebalancing)
   \end{itemize}
 \end{frame}
 
 \begin{frame}{Data Augmentation: Spatial Shifts}
-  \textbf{Problem}: $\sim$252K frames is limited data $\Rightarrow$ overfitting risk
+  \textbf{Problem}: $\sim$250K frames is limited data $\Rightarrow$ overfitting risk
 
   \vspace{0.3em}
   \textbf{Solution}: apply vertical pixel shifts at the dataset level, used across all training phases
@@ -270,14 +305,14 @@
 \end{frame}
 
 % ==========================================================
-\section{Phase 1: V (FSQ-VAE)}
+\section{Phase 1: World Model}
 % ==========================================================
 
 \begin{frame}{Vision Model: $\beta$-VAE $\to$ VQ-VAE $\to$ FSQ-VAE}
   \begin{itemize}
     \item \textbf{$\beta$-VAE}: Gaussian posterior $\Rightarrow$ always blurry. No spatial structure.
     \item \textbf{VQ-VAE}: discrete, spatially localized tokens $\Rightarrow$ sharp. But codebook collapse, commitment cost tuning.
-    \item \textbf{FSQ-VAE} (Mentzer et al., 2023): round to $L$ fixed levels. No codebook, no auxiliary losses, 100\% utilization by construction.
+    \item \textbf{FSQ-VAE} (Mentzer et al., 2023): round to $L$ fixed levels. No codebook collapse, no auxiliary losses, 100\% utilization by construction.
   \end{itemize}
 
   \vspace{0.3em}
@@ -410,7 +445,7 @@
 \begin{frame}{FSQ-VAE: Training}
   \begin{itemize}
     \item $\sim$252K frames ($\sim$\naugeps{} episodes), batch 1024
-    \item \textbf{Jointly} optimized with the transformer: no frozen pre-stage, encoder kept active for the full schedule
+    \item \textbf{Jointly} optimized with the transformer: no frozen pre-stage
     \item Pixel MSE kept as an \textbf{anchor} on codebook semantics
     \item Prediction gradients route back into the encoder via a straight-through estimator (STE) through a learnable linear projection \texttt{fsq\_grad\_proj}
     \item \textbf{Single-group optimizer} (encoder + transformer share one AdamW group, LR $10^{-3}$, weight decay $10^{-3}$) + \textbf{single global grad clip at 10.0} (sized to the recon-dominated encoder gradient scale)
@@ -462,9 +497,9 @@
   \end{center}
 \end{frame}
 
-% ==========================================================
-\section{Phase 2: M (Transformer)}
-% ==========================================================
+% ----------------------------------------------------------
+% (continued: Phase 1 -- World Model)
+% ----------------------------------------------------------
 
 \begin{frame}{Training: FSQ-Neighbor Token Noise}
   \vspace{0.5em}
@@ -501,12 +536,12 @@
   \]
 
   \vspace{0.2em}
-  \textbf{Design choice}: narrow Gaussian ($\sigma = 0.7$). Gaussian's squared-exponential tails decay faster than Laplace or Cauchy, so distant neighbours receive negligible mass ($k(2) \approx 0.02$); $\sigma = 0.7$ still places meaningful mass on the immediate neighbour ($k(1) \approx 0.37$). The goal is to reward near-misses without tempting the predictor to commit less strongly to the correct code.
+  \textbf{Design choice}: narrow Gaussian ($\sigma = 0.7$). Gaussian's squared-exponential tails decay faster than Laplace or Cauchy, so distant neighbours receive negligible mass. The goal is to reward near-misses without tempting the predictor to commit less strongly to the correct code.
 
 \end{frame}
 
 % ==========================================================
-\section{Phase 3: C (Controller)}
+\section{Phase 2: Controller}
 % ==========================================================
 
 \begin{frame}{Controller: Architecture}
@@ -554,8 +589,8 @@
   \vspace{0.5em}
   \textbf{Stage 2: PPO in Dream} (generalization)
   \begin{itemize}
-    \item Reward: $+1$ per step survived $-0.2$ per jump, rollout stops at death prediction
-    \item 512 episodes/iteration, 45-step rollouts, 4 PPO epochs, GAE ($\gamma$=0.995, $\lambda$=0.95)
+    \item Reward: $+1$ per step survived $-0.5$ per jump, rollout stops at death prediction
+    \item 2048 episodes/iteration, 25-step rollouts, 4 PPO epochs, GAE ($\gamma$=0.995, $\lambda$=0.95)
     \item Clipped surrogate + percentile advantage norm + EMA target critic
   \end{itemize}
 
@@ -572,7 +607,7 @@
   \begin{itemize}
     \item \textbf{FSQ-VAE}: sharp, 100\% utilization, no tuning
     \item \textbf{Sobel}: filters visual noise $\to$ structural perception
-    \item \textbf{Vertical shifts}: reduced overfitting, physically valid
+    \item \textbf{Vertical shifts}: massively reduced overfitting, physically valid
     \item \textbf{Parallel decoding}: 1 pass vs 65 $\to$ real-time
     \item \textbf{Structured label smoothing}: narrow Gaussian on FSQ lattice distance
     \item \textbf{AdaLN-Zero}: action conditioning from DiT
@@ -585,7 +620,6 @@
   \begin{itemize}
     \item \textbf{$\beta$-VAE}: blurry, large grid search $\to$ abandoned
     \item \textbf{Pure RL (CMA-ES)}: $\sim$12 steps (local optimum) $\to$ BC required
-    \item \textbf{Death oversample 15$\times$}: memorization (44pp precision gap). Fix: 4$\times$ + expert
     \item \textbf{MaskGIT}: degraded on 64 tokens, parallel single-step better
     \item \textbf{CNN controller on $\mathbf{z}_t$}: duplicated work the transformer already did
     \item \textbf{Pure-JEPA} (no pixel anchor): codebook collapse; our marginal anti-collapse regularizer (CvM adapted from LeWorldModel's SIGReg) was insufficient for joint-distribution degeneracy
@@ -599,7 +633,7 @@
 \begin{frame}{Limitations \& Future Work}
   \begin{itemize}
     \item \textbf{Scope}: only one game (and standard levels). Generalization to other games/levels unknown
-    \item \textbf{Sample efficiency}: $\sim$252K frames is small for deep learning, but still requires hours of gameplay to collect
+    \item \textbf{Sample efficiency}: $\sim$250K frames (only 2h20 of gameplay) is extremely small for deep learning
   \end{itemize}
 \end{frame}
 
