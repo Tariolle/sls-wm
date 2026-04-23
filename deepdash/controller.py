@@ -235,7 +235,7 @@ class MLPPolicy(nn.Module):
         Critic: Linear(512, 1)  (zero-init)
     """
 
-    def __init__(self, h_dim=384, mlp_hidden=512, dropout=0.0):
+    def __init__(self, h_dim=384, mlp_hidden=512, dropout=0.0, mlp_layers=1):
         super().__init__()
         layers = [
             nn.Linear(h_dim, mlp_hidden),
@@ -244,6 +244,10 @@ class MLPPolicy(nn.Module):
         ]
         if dropout > 0:
             layers.append(nn.Dropout(dropout))
+        for _ in range(mlp_layers - 1):
+            layers += [nn.Linear(mlp_hidden, mlp_hidden), nn.LayerNorm(mlp_hidden), nn.SiLU()]
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
         self.trunk = nn.Sequential(*layers)
 
         # Actor-critic heads (zero-init like IRIS/DIAMOND)

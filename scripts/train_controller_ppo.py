@@ -492,6 +492,7 @@ def main():
     controller = MLPPolicy(
         h_dim=args.embed_dim,
         mlp_hidden=getattr(args, 'mlp_hidden', 512),
+        mlp_layers=getattr(args, 'mlp_layers', 1),
     ).to(device)
     if args.pretrained:
         state = torch.load(args.pretrained, map_location=device,

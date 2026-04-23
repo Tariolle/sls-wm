@@ -88,6 +88,7 @@ controller_ppo:
   max_dream_steps: 25
   death_threshold: 0.5
   mlp_hidden: 512
+  mlp_layers: 2
   n_eval_episodes: 512
   eval_interval: 10
   seed: 42

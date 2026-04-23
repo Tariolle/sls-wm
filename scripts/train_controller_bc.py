@@ -253,7 +253,8 @@ def main():
 
     # Initialize controller
     controller = MLPPolicy(h_dim=args.embed_dim,
-                           dropout=args.controller_dropout).to(device)
+                           dropout=args.controller_dropout,
+                           mlp_layers=getattr(args, 'mlp_layers', 1)).to(device)
     print(f"MLPPolicy dropout: {args.controller_dropout}")
     optimizer = torch.optim.AdamW(controller.parameters(),
                                   lr=args.lr, weight_decay=args.weight_decay)
