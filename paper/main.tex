@@ -2,6 +2,7 @@
 
 \usepackage[preprint]{neurips_2026}
 
+\usepackage[numbers]{natbib}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage{hyperref}
@@ -40,7 +41,7 @@
 \maketitle
 
 \begin{abstract}
-Discrete world models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer.
+Discrete World Models (WMs) tokenize observations with a learned quantizer and predict next-frame tokens with a transformer.
 Standard cross-entropy training treats every incorrect prediction as equally wrong, discarding a signal that Finite Scalar Quantization (FSQ) makes available by construction: each code sits at a point on an integer coordinate lattice, so some wrong predictions are near-misses (one quantization step away in one dimension, a near-identical reconstruction) while others are gross errors (opposite corner of the codebook, unrelated content).
 We introduce \emph{FSQ-Structured Label Smoothing} (SLS), a training objective that replaces uniform label smoothing with a kernel over the integer-lattice coordinates of the FSQ codebook, so a near-miss prediction is treated as a near-miss rather than a gross error.
 We train the FSQ encoder jointly with the dynamics transformer: prediction gradients flow back into the encoder through a learnable linear projection and a straight-through estimator, so the codebook is shaped by both reconstruction and prediction.
@@ -54,7 +55,7 @@ Code is available at \url{https://github.com/Tariolle/sls-wm}.
 \label{sec:intro}
 % ===========================================================================
 
-Learning world models that predict future observations from actions is central to model-based reinforcement learning~\citep{ha2018world}.
+Learning WMs that predict future observations from actions is central to model-based reinforcement learning~\citep{ha2018world}.
 Recent approaches tokenize visual frames into discrete codes and train autoregressive transformers to predict token sequences~\citep{micheli2023iris, hafner2025dreamerv3}.
 Finite Scalar Quantization~\citep[FSQ;][]{mentzer2024fsq} offers a simple alternative to VQ-VAE codebooks: each latent vector is independently rounded to one of $L$ levels per dimension, yielding $\prod_d L_d$ implicit codes with no codebook collapse and no auxiliary losses.
 
@@ -63,7 +64,7 @@ Each code maps to a point on a $D$-dimensional integer lattice, and the distance
 Yet standard cross-entropy training treats all incorrect predictions as equally wrong, discarding this metric information entirely.
 
 Label smoothing~\citep{szegedy2016rethinking} is a well-known regularizer that replaces hard targets with a mixture of the ground truth and a uniform distribution over classes.
-We observe that for FSQ-tokenized world models, the uniform assumption is suboptimal: a token one lattice step away from the target is a near-miss, while a token at the opposite corner of the codebook is a gross error.
+We observe that for FSQ-tokenized WMs, the uniform assumption is suboptimal: a token one lattice step away from the target is a near-miss, while a token at the opposite corner of the codebook is a gross error.
 We propose \emph{Structured Label Smoothing} (SLS), which replaces the uniform component with a kernel over FSQ coordinate distances.
 
 This can be viewed as part of a broader shift from data-agnostic heuristics to structure derived from learned representations, analogous to how learned strided convolutions replaced fixed max-pooling for spatial downsampling~\citep{springenberg2015striving}.
@@ -78,7 +79,7 @@ The full pipeline runs in real time at 30\,FPS on consumer hardware.
 Our contributions are:
 \begin{enumerate}
   \item \textbf{FSQ-Structured Label Smoothing (SLS)}: a training objective that exploits FSQ coordinate geometry to distribute smoothing mass according to codebook distance. We study three kernel families and adopt an isotropic bandwidth set by a first-neighbour rule, giving a zero-calibration hyperparameter that is robust to codebook drift under joint training. The formulation generalizes to any discrete latent space with a coordinate metric.
-  \item \textbf{A real-time world model system}: a complete V-M-C pipeline for Geometry Dash running at 30\,FPS, combining joint-trained FSQ tokenization with prediction-gradient feedback, AdaLN-conditioned transformers, and PPO-in-dreams.
+  \item \textbf{A real-time WM system}: a complete V-M-C pipeline for Geometry Dash running at 30\,FPS, combining joint-trained FSQ tokenization with prediction-gradient feedback, AdaLN-conditioned transformers, and PPO-in-dreams.
 \end{enumerate}
 
 % ===========================================================================
@@ -86,10 +87,10 @@ Our contributions are:
 \label{sec:related}
 % ===========================================================================
 
-\paragraph{Discrete world models.}
-\citet{ha2018world} introduced the Vision-Model-Controller paradigm, encoding frames with a VAE, modeling dynamics with an RNN, and training a controller in dreamed rollouts.
+\paragraph{Discrete WMs.}
+The Vision-Model-Controller paradigm~\citep{ha2018world} introduced encoding frames with a VAE, modeling dynamics with an RNN, and training a controller in dreamed rollouts.
 IRIS~\citep{micheli2023iris} replaced the VAE with a discrete tokenizer and an autoregressive transformer, using an alternating schedule between tokenizer and dynamics updates.
-DreamerV3~\citep{hafner2025dreamerv3} demonstrated that categorical RSSM latents generalize across diverse domains, and \citet{hafner2025dreamer4} scaled this approach further.
+DreamerV3~\citep{hafner2025dreamerv3} demonstrated that categorical RSSM latents generalize across diverse domains; this approach was scaled further in~\citep{hafner2025dreamer4}.
 TWISTER~\citep{burchi2025twister} added action-conditioned contrastive predictive coding to improve temporal coherence.
 Dreamer-family models do train their encoders jointly with the dynamics model, but use categorical-VAE latents rather than FSQ.
 FSQ~\citep{mentzer2024fsq} is typically positioned as a frozen tokenizer for downstream tasks, and its coordinate-lattice structure has not been exploited at training time.
@@ -98,15 +99,15 @@ Our work applies joint training specifically to FSQ so that prediction gradients
 \paragraph{Finite Scalar Quantization.}
 FSQ~\citep{mentzer2024fsq} replaces learned codebooks with per-dimension rounding to fixed levels, eliminating codebook collapse and commitment losses.
 Each code is a point on a $D$-dimensional integer lattice, giving the codebook a natural coordinate structure.
-\citet{vali2026ifsq} introduce a simple modification of the FSQ bounding function (iFSQ) that improves bin utilization; we adopt it in our encoder.
+iFSQ~\citep{vali2026ifsq} introduces a simple modification of the FSQ bounding function that improves bin utilization; we adopt it in our encoder.
 
-\paragraph{Joint-embedding predictive architectures.}
-LeWorldModel~\citep{maes2026leworldmodel} recently demonstrated a stable end-to-end JEPA world model from pixels using continuous latents and a SIGReg anti-collapse regularizer.
+\paragraph{Joint-Embedding Predictive Architectures (JEPA).}
+LeWorldModel~\citep{maes2026leworldmodel} recently demonstrated a stable end-to-end JEPA WM from pixels using continuous latents and a SIGReg anti-collapse regularizer.
 SLS-WM sits at the intersection of JEPA-style joint training and discrete tokenization: the FSQ lattice is what makes SLS possible, but a pure-JEPA variant (no pixel decoder) is unstable in our setting.
-We attempted to adapt SIGReg to the discrete factorized FSQ case via a Cramér-von-Mises test against a factorized uniform target (a marginal anti-collapse signal in the spirit of \citet{wang2020uniformity}); in our experiments this was insufficient to prevent joint-distribution degeneracy when the prediction target comes from the online encoder, and we retain a light pixel-reconstruction loss as a semantics anchor.
+We attempted to adapt SIGReg to the discrete factorized FSQ case via a Cramér-von-Mises test against a factorized uniform target (a marginal anti-collapse signal in the spirit of~\citep{wang2020uniformity}); in our experiments this was insufficient to prevent joint-distribution degeneracy when the prediction target comes from the online encoder, and we retain a light pixel-reconstruction loss as a semantics anchor.
 
 \paragraph{Label smoothing.}
-\citet{szegedy2016rethinking} proposed replacing one-hot targets with a uniform mixture to reduce overconfidence.
+Label smoothing~\citep{szegedy2016rethinking} proposed replacing one-hot targets with a uniform mixture to reduce overconfidence.
 While effective as a regularizer, uniform smoothing ignores class relationships.
 Knowledge distillation and soft-target methods distribute mass based on teacher predictions, but require a separate teacher model.
 We instead derive the target distribution from the codebook geometry itself, requiring no additional model.
@@ -114,7 +115,7 @@ We instead derive the target distribution from the codebook geometry itself, req
 \paragraph{Adaptive conditioning.}
 FiLM~\citep{perez2018film} introduced adaptive affine conditioning via scale and shift.
 DiT~\citep{peebles2023dit} applied this as AdaLN-Zero with zero-initialized gates for stable training of diffusion transformers.
-\citet{esser2024sd3} added QK-norm (RMSNorm on queries and keys per head) to stabilize attention logits in deep AdaLN models.
+QK-norm~\citep{esser2024sd3} (RMSNorm on queries and keys per head) was introduced to stabilize attention logits in deep AdaLN models.
 LeWorldModel~\citep{maes2026leworldmodel} applied AdaLN to world-model transformers.
 We adopt AdaLN-Zero with QK-norm for action conditioning, finding that QK-norm is essential for training stability (Section~\ref{sec:adaln}).
 
@@ -165,7 +166,7 @@ Finding an anti-collapse regularizer strong enough to remove the pixel anchor is
 
 \paragraph{Single-group optimization and global gradient clipping.}
 Under joint training the pixel-MSE and cross-entropy gradients live on different scales, but we do not separate them into different parameter groups.
-Following the joint-training recipe of~\citet{maes2026leworldmodel}, the encoder and transformer sit in a single AdamW group with a shared learning rate and weight decay, and a single global gradient-norm clip is applied across the combined parameter set.
+Following the joint-training recipe of~\citep{maes2026leworldmodel}, the encoder and transformer sit in a single AdamW group with a shared learning rate and weight decay, and a single global gradient-norm clip is applied across the combined parameter set.
 The clip threshold is set large enough (empirically $\sim 10\times$ the transformer gradient norm at convergence) that the reconstruction signal is preserved while residual spikes on either side are still caught.
 Separating the two into per-group clips with a tight threshold, as in our earlier iterations, consistently produced a positive train-validation gap on the same budget; single-group with a wide clip yielded smoother training curves and closes that gap.
 
@@ -244,11 +245,11 @@ To handle class imbalance (background tokens dominate over obstacle and spike to
 where $p_j = \text{softmax}(\mathbf{z})_j$ and $\gamma = \focalgamma$.
 
 % ---------------------------------------------------------------------------
-\subsection{Transformer world model (Model)}
+\subsection{Transformer WM (Model)}
 \label{sec:transformer}
 % ---------------------------------------------------------------------------
 
-The world model is a causal transformer ($\hdim$ embedding dim, $\nheads$ heads, $\nlayers$ layers) that predicts the next frame's tokens given a context of $K = \nctx$ past frames and their associated actions.
+The WM is a causal transformer ($\hdim$ embedding dim, $\nheads$ heads, $\nlayers$ layers) that predicts the next frame's tokens given a context of $K = \nctx$ past frames and their associated actions.
 
 \paragraph{Sequence construction.}
 Each frame contributes $\ntokens$ visual tokens (from the $\gridsize$ FSQ grid) plus one status token (ALIVE or DEATH), for 65 tokens per frame.
@@ -305,12 +306,12 @@ A single-hidden-layer MLP ($\hdim$ hidden units with LayerNorm and SiLU) is foll
 Input is the transformer's hidden state $\mathbf{h}_t \in \mathbb{R}^{\hdim}$; output is a jump probability and a state value.
 The full controller has $\ctrlparams$ parameters.
 
-This design follows the TWISTER~\citep{burchi2025twister} and DreamerV3~\citep{hafner2025dreamerv3} pattern where the controller operates on the latent state produced by a trained world model.
+This design follows the TWISTER~\citep{burchi2025twister} and DreamerV3~\citep{hafner2025dreamerv3} pattern where the controller operates on the latent state produced by a trained WM.
 Our $\mathbf{h}_t$ already encodes spatial and temporal structure through $\nlayers$ transformer layers with 3D-RoPE and AdaLN action conditioning, so an additional encoder on the token grid would duplicate work done upstream.
 
 \paragraph{Training in dreams.}
-The controller is first pretrained via behavioural cloning on expert demonstrations, then fine-tuned with PPO~\citep{schulman2017ppo} in dreamed rollouts.
-At each iteration, 512 rollouts of up to 45 steps are generated by autoregressively sampling from the frozen world model.
+The controller is first pretrained via Behavioural Cloning (BC) on expert demonstrations, then fine-tuned with PPO~\citep{schulman2017ppo} in dreamed rollouts.
+At each iteration, 512 rollouts of up to 45 steps are generated by autoregressively sampling from the frozen WM.
 Rollouts terminate when the predicted death probability exceeds 0.5.
 Rewards are $+1$ per survival step with a $-0.2$ penalty per jump to discourage gratuitous jumping (an idle agent dies immediately upon reaching an obstacle, while a jumping agent survives longer by spending time airborne, creating a deceptive local optimum).
 We use GAE~\citep{schulman2017ppo} with $\gamma = 0.995$, $\lambda = 0.95$, and clip ratio $\varepsilon_\text{PPO} = 0.2$.
@@ -335,7 +336,7 @@ Frames are preprocessed with Sobel edge detection and resized to $\imgsize$.
 
 \paragraph{Training details.}
 The FSQ-VAE and transformer are trained jointly with AdamW using cosine annealing and warmup.
-Both subnetworks sit in a single optimizer group sharing one learning rate ($10^{-3}$) and one weight decay ($10^{-3}$), following the recipe of~\citet{maes2026leworldmodel}; earlier two-group configurations (separate encoder and transformer learning rates, larger weight decay on the transformer) produced noisier training curves and a positive train-validation gap on the same budget.
+Both subnetworks sit in a single optimizer group sharing one learning rate ($10^{-3}$) and one weight decay ($10^{-3}$), following the recipe of~\citep{maes2026leworldmodel}; earlier two-group configurations (separate encoder and transformer learning rates, larger weight decay on the transformer) produced noisier training curves and a positive train-validation gap on the same budget.
 We apply 5\% FSQ-neighbor token noise on context tokens.
 Death frames are oversampled $4\times$ via weighted sampling.
 BF16 mixed-precision training is used throughout; BF16 requires no loss scaling and is numerically more stable than FP16.
@@ -351,7 +352,7 @@ Turing lacks native BF16 (software-emulated and much slower than FP32 on this ca
 Under these constraints the best local configuration is \texttt{torch.compile} in \texttt{default} mode with FP16 and a \texttt{GradScaler}.
 
 \paragraph{BC pretraining ablation.}
-To verify that behavioural cloning pretraining is a convergence accelerator rather than a stability requirement, we train one PPO run from random initialization.
+To verify that BC pretraining is a convergence accelerator rather than a stability requirement, we train one PPO run from random initialization.
 Cold-start PPO converges to the same plateau as BC-initialized PPO on all metrics (eval survival, entropy, jump ratio) but requires roughly 2{,}000 additional iterations (${\approx}6$ hours on A100); BC itself takes $\sim$5 minutes, giving a large compute ROI.
 BC is retained in the pipeline on this basis.
 
@@ -392,7 +393,7 @@ The specific numerical traces below are retrospective observations from that V4-
   \item \textbf{QK-norm $+$ gate bias $= 1$}: stable for full-length training, surpassing all previous configurations. Per-head RMSNorm on queries and keys eliminated the attention logit overflow that was the root cause.
 \end{enumerate}
 
-This progression demonstrates that in AdaLN-conditioned world model transformers, attention stability (via QK-norm) is more critical than modulation bounding.
+This progression demonstrates that in AdaLN-conditioned WM transformers, attention stability (via QK-norm) is more critical than modulation bounding.
 
 % ===========================================================================
 \section{Limitations}
@@ -413,7 +414,7 @@ A kernel-family study over Gaussian, Laplace, and Cauchy families, combined with
 The resulting system is trained end-to-end, with a single AdamW group, a single global gradient clip, and the encoder kept active for the full schedule alongside the transformer.
 Integrated into a full V-M-C pipeline with AdaLN-conditioned transformers and PPO-in-dreams, the system runs in real time at 30\,FPS on Geometry Dash.
 SLS is in principle applicable to any model that predicts over a discrete latent space with a coordinate metric.
-A natural extension is to make the kernel bandwidth $\sigma$ learnable and jointly optimized with the world model, moving SLS from a fixed prior to a fully end-to-end objective; care must be taken to prevent degenerate solutions in which the learned targets collapse to uniform smoothing.
+A natural extension is to make the kernel bandwidth $\sigma$ learnable and jointly optimized with the WM, moving SLS from a fixed prior to a fully end-to-end objective; care must be taken to prevent degenerate solutions in which the learned targets collapse to uniform smoothing.
 
 \begin{ack}
   We thank Ma{\"e}l Planchot for contributing gameplay data.
@@ -421,7 +422,7 @@ A natural extension is to make the kernel bandwidth $\sigma$ learnable and joint
   Geometry Dash is developed by RobTop Games.
 \end{ack}
 
-\bibliographystyle{plainnat}
+\bibliographystyle{unsrtnat}
 \bibliography{references}
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
