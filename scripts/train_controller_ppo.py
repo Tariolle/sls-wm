@@ -399,7 +399,7 @@ def main():
     parser.add_argument("--n-heads", type=int, default=None)
     parser.add_argument("--n-layers", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
-    parser.add_argument("--controller-dropout", type=float, default=0.0)
+    parser.add_argument("--controller-dropout", type=float, default=None)
     # Output / initialization
     parser.add_argument("--pretrained", type=str, default=None,
                         help="Path to BC-pretrained controller checkpoint")
