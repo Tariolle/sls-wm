@@ -90,6 +90,7 @@ controller_ppo:
   death_threshold: 0.5
   mlp_hidden: 512
   mlp_layers: 2
+  controller_dropout: 0.1
   n_eval_episodes: 512
   eval_interval: 10
   seed: 42

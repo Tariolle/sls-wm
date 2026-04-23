@@ -399,6 +399,7 @@ def main():
     parser.add_argument("--n-heads", type=int, default=None)
     parser.add_argument("--n-layers", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
+    parser.add_argument("--controller-dropout", type=float, default=0.0)
     # Output / initialization
     parser.add_argument("--pretrained", type=str, default=None,
                         help="Path to BC-pretrained controller checkpoint")
@@ -493,6 +494,7 @@ def main():
         h_dim=args.embed_dim,
         mlp_hidden=getattr(args, 'mlp_hidden', 512),
         mlp_layers=getattr(args, 'mlp_layers', 1),
+        dropout=getattr(args, 'controller_dropout', 0.0),
     ).to(device)
     if args.pretrained:
         state = torch.load(args.pretrained, map_location=device,
