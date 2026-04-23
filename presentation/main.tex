@@ -442,15 +442,43 @@
 
 \end{frame}
 
-\begin{frame}{FSQ-VAE: Training}
-  \begin{itemize}
-    \item $\sim$252K frames ($\sim$\naugeps{} episodes), batch 1024
-    \item \textbf{Jointly} optimized with the transformer: no frozen pre-stage
-    \item Pixel MSE kept as an \textbf{anchor} on codebook semantics
-    \item Prediction gradients route back into the encoder via a straight-through estimator (STE) through a learnable linear projection \texttt{fsq\_grad\_proj}
-    \item \textbf{Single-group optimizer} (encoder + transformer share one AdamW group, LR $10^{-3}$, weight decay $10^{-3}$) + \textbf{single global grad clip at 10.0} (sized to the recon-dominated encoder gradient scale)
-    \item Cosine LR schedule + linear warmup, 200 epochs
-  \end{itemize}
+\begin{frame}{Training: FSQ-Neighbor Token Noise}
+  \vspace{0.5em}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    Noise on context tokens during training: with probability 5\% per token, replace it by a $\pm 1$ neighbour in one FSQ dimension.
+
+    \vspace{0.5em}
+    \begin{itemize}
+      \item Visually near-identical patches (one quantization step)
+      \item Forces the transformer to treat near-miss codes as equivalent context
+      \item Matches the SLS assumption that near-miss is almost-right: consistent signal on both sides of the loss
+    \end{itemize}
+
+    \column{0.45\textwidth}
+    \vspace{-1.2em}
+    \begin{center}
+      \includegraphics[width=0.80\textwidth]{fsq_neighbors.png}
+    \end{center}
+  \end{columns}
+\end{frame}
+
+\begin{frame}[t]{FSQ-Structured Label Smoothing}
+  \vspace{0.4em}
+  \textbf{Problem}: uniform smoothing treats an FSQ neighbour like a random token.
+
+  \vspace{0.3em}
+  \textbf{Kernel study} over FSQ coordinate distance $d = \lVert \mathbf{c}_i - \mathbf{c}_j \rVert$:
+  \vspace{-0.2em}
+  \[
+    k_{\text{Gauss}}(d) = e^{-d^2/2\sigma^2}, \quad
+    k_{\text{Laplace}}(d) = e^{-d/\sigma}, \quad
+    k_{\text{Cauchy}}(d) = \frac{1}{1 + d^2/\sigma^2}
+  \]
+
+  \vspace{0.2em}
+  \textbf{Design choice}: narrow Gaussian ($\sigma = 0.7$). Gaussian's squared-exponential tails decay faster than Laplace or Cauchy, so distant neighbours receive negligible mass. The goal is to reward near-misses without tempting the predictor to commit less strongly to the correct code.
+
 \end{frame}
 
 \begin{frame}{V + M: Joint Training}
@@ -488,6 +516,17 @@
   \end{center}
 \end{frame}
 
+\begin{frame}{FSQ-VAE: Training}
+  \begin{itemize}
+    \item $\sim$252K frames ($\sim$\naugeps{} episodes), batch 1024
+    \item \textbf{Jointly} optimized with the transformer: no frozen pre-stage
+    \item Pixel MSE kept as an \textbf{anchor} on codebook semantics
+    \item Prediction gradients route back into the encoder via a straight-through estimator (STE) through a learnable linear projection \texttt{fsq\_grad\_proj}
+    \item \textbf{Single-group optimizer} (encoder + transformer share one AdamW group, LR $10^{-3}$, weight decay $10^{-3}$) + \textbf{single global grad clip at 10.0} (sized to the recon-dominated encoder gradient scale)
+    \item Cosine LR schedule + linear warmup, 200 epochs
+  \end{itemize}
+\end{frame}
+
 \begin{frame}{FSQ-VAE: Reconstructions}
   \begin{center}
     \includegraphics[width=\textwidth]{fsq_reconstructions.png}
@@ -495,49 +534,6 @@
   \begin{center}
     \small{55$\times$ compression}: $32{,}768 \to 594$ bits/frame
   \end{center}
-\end{frame}
-
-% ----------------------------------------------------------
-% (continued: Phase 1 -- World Model)
-% ----------------------------------------------------------
-
-\begin{frame}{Training: FSQ-Neighbor Token Noise}
-  \vspace{0.5em}
-  \begin{columns}[T]
-    \column{0.55\textwidth}
-    Noise on context tokens during training: with probability 5\% per token, replace it by a $\pm 1$ neighbour in one FSQ dimension.
-
-    \vspace{0.5em}
-    \begin{itemize}
-      \item Visually near-identical patches (one quantization step)
-      \item Forces the transformer to treat near-miss codes as equivalent context
-      \item Matches the SLS assumption that near-miss is almost-right: consistent signal on both sides of the loss
-    \end{itemize}
-    
-    \column{0.45\textwidth}
-    \vspace{-1.2em}
-    \begin{center}
-      \includegraphics[width=0.80\textwidth]{fsq_neighbors.png}
-    \end{center}
-  \end{columns}
-\end{frame}
-
-\begin{frame}[t]{FSQ-Structured Label Smoothing}
-  \vspace{0.4em}
-  \textbf{Problem}: uniform smoothing treats an FSQ neighbour like a random token.
-
-  \vspace{0.3em}
-  \textbf{Kernel study} over FSQ coordinate distance $d = \lVert \mathbf{c}_i - \mathbf{c}_j \rVert$:
-  \vspace{-0.2em}
-  \[
-    k_{\text{Gauss}}(d) = e^{-d^2/2\sigma^2}, \quad
-    k_{\text{Laplace}}(d) = e^{-d/\sigma}, \quad
-    k_{\text{Cauchy}}(d) = \frac{1}{1 + d^2/\sigma^2}
-  \]
-
-  \vspace{0.2em}
-  \textbf{Design choice}: narrow Gaussian ($\sigma = 0.7$). Gaussian's squared-exponential tails decay faster than Laplace or Cauchy, so distant neighbours receive negligible mass. The goal is to reward near-misses without tempting the predictor to commit less strongly to the correct code.
-
 \end{frame}
 
 % ==========================================================
