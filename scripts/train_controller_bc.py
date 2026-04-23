@@ -127,14 +127,14 @@ def main():
                         help="Re-encode frames through this FSQ instead of "
                              "using on-disk tokens.npy.")
     parser.add_argument("--checkpoint-dir", default=None)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--jump-class-weight", type=float, default=1.5,
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--jump-class-weight", type=float, default=None,
                         help="Jump class weight for BCE (0 = auto from data ratio)")
-    parser.add_argument("--val-ratio", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--val-ratio", type=float, default=None)
+    parser.add_argument("--seed", type=int, default=None)
     # Model architecture (defaults from configs/v3.yaml)
     parser.add_argument("--config", default=None)
     parser.add_argument("--vocab-size", type=int, default=None)
@@ -144,7 +144,7 @@ def main():
     parser.add_argument("--tokens-per-frame", type=int, default=None)
     parser.add_argument("--context-frames", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
-    parser.add_argument("--controller-dropout", type=float, default=0.1,
+    parser.add_argument("--controller-dropout", type=float, default=None,
                         help="Dropout in MLPPolicy trunk (BC only).")
     args = parser.parse_args()
 
