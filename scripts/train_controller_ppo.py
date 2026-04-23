@@ -388,7 +388,7 @@ def main():
     parser.add_argument("--n-episodes", type=int, default=None)
     parser.add_argument("--max-dream-steps", type=int, default=None)
     parser.add_argument("--death-threshold", type=float, default=None)
-    parser.add_argument("--jump-penalty", type=float, default=0.5,
+    parser.add_argument("--jump-penalty", type=float, default=0.25,
                         help="Per-jump reward penalty to discourage over-jumping")
     parser.add_argument("--context-frames", type=int, default=None)
     # World model architecture (defaults from configs/v3.yaml)
