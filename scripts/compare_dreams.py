@@ -135,7 +135,7 @@ def load_transformer(args, ckpt_path, device):
     ).to(device)
     state = torch.load(ckpt_path, map_location=device, weights_only=True)
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
-    wm.load_state_dict(state)
+    wm.load_state_dict(state, strict=False)
     wm.eval()
     return wm
 

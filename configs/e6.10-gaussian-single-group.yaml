@@ -79,11 +79,11 @@ controller_ppo:
   lam: 0.95
   clip_eps: 0.2
   ppo_epochs: 4
-  minibatch_size: 1920
-  entropy_coeff: 0.01
+  minibatch_size: 2048
+  entropy_coeff: 0.001
   critic_coeff: 0.5
   max_grad_norm: 0.5
-  max_dream_steps: 45
+  max_dream_steps: 25
   death_threshold: 0.5
   mlp_hidden: 512
   n_eval_episodes: 512

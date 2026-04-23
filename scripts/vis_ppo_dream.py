@@ -274,7 +274,7 @@ def main():
     state = torch.load(args.transformer_checkpoint, map_location=device,
                        weights_only=True)
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
-    model.load_state_dict(state)
+    model.load_state_dict(state, strict=False)
     model.eval()
     print("World model loaded")
 

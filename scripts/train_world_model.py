@@ -371,7 +371,7 @@ def _build_soft_targets(target_indices, coords, gamma, sigma, smoothing,
     return soft
 
 
-def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
+def train_epoch(model, loader, optimizer, scaler, device,
                 token_noise=0.0, fsq_noise=0.0, neighbor_table=None,
                 neighbor_counts=None, label_smoothing=0.0, focal_gamma=2.0,
                 soft_target_matrix=None, amp_dtype=torch.bfloat16):
@@ -381,7 +381,6 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
     vocab = m.full_vocab_size
     vs = m.vocab_size
     total_loss, total_correct, total_tokens = 0, 0, 0
-    total_cpc_loss = 0.0
     death_tp, death_fp, death_fn = 0, 0, 0
 
     use_amp = device.type == "cuda"
@@ -409,7 +408,7 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
             frame_tokens = torch.cat([ctx, frame_tokens[:, -1:]], dim=1)
 
         with torch.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
-            logits, cpc_loss = model(frame_tokens, actions)
+            logits = model(frame_tokens, actions)
             token_loss = focal_cross_entropy(
                 logits.reshape(-1, logits.size(-1)),  # (B*65, vocab)
                 target.reshape(-1),                    # (B*65,)
@@ -417,7 +416,7 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
                 soft_target_matrix=soft_target_matrix,
                 label_smoothing=label_smoothing,
             )
-            loss = token_loss + cpc_weight * cpc_loss
+            loss = token_loss
 
         optimizer.zero_grad()
         scaler.scale(loss).backward()
@@ -441,7 +440,6 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
             death_tp += (pred_death & is_death).sum().item()
             death_fp += (pred_death & ~is_death).sum().item()
             death_fn += (~pred_death & is_death).sum().item()
-            total_cpc_loss += cpc_loss.item() * bs
 
     n_train = death_tp + death_fp + death_fn + 1e-8
     death_prec = death_tp / (death_tp + death_fp + 1e-8)
@@ -449,8 +447,7 @@ def train_epoch(model, loader, optimizer, scaler, cpc_weight, device,
     death_f1 = 2 * death_prec * death_rec / (death_prec + death_rec + 1e-8)
     n_samples = total_tokens // tpf
     return (total_loss / n_samples, total_correct / total_tokens,
-            death_prec, death_rec, death_f1,
-            total_cpc_loss / n_samples)
+            death_prec, death_rec, death_f1)
 
 
 @torch.no_grad()
@@ -460,7 +457,6 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
     m = _unwrap(model)
     tpf = m.tokens_per_frame
     total_loss, total_correct, total_tokens = 0, 0, 0
-    total_cpc_loss = 0.0
     death_tp, death_fp, death_fn = 0, 0, 0
 
     use_amp = device.type == "cuda"
@@ -472,7 +468,7 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
         target = frame_tokens[:, -1]
 
         with torch.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
-            logits, cpc_loss = model(frame_tokens, actions)
+            logits = model(frame_tokens, actions)
 
             token_loss = focal_cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
@@ -484,7 +480,6 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
 
         bs = frame_tokens.size(0)
         total_loss += token_loss.item() * bs
-        total_cpc_loss += cpc_loss.item() * bs
 
         visual_preds = logits[:, :tpf].argmax(dim=-1)
         visual_target = target[:, :tpf]
@@ -504,8 +499,7 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
     death_f1 = 2 * death_prec * death_rec / (death_prec + death_rec + 1e-8)
     n_samples = total_tokens // tpf
     return (total_loss / n_samples, total_correct / total_tokens,
-            death_prec, death_rec, death_f1,
-            total_cpc_loss / n_samples)
+            death_prec, death_rec, death_f1)
 
 
 # -------------------------------------------------------------------------
@@ -585,12 +579,12 @@ class JointStep(nn.Module):
     and applied via torch.where (also safe). `apply_fsq_noise` is
     branch-free, so the whole path is capturable.
 
-    Construction stores fixed hparams (alpha_uniform, cpc_weight, ...) so
-    the compiled graph specialises on them. Changing any of these across
-    calls triggers recompilation, which is fine - they are constants.
+    Construction stores fixed hparams (alpha_uniform, ...) so the compiled
+    graph specialises on them. Changing any of these across calls triggers
+    recompilation, which is fine - they are constants.
     """
 
-    def __init__(self, fsq, wm, *, alpha_uniform, cpc_weight,
+    def __init__(self, fsq, wm, *, alpha_uniform,
                  label_smoothing, focal_gamma, token_noise, fsq_noise,
                  shift_max=0, use_recon=True,
                  neighbor_table=None, neighbor_counts=None,
@@ -600,7 +594,6 @@ class JointStep(nn.Module):
         self.fsq = fsq
         self.wm = wm
         self.alpha_uniform = float(alpha_uniform)
-        self.cpc_weight = float(cpc_weight)
         self.label_smoothing = float(label_smoothing)
         self.focal_gamma = float(focal_gamma)
         self.token_noise = float(token_noise)
@@ -702,10 +695,10 @@ class JointStep(nn.Module):
         wm_out = self.wm(
             frame_tokens, actions, z_q_ste_context=z_q_ste_ctx,
             return_dense_logits=True)
-        if len(wm_out) == 3:
-            logits, cpc_loss, dense_logits = wm_out
+        if isinstance(wm_out, tuple):
+            logits, dense_logits = wm_out
         else:
-            logits, cpc_loss = wm_out
+            logits = wm_out
             dense_logits = None
 
         target_block_flat_logits = logits.reshape(-1, logits.size(-1))
@@ -745,8 +738,7 @@ class JointStep(nn.Module):
 
         loss = (recon_loss
                 + self.alpha_uniform * uniform_loss
-                + token_loss
-                + self.cpc_weight * cpc_loss)
+                + token_loss)
 
         # Per-batch metric scalars (0-dim tensors). Caller does .item()
         # outside the compiled boundary.
@@ -773,7 +765,6 @@ class JointStep(nn.Module):
 
         metrics = {
             "token_loss": token_loss.detach(),
-            "cpc_loss": cpc_loss.detach(),
             "recon_loss": recon_loss.detach(),
             "uniform_loss": uniform_loss.detach(),
             "correct": correct,
@@ -827,7 +818,6 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
     is_cuda = device.type == "cuda"
 
     total_token_loss = 0.0
-    total_cpc = 0.0
     total_recon = 0.0
     total_unif = 0.0
     total_correct = 0
@@ -913,7 +903,6 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
             fsq_norm.detach().float(),
             wm_norm.detach().float(),
             metrics["token_loss"].detach().float(),
-            metrics["cpc_loss"].detach().float(),
             metrics["recon_loss"].detach().float(),
             metrics["uniform_loss"].detach().float(),
             metrics["correct"].detach().float(),
@@ -922,12 +911,11 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
             metrics["death_fp"].detach().float(),
             metrics["death_fn"].detach().float(),
         ]).tolist()
-        (fsq_n, wm_n, tok_l, cpc_l, rec_l, unif_l,
+        (fsq_n, wm_n, tok_l, rec_l, unif_l,
          cor, nt, d_tp, d_fp, d_fn) = scalars
         enc_grad_sq += fsq_n ** 2
         tr_grad_sq += wm_n ** 2
         total_token_loss += tok_l * B
-        total_cpc += cpc_l * B
         total_recon += rec_l * B
         total_unif += unif_l * B
         total_correct += int(cor)
@@ -970,7 +958,6 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
         "death_prec": death_prec,
         "death_rec": death_rec,
         "death_f1": death_f1,
-        "cpc": total_cpc / n_samples,
         "recon": total_recon / n_samples,
         "unif": total_unif / n_samples,
         "enc_grad_rms": (enc_grad_sq / max(1, n_batches)) ** 0.5,
@@ -996,7 +983,6 @@ def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
     use_amp = device.type == "cuda"
 
     total_token_loss = 0.0
-    total_cpc = 0.0
     total_recon = 0.0
     total_unif = 0.0
     total_correct = 0
@@ -1017,7 +1003,6 @@ def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
         code_counts_gpu += metrics["code_counts"]
         scalars = torch.stack([
             metrics["token_loss"].detach().float(),
-            metrics["cpc_loss"].detach().float(),
             metrics["recon_loss"].detach().float(),
             metrics["uniform_loss"].detach().float(),
             metrics["correct"].detach().float(),
@@ -1026,10 +1011,9 @@ def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
             metrics["death_fp"].detach().float(),
             metrics["death_fn"].detach().float(),
         ]).tolist()
-        (tok_l, cpc_l, rec_l, unif_l,
+        (tok_l, rec_l, unif_l,
          cor, nt, d_tp, d_fp, d_fn) = scalars
         total_token_loss += tok_l * B
-        total_cpc += cpc_l * B
         total_recon += rec_l * B
         total_unif += unif_l * B
         total_correct += int(cor)
@@ -1053,7 +1037,6 @@ def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
         "death_prec": death_prec,
         "death_rec": death_rec,
         "death_f1": death_f1,
-        "cpc": total_cpc / n_samples,
         "recon": total_recon / n_samples,
         "unif": total_unif / n_samples,
         "code_usage_pct": code_usage_pct,
@@ -1082,7 +1065,6 @@ def main():
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--cpc-weight", type=float, default=None)
     parser.add_argument("--token-noise", type=float, default=None)
     parser.add_argument("--fsq-noise", type=float, default=None)
     parser.add_argument("--fsq-levels", type=int, nargs="+", default=None,
@@ -1127,8 +1109,6 @@ def main():
                         help="Weight on CWU anti-collapse regularizer.")
     parser.add_argument("--shift-max", type=int, default=None,
                         help="Max per-batch vertical shift pixels. 0 disables.")
-    parser.add_argument("--use-cpc", action=argparse.BooleanOptionalAction,
-                        default=None, help="Include AC-CPC in the joint loss.")
     parser.add_argument("--use-recon", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="Include FSQ recon loss in the joint training loss. "
@@ -1258,7 +1238,6 @@ def main():
                     train_weights.append(
                         float(args.death_oversample) if is_death_frame else 1.0)
 
-    use_cpc = bool(getattr(args, "use_cpc", True) if getattr(args, "use_cpc", None) is not None else True)
     use_recon = bool(getattr(args, "use_recon", True) if getattr(args, "use_recon", None) is not None else True)
     learnable_gamma = bool(getattr(args, "learnable_gamma", False) if getattr(args, "learnable_gamma", None) is not None else False)
 
@@ -1283,7 +1262,6 @@ def main():
         tokens_per_frame=args.tokens_per_frame,
         adaln=getattr(args, 'adaln', False),
         fsq_dim=fsq_dim,
-        use_cpc=use_cpc,
         sls_gamma_init=sls_gamma_init,
     ).to(device)
 
@@ -1507,7 +1485,6 @@ def main():
         joint_step_train = JointStep(
             fsq=fsq, wm=model,
             alpha_uniform=args.alpha_uniform,
-            cpc_weight=args.cpc_weight,
             label_smoothing=args.label_smoothing,
             focal_gamma=args.focal_gamma,
             token_noise=args.token_noise, fsq_noise=args.fsq_noise,
@@ -1519,7 +1496,6 @@ def main():
         joint_step_val = JointStep(
             fsq=fsq, wm=model,
             alpha_uniform=args.alpha_uniform,
-            cpc_weight=args.cpc_weight,
             label_smoothing=args.label_smoothing,
             focal_gamma=args.focal_gamma,
             token_noise=0.0, fsq_noise=0.0,          # no noise at eval
@@ -1575,14 +1551,10 @@ def main():
     log_unif = joint and float(getattr(args, "alpha_uniform", 0.0) or 0.0) > 0
     log_recon = joint and use_recon
     log_header = ["epoch", "train_total", "train_loss", "train_acc",
-                  "train_death_prec", "train_death_rec", "train_death_f1"]
-    if use_cpc:
-        log_header.append("train_cpc")
-    log_header += ["val_total", "val_loss", "val_acc",
-                   "val_death_prec", "val_death_rec", "val_death_f1"]
-    if use_cpc:
-        log_header.append("val_cpc")
-    log_header += ["gap", "lr", "time_s"]
+                  "train_death_prec", "train_death_rec", "train_death_f1",
+                  "val_total", "val_loss", "val_acc",
+                  "val_death_prec", "val_death_rec", "val_death_f1",
+                  "gap", "lr", "time_s"]
     if joint:
         log_header.append("fsq_train_total")
         if log_recon:
@@ -1644,24 +1616,22 @@ def main():
                 train_d_prec = train_metrics["death_prec"]
                 train_d_rec = train_metrics["death_rec"]
                 train_d_f1 = train_metrics["death_f1"]
-                train_cpc = train_metrics["cpc"]
                 val_loss = val_metrics["loss"]
                 val_acc = val_metrics["acc"]
                 val_d_prec = val_metrics["death_prec"]
                 val_d_rec = val_metrics["death_rec"]
                 val_d_f1 = val_metrics["death_f1"]
-                val_cpc = val_metrics["cpc"]
             else:
-                train_loss, train_acc, train_d_prec, train_d_rec, train_d_f1, train_cpc = train_epoch(
+                train_loss, train_acc, train_d_prec, train_d_rec, train_d_f1 = train_epoch(
                     model, train_loader, optimizer, scaler,
-                    args.cpc_weight, device, token_noise=args.token_noise,
+                    device, token_noise=args.token_noise,
                     fsq_noise=args.fsq_noise,
                     neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
                     label_smoothing=args.label_smoothing,
                     focal_gamma=args.focal_gamma,
                     soft_target_matrix=soft_target_matrix,
                     amp_dtype=amp_dtype)
-                val_loss, val_acc, val_d_prec, val_d_rec, val_d_f1, val_cpc = val_epoch(
+                val_loss, val_acc, val_d_prec, val_d_rec, val_d_f1 = val_epoch(
                     model, val_loader, device,
                     label_smoothing=args.label_smoothing,
                     focal_gamma=args.focal_gamma,
@@ -1676,9 +1646,8 @@ def main():
                           if joint and len(optimizer.param_groups) > 1
                           else None)
 
-            cpc_w = args.cpc_weight
-            train_total = train_loss + cpc_w * train_cpc
-            val_total = val_loss + cpc_w * val_cpc
+            train_total = train_loss
+            val_total = val_loss
             gap = val_total - train_total
 
             # Joint-mode FSQ-side totals mirror the transformer's per-
@@ -1692,18 +1661,12 @@ def main():
                                  + a_u * val_metrics["unif"])
                 fsq_gap = fsq_val_total - fsq_train_total
 
-            # Suppress cpc= column when AC-CPC is disabled (JEPA); logging
-            # a hardcoded zero is just noise.
-            train_cpc_str = f"cpc={train_cpc:.3f} | " if use_cpc else ""
-            val_cpc_str = f"cpc={val_cpc:.3f} | " if use_cpc else ""
             print(
                 f"Epoch {epoch:3d}/{args.epochs} ({dt:.1f}s) | "
                 f"Train: total={train_total:.4f} loss={train_loss:.4f} acc={train_acc:.3f} "
                 f"death[P={train_d_prec:.3f} R={train_d_rec:.3f} F1={train_d_f1:.3f}] "
-                f"{train_cpc_str}"
                 f"Val: total={val_total:.4f} loss={val_loss:.4f} acc={val_acc:.3f} "
                 f"death[P={val_d_prec:.3f} R={val_d_rec:.3f} F1={val_d_f1:.3f}] "
-                f"{val_cpc_str}"
                 f"gap={gap:+.4f} | LR: {lr:.1e}"
             )
             if joint:
@@ -1746,16 +1709,10 @@ def main():
             row = [
                 epoch, f"{train_total:.6f}", f"{train_loss:.6f}", f"{train_acc:.4f}",
                 f"{train_d_prec:.4f}", f"{train_d_rec:.4f}", f"{train_d_f1:.4f}",
-            ]
-            if use_cpc:
-                row.append(f"{train_cpc:.4f}")
-            row += [
                 f"{val_total:.6f}", f"{val_loss:.6f}", f"{val_acc:.4f}",
                 f"{val_d_prec:.4f}", f"{val_d_rec:.4f}", f"{val_d_f1:.4f}",
+                f"{gap:.4f}", f"{lr:.1e}", f"{dt:.1f}",
             ]
-            if use_cpc:
-                row.append(f"{val_cpc:.4f}")
-            row += [f"{gap:.4f}", f"{lr:.1e}", f"{dt:.1f}"]
             if joint:
                 row.append(f"{fsq_train_total:.6f}")
                 if log_recon:
@@ -1796,9 +1753,6 @@ def main():
                 "transformer/gap": gap,
                 "transformer/lr": lr,
             }
-            if use_cpc:
-                wandb_payload["transformer/train/cpc"] = train_cpc
-                wandb_payload["transformer/val/cpc"] = val_cpc
             if joint:
                 wandb_payload.update({
                     "fsq/train/total": fsq_train_total,

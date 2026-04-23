@@ -1,4 +1,4 @@
-"""Transformer world model — block-causal + 3D-RoPE + death token + AC-CPC.
+"""Transformer world model — block-causal + 3D-RoPE + death token.
 
 Predicts all next-frame tokens in parallel given past frames + actions.
 All target positions use a learnable query embedding (no ground truth leakage).
@@ -18,7 +18,6 @@ Inspired by V-JEPA 2 (Bardes et al., 2025).
 
 References:
     - IRIS (Micheli et al., ICLR 2023): block-causal attention on VQ tokens
-    - TWISTER (Burchi & Timofte, ICLR 2025): AC-CPC contrastive loss
     - Su et al., 2021: RoFormer / Rotary Position Embeddings
     - Bardes et al., 2025: V-JEPA 2 — 3D factored RoPE
 """
@@ -68,15 +67,12 @@ class WorldModel(nn.Module):
         n_layers: int = 8,
         context_frames: int = 4,
         dropout: float = 0.1,
-        cpc_dim: int = 512,
         tokens_per_frame: int = 64,
         adaln: bool = False,
         fsq_dim: int | None = None,
-        use_cpc: bool = True,
         sls_gamma_init: torch.Tensor | None = None,
     ):
         super().__init__()
-        self.use_cpc = use_cpc
         # Learnable per-dim SLS precision γ. Stored on WorldModel so
         # it ends up in the transformer optimizer param group (it's a
         # loss-side parameter that drives CE target smoothing, not an
@@ -153,18 +149,6 @@ class WorldModel(nn.Module):
 
         # Learnable [MASK] embedding (not in vocab -- head never predicts it)
         self.mask_embed = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
-
-        # AC-CPC: contrastive prediction of future hidden states
-        self.cpc_dim = cpc_dim
-        self.cpc_target_proj = nn.Linear(embed_dim, cpc_dim)
-        self.cpc_predictors = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(embed_dim + (k + 1) * n_actions, cpc_dim),
-                nn.GELU(),
-                nn.Linear(cpc_dim, cpc_dim),
-            )
-            for k in range(context_frames)
-        ])
 
         # Block-causal attention mask
         self.register_buffer("attn_mask", self._build_mask())
@@ -320,60 +304,6 @@ class WorldModel(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.normal_(module.weight, std=0.02)
 
-    def _compute_cpc_loss(self, x, actions, frame_tokens, temperature=0.1):
-        """Compute AC-CPC contrastive loss (TWISTER-style).
-
-        Targets are mean-pooled token embeddings of each frame, independent
-        of the transformer hidden states. Anchors are transformer hidden
-        states at each context frame's summary position. Action-conditioned
-        predictors bridge anchor to target over k steps.
-        """
-        K = self.context_frames
-        BS = self.block_size
-        B = x.size(0)
-        tpf = self.tokens_per_frame
-
-        if B < 2:
-            return torch.tensor(0.0, device=x.device)
-
-        if self.adaln:
-            anchor_positions = [(i + 1) * BS - 1 for i in range(K)]
-        else:
-            anchor_positions = [i * (BS + 1) + BS for i in range(K)]
-
-        h_steps = [x[:, pos] for pos in anchor_positions]
-        h_steps.append(x[:, -1])
-
-        # Targets: mean-pooled token embeddings, independent of transformer.
-        # detach() so CPC loss does not backprop through the target path.
-        z_targets = []
-        for k in range(K + 1):
-            tok_emb = self.token_embed(frame_tokens[:, k, :tpf])  # (B, TPF, D)
-            z_targets.append(
-                F.normalize(self.cpc_target_proj(tok_emb.mean(dim=1).detach()), dim=-1)
-            )
-
-        act_onehot = F.one_hot(actions, self.n_actions).float()  # (B, K, n_actions)
-
-        total_loss = 0.0
-        n_pairs = 0
-
-        for step_idx, k in enumerate(range(1, K + 1)):
-            predictor = self.cpc_predictors[step_idx]
-            for t in range(K + 1 - k):
-                h_src = h_steps[t]
-                act_ctx = act_onehot[:, t:t + k].reshape(B, -1)  # (B, k * n_actions)
-                z_pred = F.normalize(
-                    predictor(torch.cat([h_src, act_ctx], dim=-1)), dim=-1
-                )
-                z_pos = z_targets[t + k]
-                sim = torch.mm(z_pred, z_pos.t()) / temperature
-                labels = torch.arange(B, device=sim.device)
-                total_loss += F.cross_entropy(sim, labels)
-                n_pairs += 1
-
-        return total_loss / max(n_pairs, 1)
-
     def forward(self, frame_tokens, actions, z_q_ste_context=None,
                 return_dense_logits=False):
         """Forward pass: predict all target tokens from context.
@@ -403,7 +333,6 @@ class WorldModel(nn.Module):
             logits: (B, block_size, full_vocab_size) — predictions for the
                 masked target block (frame K). Shape unchanged across modes
                 so downstream callers keep working.
-            cpc_loss: scalar — AC-CPC contrastive loss.
             dense_logits: only returned when return_dense_logits=True and
                 AdaLN is enabled; shape (B, K, block_size, full_vocab_size)
                 — logits at each context block's positions for predicting
@@ -476,14 +405,9 @@ class WorldModel(nn.Module):
             dense_logits = ctx_logits.view(
                 B, K, self.block_size, -1)  # (B, K, block_size, V)
 
-        if self.use_cpc:
-            cpc_loss = self._compute_cpc_loss(x, actions, frame_tokens)
-        else:
-            cpc_loss = torch.zeros((), device=x.device, dtype=x.dtype)
-
         if return_dense_logits:
-            return logits, cpc_loss, dense_logits
-        return logits, cpc_loss
+            return logits, dense_logits
+        return logits
 
     @staticmethod
     def _sample_token(logits, temperature, top_k, top_p):

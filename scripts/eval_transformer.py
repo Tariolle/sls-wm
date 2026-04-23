@@ -117,7 +117,7 @@ def main():
     ).to(device)
     state = torch.load(args.transformer_checkpoint, map_location=device, weights_only=True)
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
-    model.load_state_dict(state)
+    model.load_state_dict(state, strict=False)
     model.eval()
     try:
         model._backbone_forward = torch.compile(model._backbone_forward)

@@ -148,7 +148,7 @@ def main():
     state = torch.load(args.transformer_checkpoint, map_location=device,
                        weights_only=True)
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
-    wm.load_state_dict(state)
+    wm.load_state_dict(state, strict=False)
     wm.eval()
 
     print("Loading Controller...")

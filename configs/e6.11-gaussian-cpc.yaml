@@ -4,7 +4,8 @@
 # embeds, independent of transformer hidden states). Anchors are transformer
 # hidden states at each context frame summary position, action-conditioned
 # over k=1..4 steps. Negatives are all other samples in the batch (InfoNCE).
-# Purpose: establish whether AC-CPC pressure improves h_t quality / sim-to-real.
+# Result (ablation): death_F1 0.76→0.67, 0.4 overfitting gap, dream regression.
+# AC-CPC permanently removed from codebase after this experiment.
 
 model:
   vocab_size: 625
@@ -77,11 +78,11 @@ controller_ppo:
   lam: 0.95
   clip_eps: 0.2
   ppo_epochs: 4
-  minibatch_size: 1920
-  entropy_coeff: 0.01
+  minibatch_size: 2048
+  entropy_coeff: 0.001
   critic_coeff: 0.5
   max_grad_norm: 0.5
-  max_dream_steps: 30
+  max_dream_steps: 25
   death_threshold: 0.5
   mlp_hidden: 512
   n_eval_episodes: 512
