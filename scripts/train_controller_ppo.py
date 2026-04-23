@@ -372,12 +372,12 @@ def main():
     parser.add_argument("--episodes-dir", default="data/death_episodes")
     parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
     # PPO
-    parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--lr-warmup-iters", type=int, default=0)
-    parser.add_argument("--gamma", type=float, default=0.995)
-    parser.add_argument("--lam", type=float, default=0.95,
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--lr-warmup-iters", type=int, default=None)
+    parser.add_argument("--gamma", type=float, default=None)
+    parser.add_argument("--lam", type=float, default=None,
                         help="GAE lambda")
-    parser.add_argument("--clip-eps", type=float, default=0.2)
+    parser.add_argument("--clip-eps", type=float, default=None)
     parser.add_argument("--ppo-epochs", type=int, default=None)
     parser.add_argument("--minibatch-size", type=int, default=None)
     parser.add_argument("--entropy-coeff", type=float, default=None)
@@ -388,7 +388,7 @@ def main():
     parser.add_argument("--n-episodes", type=int, default=None)
     parser.add_argument("--max-dream-steps", type=int, default=None)
     parser.add_argument("--death-threshold", type=float, default=None)
-    parser.add_argument("--jump-penalty", type=float, default=0.25,
+    parser.add_argument("--jump-penalty", type=float, default=None,
                         help="Per-jump reward penalty to discourage over-jumping")
     parser.add_argument("--context-frames", type=int, default=None)
     # World model architecture (defaults from configs/v3.yaml)
@@ -412,7 +412,7 @@ def main():
     parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--n-eval-episodes", type=int, default=None)
     parser.add_argument("--eval-interval", type=int, default=None)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
 
     from deepdash.config import apply_config
