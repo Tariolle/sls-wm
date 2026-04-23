@@ -2,18 +2,18 @@
 #SBATCH -J "train_wm"
 #SBATCH -o slurm/logs/train_world_model.out
 #SBATCH -e slurm/logs/train_world_model.err
-#SBATCH -p ar_a100
-#SBATCH --gres=gpu:a100:1
+#SBATCH -p ar_h200
+#SBATCH --gres=gpu:h200:1
 #SBATCH -n 1
 #SBATCH --cpus-per-gpu 8
 #SBATCH --mem 64G
 #SBATCH --time=08:00:00
 #SBATCH --signal=B:USR1@300
 
-# Joint FSQ + Transformer training on A100 with USR1 auto-resume.
+# Joint FSQ + Transformer training on H200 with USR1 auto-resume.
 #
 # Submit:  sbatch slurm/train_world_model.sl [config]
-# Example: sbatch slurm/train_world_model.sl configs/e6.10-gaussian-single-group.yaml
+# Example: sbatch slurm/train_world_model.sl configs/e6.11-gaussian-cpc.yaml
 # Monitor: tail -f slurm/logs/train_world_model.out
 
 CONFIG=${1:-configs/e6.10-gaussian-single-group.yaml}
