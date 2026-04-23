@@ -55,7 +55,7 @@ def load_episodes(episodes_dir, context_frames, vae=None, device=None):
             if not tp.exists():
                 continue
             tokens = np.load(tp).astype(np.int64)
-        if len(tokens) >= context_frames * 3:
+        if len(tokens) >= context_frames * 2:
             episodes.append((tokens, actions, ep.name))
     return episodes
 
@@ -80,9 +80,9 @@ def sample_contexts(episodes, n, context_frames, rng):
         ep_idx = rng.integers(len(episodes))
         tokens, actions = episodes[ep_idx]
         T = len(tokens)
-        # Context starts at [0, T - 3*K], so after K context frames,
-        # there are at least 2*K frames of runway before episode end
-        latest = T - K * 3
+        # Context starts at [0, T - 2*K], so after K context frames,
+        # there is at least K frames of runway before episode end
+        latest = T - K * 2
         start = rng.integers(0, latest + 1) if latest > 0 else 0
         all_ctx_tokens.append(tokens[start:start + K])
         all_ctx_actions.append(actions[start:start + K])
