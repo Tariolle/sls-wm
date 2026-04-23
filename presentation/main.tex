@@ -585,8 +585,8 @@
   \vspace{0.5em}
   \textbf{Stage 2: PPO in Dream} (generalization)
   \begin{itemize}
-    \item Reward: $+1$ per step survived $-0.5$ per jump, rollout stops at death prediction
-    \item 2048 episodes/iteration, 25-step rollouts, 4 PPO epochs, GAE ($\gamma$=0.995, $\lambda$=0.95)
+    \item Reward: $+1$ per step survived $-0.25$ per jump, rollout stops at death prediction
+    \item 4096 episodes/iteration, 25-step rollouts, 4 PPO epochs, GAE ($\gamma$=0.995, $\lambda$=0.95)
     \item Clipped surrogate + percentile advantage norm + EMA target critic
   \end{itemize}
 
