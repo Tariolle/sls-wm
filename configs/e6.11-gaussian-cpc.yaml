@@ -60,7 +60,7 @@ controller_bc:
   transformer_checkpoint: checkpoints_e6.11/transformer_best.pt
   epochs: 50
   batch_size: 512
-  lr: 0.001
+  lr: 0.0005
   weight_decay: 0.0001
   controller_dropout: 0.1
   val_ratio: 0.1
@@ -79,6 +79,7 @@ controller_ppo:
   clip_eps: 0.2
   ppo_epochs: 4
   minibatch_size: 2048
+  lr_warmup_iters: 50
   entropy_coeff: 0.001
   critic_coeff: 0.5
   max_grad_norm: 0.5

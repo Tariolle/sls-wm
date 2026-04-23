@@ -373,6 +373,7 @@ def main():
     parser.add_argument("--expert-episodes-dir", default="data/expert_episodes")
     # PPO
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr-warmup-iters", type=int, default=0)
     parser.add_argument("--gamma", type=float, default=0.995)
     parser.add_argument("--lam", type=float, default=0.95,
                         help="GAE lambda")
@@ -511,6 +512,11 @@ def main():
 
     optimizer = torch.optim.Adam(controller.parameters(), lr=args.lr,
                                  eps=1e-5)
+    scheduler = None
+    if args.lr_warmup_iters > 0:
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.1, end_factor=1.0,
+            total_iters=args.lr_warmup_iters)
 
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -525,6 +531,9 @@ def main():
         controller.load_state_dict(ckpt["controller"])
         optimizer.load_state_dict(ckpt["optimizer"])
         start_iteration = ckpt["iteration"] + 1
+        if scheduler is not None:
+            for _ in range(start_iteration - 1):
+                scheduler.step()
         best_eval = ckpt.get("best_eval", -float("inf"))
         wandb_resume_id = ckpt.get("wandb_run_id")
         # Restore RNG state for reproducible continuation
@@ -568,7 +577,8 @@ def main():
                          "loss", "mean_value", "entropy", "lr",
                          "eval_survival", "jump_ratio", "time_s"])
 
-    print(f"\nPPO: lr={args.lr} (constant), gamma={args.gamma}, lam={args.lam}")
+    warmup_str = f" (linear warmup {args.lr_warmup_iters} iters)" if args.lr_warmup_iters > 0 else " (constant)"
+    print(f"\nPPO: lr={args.lr}{warmup_str}, gamma={args.gamma}, lam={args.lam}")
     print(f"PPO: clip_eps={args.clip_eps}, epochs={args.ppo_epochs}, "
           f"minibatch={args.minibatch_size}")
     print(f"Entropy: {args.entropy_coeff} (fixed)")
@@ -629,6 +639,9 @@ def main():
             minibatch_size=args.minibatch_size,
             pct_normalizer=pct_normalizer,
             ema_controller=ema_controller)
+
+        if scheduler is not None:
+            scheduler.step()
 
         elapsed = time.time() - t0
         mean_surv = survival.mean().item()
