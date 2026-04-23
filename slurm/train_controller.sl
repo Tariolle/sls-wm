@@ -7,7 +7,7 @@
 #SBATCH -n 1
 #SBATCH --cpus-per-gpu 8
 #SBATCH --mem 64G
-#SBATCH --time=02:00:00
+#SBATCH --time=08:00:00
 #SBATCH --signal=B:USR1@300
 
 # BC pretraining then PPO fine-tuning, USR1 auto-resume.
