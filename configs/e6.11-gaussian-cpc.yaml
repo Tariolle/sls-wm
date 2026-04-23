@@ -1,0 +1,90 @@
+# E6.11 -- Gaussian SLS + AC-CPC re-enabled (TWISTER-style).
+# Baseline: E6.10 (single-group, Gaussian σ=0.7, 200 epochs).
+# Change: use_cpc: true with token-embedding targets (mean-pooled FSQ token
+# embeds, independent of transformer hidden states). Anchors are transformer
+# hidden states at each context frame summary position, action-conditioned
+# over k=1..4 steps. Negatives are all other samples in the batch (InfoNCE).
+# Purpose: establish whether AC-CPC pressure improves h_t quality / sim-to-real.
+
+model:
+  vocab_size: 625
+  embed_dim: 512
+  n_heads: 8
+  n_layers: 8
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [5, 5, 5, 5]
+  dropout: 0.10
+  adaln: true
+
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 200
+  batch_size: 1024
+  lr: 0.001
+  lr_min: 0.00005
+  weight_decay: 0.001
+  cpc_weight: 1.0
+  token_noise: 0.0
+  fsq_noise: 0.05
+  label_smoothing: 0.1
+  fsq_kernel: gaussian
+  fsq_sigma: 0.7
+  fsq_dim_weights: [1.0, 1.0, 1.0, 1.0]
+  focal_gamma: 2.0
+  death_oversample: 4
+  seed: 42
+  checkpoint_dir: checkpoints_e6.11
+  joint: true
+  single_group: true
+  grad_clip: 10.0
+  alpha_uniform: 0.0
+  shift_max: 4
+  use_cpc: true
+  use_recon: true
+  learnable_gamma: false
+
+posthoc_decoder:
+  transformer_checkpoint: checkpoints_e6.11/transformer_best.pt
+  fsq_checkpoint: checkpoints_e6.11/fsq_best.pt
+  epochs: 30
+  batch_size: 512
+  lr: 0.001
+  seed: 42
+  checkpoint_dir: checkpoints_e6.11
+
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_e6.11/transformer_best.pt
+  epochs: 50
+  batch_size: 512
+  lr: 0.001
+  weight_decay: 0.0001
+  controller_dropout: 0.1
+  val_ratio: 0.1
+  seed: 42
+  checkpoint_dir: checkpoints_e6.11
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_e6.11/transformer_best.pt
+  pretrained: checkpoints_e6.11/controller_bc_best.pt
+  amp_dtype: bfloat16
+  n_iterations: 5000
+  n_episodes: 4096
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 1920
+  entropy_coeff: 0.01
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 30
+  death_threshold: 0.5
+  mlp_hidden: 512
+  n_eval_episodes: 512
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_e6.11

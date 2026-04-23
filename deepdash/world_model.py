@@ -68,7 +68,7 @@ class WorldModel(nn.Module):
         n_layers: int = 8,
         context_frames: int = 4,
         dropout: float = 0.1,
-        cpc_dim: int = 64,
+        cpc_dim: int = 512,
         tokens_per_frame: int = 64,
         adaln: bool = False,
         fsq_dim: int | None = None,
@@ -320,28 +320,38 @@ class WorldModel(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.normal_(module.weight, std=0.02)
 
-    def _compute_cpc_loss(self, x, actions, temperature=0.1):
-        """Compute AC-CPC contrastive loss over context frame hidden states."""
+    def _compute_cpc_loss(self, x, actions, frame_tokens, temperature=0.1):
+        """Compute AC-CPC contrastive loss (TWISTER-style).
+
+        Targets are mean-pooled token embeddings of each frame, independent
+        of the transformer hidden states. Anchors are transformer hidden
+        states at each context frame's summary position. Action-conditioned
+        predictors bridge anchor to target over k steps.
+        """
         K = self.context_frames
         BS = self.block_size
         B = x.size(0)
+        tpf = self.tokens_per_frame
 
         if B < 2:
             return torch.tensor(0.0, device=x.device)
 
         if self.adaln:
-            # AdaLN: use status token (last position of each frame block)
             anchor_positions = [(i + 1) * BS - 1 for i in range(K)]
         else:
-            # Standard: use action token positions
             anchor_positions = [i * (BS + 1) + BS for i in range(K)]
 
-        # Hidden states at anchor positions + target summary (last pos)
         h_steps = [x[:, pos] for pos in anchor_positions]
         h_steps.append(x[:, -1])
 
-        z_targets = [F.normalize(self.cpc_target_proj(h.detach()), dim=-1)
-                     for h in h_steps]
+        # Targets: mean-pooled token embeddings, independent of transformer.
+        # detach() so CPC loss does not backprop through the target path.
+        z_targets = []
+        for k in range(K + 1):
+            tok_emb = self.token_embed(frame_tokens[:, k, :tpf])  # (B, TPF, D)
+            z_targets.append(
+                F.normalize(self.cpc_target_proj(tok_emb.mean(dim=1).detach()), dim=-1)
+            )
 
         act_onehot = F.one_hot(actions, self.n_actions).float()  # (B, K, n_actions)
 
@@ -352,12 +362,10 @@ class WorldModel(nn.Module):
             predictor = self.cpc_predictors[step_idx]
             for t in range(K + 1 - k):
                 h_src = h_steps[t]
-                end = min(t + k, K)
-                if end <= t:
-                    continue
-                act_ctx = act_onehot[:, t:end].reshape(B, -1)  # (B, k * n_actions)
-                z_pred = predictor(torch.cat([h_src, act_ctx], dim=-1))
-                z_pred = F.normalize(z_pred, dim=-1)
+                act_ctx = act_onehot[:, t:t + k].reshape(B, -1)  # (B, k * n_actions)
+                z_pred = F.normalize(
+                    predictor(torch.cat([h_src, act_ctx], dim=-1)), dim=-1
+                )
                 z_pos = z_targets[t + k]
                 sim = torch.mm(z_pred, z_pos.t()) / temperature
                 labels = torch.arange(B, device=sim.device)
@@ -469,10 +477,8 @@ class WorldModel(nn.Module):
                 B, K, self.block_size, -1)  # (B, K, block_size, V)
 
         if self.use_cpc:
-            cpc_loss = self._compute_cpc_loss(x, actions)
+            cpc_loss = self._compute_cpc_loss(x, actions, frame_tokens)
         else:
-            # JEPA path: AC-CPC removed, transformer CE against
-            # EMA teacher tokens replaces the contrastive objective.
             cpc_loss = torch.zeros((), device=x.device, dtype=x.dtype)
 
         if return_dense_logits:
