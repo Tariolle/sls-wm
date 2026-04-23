@@ -275,33 +275,11 @@
 \end{frame}
 
 \begin{frame}{Data Augmentation: Spatial Shifts}
-  \textbf{Problem}: $\sim$250K frames is limited data $\Rightarrow$ overfitting risk
-
-  \vspace{0.3em}
-  \textbf{Solution}: apply vertical pixel shifts at the dataset level, used across all training phases
 
   \begin{center}
-  \resizebox{0.85\textwidth}{!}{%
-  \begin{tikzpicture}[
-    block/.style={rectangle, draw=vcolor, fill=vcolor!15, rounded corners, minimum height=0.8cm, align=center, font=\scriptsize, line width=0.6pt},
-    arr/.style={-{Stealth[length=2.5mm]}, thick},
-    lbl/.style={font=\tiny, align=center},
-  ]
-    \node[block] (frame) {$\mathbf{x}_t$};
-    \node[block, right=0.8cm of frame] (shift) {Vertical shift\\$\{-4,-2,0,2,4\}$};
-    \node[block, right=0.8cm of shift] (out) {$\mathbf{x}'_t$};
-
-    \draw[arr] (frame) -- (shift);
-    \draw[arr] (shift) -- (out);
-  \end{tikzpicture}%
-  }
+    \includegraphics[height=1.0\textheight]{vertical_shifts.png}
   \end{center}
 
-  \begin{itemize}
-    \item \nshifts{} vertical shifts $\times$ \nbaseepisodes{} episodes $=$ \textbf{\naugeps{} augmented episodes}
-    \item Vertical shifts simulate different stage elevations (physically valid)
-    \item Edge padding to fill shifted borders
-  \end{itemize}
 \end{frame}
 
 % ==========================================================
