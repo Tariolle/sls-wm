@@ -10,9 +10,19 @@
 #   1. DROP use_recon / recon_weight / alpha_uniform (pixel MSE decoder and
 #      CvM marginal uniform reg). No more decoder at train time; posthoc
 #      decoder script re-inits its own for visualization.
-#   2. ADD SIGReg (sigreg_weight=0.1, LeWM default). Per-position Epps-Pulley
-#      test against N(0, I_4) on the pre-sigmoid encoder output, averaged
-#      across the 64 spatial positions. One tunable lambda.
+#   2. ADD SIGReg (sigreg_weight=10.0, rescaled from LeWM default 0.1).
+#      Per-position Epps-Pulley test against N(0, I_4) on the pre-sigmoid
+#      encoder output, averaged across the 64 spatial positions. The paper
+#      default lambda=0.1 is tied to their loss magnitudes: LeWM's SIGReg
+#      loss starts near 40 and the MSE prediction loss near 0.25, so
+#      0.1*SIGReg ~16x the prediction loss at init. Our CE token loss
+#      starts near 4.5 and SIGReg near 0.14 (conv encoders produce roughly-
+#      Gaussian outputs at init, unlike ViT post-LayerNorm), so lambda=0.1
+#      makes SIGReg's contribution ~0.003x CE -- regularizer becomes a
+#      spectator, CE wins the race to trivial code collapse (E6.13 v1 at
+#      lambda=0.1: val ppl 18.7% -> 1.9% between epochs 5 and 6). Bumped
+#      to 10.0 to match LeWM's effective regularization strength for our
+#      scales. Will bisect from here if it over- or under-regularizes.
 #   3. KEEP E6.12's grad-skip safety net (threshold=20, warmup=15 epochs).
 #      Clean-training recipe should not trip it, but the insurance is cheap.
 #   4. controller_ppo.jump_penalty: 0.25 -> 0.15 (carried from E6.12;
@@ -57,7 +67,7 @@ transformer:
   grad_clip: 10.0
   grad_skip_threshold: 20.0
   grad_skip_warmup_epochs: 15
-  sigreg_weight: 0.1
+  sigreg_weight: 10.0
   sigreg_projections: 1024
   sigreg_knots: 17
   sigreg_knot_min: 0.2
