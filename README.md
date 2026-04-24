@@ -32,7 +32,7 @@ Three components, trained in two stages (world model first, then controller):
 | **M** (Memory) | Causal transformer with AdaLN-Zero action conditioning, QK-norm, 3D-RoPE (row, col, frame) | Joint with V: token CE + SLS-weighted targets, focal loss |
 | **C** (Controller) | MLP policy on transformer hidden state $h_t$ | BC warm-start on expert demos, then RL in imagination |
 
-The transformer predicts next-frame token logits; cross-entropy targets come from the online FSQ encoder. Per-group gradient clipping (encoder and transformer clipped independently at the same norm) prevents the pixel-MSE gradient from saturating the prediction-side budget during warm-up. A separate `scripts/fsq_sensitivity.py` probe measures per-dimension reconstruction sensitivity and cross-dimension coupling of any trained codebook, retained as an analysis tool, not a hyperparameter pipeline.
+The transformer predicts next-frame token logits; cross-entropy targets come from the online FSQ encoder. A single global gradient-norm clip (10.0) is applied across the combined encoder + transformer parameter set. A separate `scripts/fsq_sensitivity.py` probe measures per-dimension reconstruction sensitivity and cross-dimension coupling of any trained codebook, retained as an analysis tool, not a hyperparameter pipeline.
 
 ## Running the code
 
