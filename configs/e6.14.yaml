@@ -1,0 +1,113 @@
+# E6.14 -- E6.10 baseline + jump_penalty=0.15.
+#
+# Forks E6.10 (the last known-stable WM recipe) and carries forward the
+# only orthogonal tweak that survived the failed E6.12 (slim WM) and E6.13
+# (SIGReg) detours: controller_ppo.jump_penalty 0.25 -> 0.15. Everything
+# else identical to E6.10: 512d/8L/8H transformer, joint FSQ+transformer,
+# pixel MSE recon (use_recon=true), Gaussian SLS sigma=0.7, single-group
+# AdamW, grad_clip=10.0.
+#
+# Why this config:
+#   - E6.12 (slim WM): two encoder-collapse events from gradient spikes.
+#     Slim track abandoned; recon=0.3 + tighter capacity broke HP balance.
+#   - E6.13 (SIGReg replaces recon): SIGReg curves matched LeWM's shape
+#     and the codebook stayed healthy, but train token loss plateaued at
+#     ~3.4 (vs E6.10's ~2.5) and death_F1 stayed at 0 across 49 epochs.
+#     SIGReg constrains batch-distribution Gaussianity but provides no
+#     per-frame fidelity signal -- pixel MSE was doing both jobs in
+#     E6.10. Discrete-CE prediction (ours) doesn't supply that fidelity
+#     either, unlike LeWM's continuous-MSE prediction.
+#
+# Ship E6.10 chassis as-is, attack the controller plateau through the
+# WM<->controller interface (h_t readout, dream policy, etc.) instead of
+# trying to reshape the latent geometry upstream.
+
+model:
+  vocab_size: 625
+  embed_dim: 512
+  n_heads: 8
+  n_layers: 8
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [5, 5, 5, 5]
+  dropout: 0.10
+  adaln: true
+
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 200
+  batch_size: 1024
+  lr: 0.001
+  lr_min: 0.00005
+  weight_decay: 0.001
+  cpc_weight: 1.0
+  token_noise: 0.0
+  fsq_noise: 0.05
+  label_smoothing: 0.1
+  fsq_kernel: gaussian
+  fsq_sigma: 0.7
+  fsq_dim_weights: [1.0, 1.0, 1.0, 1.0]
+  focal_gamma: 2.0
+  death_oversample: 4
+  seed: 42
+  checkpoint_dir: checkpoints_e6.14
+  joint: true
+  single_group: true
+  grad_clip: 10.0
+  alpha_uniform: 0.0
+  shift_max: 4
+  use_cpc: false
+  use_recon: true
+  learnable_gamma: false
+
+posthoc_decoder:
+  transformer_checkpoint: checkpoints_e6.14/transformer_best.pt
+  fsq_checkpoint: checkpoints_e6.14/fsq_best.pt
+  epochs: 30
+  batch_size: 512
+  lr: 0.001
+  seed: 42
+  checkpoint_dir: checkpoints_e6.14
+
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_e6.14/transformer_best.pt
+  epochs: 50
+  batch_size: 512
+  lr: 0.0005
+  weight_decay: 0.0001
+  jump_class_weight: 1.5
+  controller_dropout: 0.0
+  val_ratio: 0.1
+  token_embed_dim: 16
+  temporal_dim: 32
+  seed: 42
+  checkpoint_dir: checkpoints_e6.14
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_e6.14/transformer_best.pt
+  pretrained: checkpoints_e6.14/controller_bc_best.pt
+  amp_dtype: bfloat16
+  n_iterations: 5000
+  n_episodes: 4096
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 2048
+  lr_warmup_iters: 50
+  entropy_coeff: 0.001
+  jump_penalty: 0.15
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 25
+  death_threshold: 0.5
+  token_embed_dim: 16
+  temporal_dim: 32
+  controller_dropout: 0.0
+  n_eval_episodes: 512
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_e6.14

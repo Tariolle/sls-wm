@@ -579,30 +579,27 @@ class JointStep(nn.Module):
     and applied via torch.where (also safe). `apply_fsq_noise` is
     branch-free, so the whole path is capturable.
 
-    Construction stores fixed hparams (sigreg_weight, ...) so the compiled
+    Construction stores fixed hparams (alpha_uniform, ...) so the compiled
     graph specialises on them. Changing any of these across calls triggers
     recompilation, which is fine - they are constants.
     """
 
-    def __init__(self, fsq, wm, *,
+    def __init__(self, fsq, wm, *, alpha_uniform,
                  label_smoothing, focal_gamma, token_noise, fsq_noise,
-                 shift_max=0,
-                 sigreg_weight=0.0, sigreg_projections=1024,
-                 sigreg_knots=17, sigreg_knot_max=3.0,
+                 shift_max=0, use_recon=True, recon_weight=1.0,
                  neighbor_table=None, neighbor_counts=None,
                  soft_target_matrix=None,
                  fsq_levels=None, fsq_sigma=0.9):
         super().__init__()
         self.fsq = fsq
         self.wm = wm
+        self.alpha_uniform = float(alpha_uniform)
         self.label_smoothing = float(label_smoothing)
         self.focal_gamma = float(focal_gamma)
         self.token_noise = float(token_noise)
         self.fsq_noise = float(fsq_noise)
-        self.sigreg_weight = float(sigreg_weight)
-        self.sigreg_projections = int(sigreg_projections)
-        self.sigreg_knots = int(sigreg_knots)
-        self.sigreg_knot_max = float(sigreg_knot_max)
+        self.use_recon = bool(use_recon)
+        self.recon_weight = float(recon_weight)
         self.fsq_sigma = float(fsq_sigma)
         if fsq_levels is not None:
             coords = _fsq_coords(fsq_levels)
@@ -625,7 +622,7 @@ class JointStep(nn.Module):
             self._has_soft = False
 
     def forward(self, raw_frames, actions, is_death):
-        from deepdash.sigreg import sigreg_per_position
+        from deepdash.fsq import fsqvae_loss, fsq_marginal_uniform_reg
 
         m = _unwrap(self.wm)
         K = m.context_frames
@@ -643,21 +640,40 @@ class JointStep(nn.Module):
             row_idx = (torch.arange(H, device=raw_frames.device) - dy).clamp(0, H - 1)
             raw_frames = raw_frames.index_select(-2, row_idx)
 
-        z_e_all, z_q_all, indices_all, _recon_unused, frames_f = _encode_joint(
+        z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
             self.fsq, raw_frames, K, tpf, fsq_dim,
-            run_decoder=False)
+            run_decoder=self.use_recon)
+        # Do not detach z_q in the use_recon=False path: under
+        # torch.compile AOT autograd, detaching the only grad-bearing
+        # intermediate appears to eliminate the backward graph for the
+        # entire function, yielding loss.grad_fn=None. Let z_q carry its
+        # grad through; fsq encoder params accumulate grads but LR=0 on
+        # the fsq_encoder optimizer group makes them inert. Decoder is
+        # still skipped via run_decoder=self.use_recon above, so the net
+        # memory footprint is below the pre-freeze phase.
 
-        # Per-(time, position) SIGReg on the pre-sigmoid encoder output.
-        # Treats each (t, h, w) triple as an independent D-dim distribution
-        # of B samples and pushes each toward N(0, I_D). Standard Epps-Pulley
-        # N-multiplier is baked in (see deepdash/sigreg.py). Matches LeWM's
-        # reference SIGReg implementation. Two-loss-total design: CE + SIGReg.
-        sigreg_loss = sigreg_per_position(
-            z_e_all,  # (B, K+1, D, H, W)
-            n_projections=self.sigreg_projections,
-            n_knots=self.sigreg_knots,
-            knot_max=self.sigreg_knot_max,
-        )
+        frame_last = frames_f[:, K - 1]
+        frame_tgt = frames_f[:, K]
+
+        if self.alpha_uniform > 0.0:
+            B_, K1_, D_, H_, W_ = z_e_all.shape
+            z_bounded_all = self.fsq.fsq.bound(
+                z_e_all.reshape(B_ * K1_, D_, H_, W_)
+            ).view(B_, K1_, D_, H_, W_)
+            uniform_loss = fsq_marginal_uniform_reg(
+                z_bounded_all, self.fsq.fsq.half_levels)
+        else:
+            uniform_loss = torch.zeros((), device=raw_frames.device,
+                                       dtype=frames_f.dtype)
+
+        if self.use_recon:
+            recon_last = recon_all[:, K - 1]
+            recon_tgt = recon_all[:, K]
+            recon_loss = (fsqvae_loss(recon_last, frame_last)
+                          + fsqvae_loss(recon_tgt, frame_tgt)) / 2
+        else:
+            recon_loss = torch.zeros((), device=raw_frames.device,
+                                     dtype=frames_f.dtype)
 
         frame_tokens = _build_frame_tokens_joint(
             indices_all, is_death, alive_tok, death_tok)
@@ -721,7 +737,9 @@ class JointStep(nn.Module):
                 label_smoothing=self.label_smoothing,
             )
 
-        loss = token_loss + self.sigreg_weight * sigreg_loss
+        loss = (self.recon_weight * recon_loss
+                + self.alpha_uniform * uniform_loss
+                + token_loss)
 
         # Per-batch metric scalars (0-dim tensors). Caller does .item()
         # outside the compiled boundary.
@@ -748,7 +766,8 @@ class JointStep(nn.Module):
 
         metrics = {
             "token_loss": token_loss.detach(),
-            "sigreg_loss": sigreg_loss.detach(),
+            "recon_loss": recon_loss.detach(),
+            "uniform_loss": uniform_loss.detach(),
             "correct": correct,
             "n_tokens": n_tokens,
             "death_tp": tp,
@@ -800,7 +819,8 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
     is_cuda = device.type == "cuda"
 
     total_token_loss = 0.0
-    total_sigreg = 0.0
+    total_recon = 0.0
+    total_unif = 0.0
     total_correct = 0
     total_tokens = 0
     tp = fp = fn = 0
@@ -900,19 +920,21 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
             fsq_norm.detach().float(),
             wm_norm.detach().float(),
             metrics["token_loss"].detach().float(),
-            metrics["sigreg_loss"].detach().float(),
+            metrics["recon_loss"].detach().float(),
+            metrics["uniform_loss"].detach().float(),
             metrics["correct"].detach().float(),
             metrics["n_tokens"].detach().float(),
             metrics["death_tp"].detach().float(),
             metrics["death_fp"].detach().float(),
             metrics["death_fn"].detach().float(),
         ]).tolist()
-        (fsq_n, wm_n, tok_l, sig_l,
+        (fsq_n, wm_n, tok_l, rec_l, unif_l,
          cor, nt, d_tp, d_fp, d_fn) = scalars
         enc_grad_sq += fsq_n ** 2
         tr_grad_sq += wm_n ** 2
         total_token_loss += tok_l * B
-        total_sigreg += sig_l * B
+        total_recon += rec_l * B
+        total_unif += unif_l * B
         total_correct += int(cor)
         total_tokens += int(nt)
         tp += int(d_tp)
@@ -953,7 +975,8 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
         "death_prec": death_prec,
         "death_rec": death_rec,
         "death_f1": death_f1,
-        "sigreg": total_sigreg / n_samples,
+        "recon": total_recon / n_samples,
+        "unif": total_unif / n_samples,
         "enc_grad_rms": (enc_grad_sq / max(1, n_batches)) ** 0.5,
         "tr_grad_rms": (tr_grad_sq / max(1, n_batches)) ** 0.5,
         "code_usage_pct": code_usage_pct,
@@ -979,7 +1002,8 @@ def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
     use_amp = device.type == "cuda"
 
     total_token_loss = 0.0
-    total_sigreg = 0.0
+    total_recon = 0.0
+    total_unif = 0.0
     total_correct = 0
     total_tokens = 0
     tp = fp = fn = 0
@@ -998,17 +1022,19 @@ def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
         code_counts_gpu += metrics["code_counts"]
         scalars = torch.stack([
             metrics["token_loss"].detach().float(),
-            metrics["sigreg_loss"].detach().float(),
+            metrics["recon_loss"].detach().float(),
+            metrics["uniform_loss"].detach().float(),
             metrics["correct"].detach().float(),
             metrics["n_tokens"].detach().float(),
             metrics["death_tp"].detach().float(),
             metrics["death_fp"].detach().float(),
             metrics["death_fn"].detach().float(),
         ]).tolist()
-        (tok_l, sig_l,
+        (tok_l, rec_l, unif_l,
          cor, nt, d_tp, d_fp, d_fn) = scalars
         total_token_loss += tok_l * B
-        total_sigreg += sig_l * B
+        total_recon += rec_l * B
+        total_unif += unif_l * B
         total_correct += int(cor)
         total_tokens += int(nt)
         tp += int(d_tp)
@@ -1030,7 +1056,8 @@ def val_epoch_joint(joint_step, loader, device, amp_dtype=torch.bfloat16):
         "death_prec": death_prec,
         "death_rec": death_rec,
         "death_f1": death_f1,
-        "sigreg": total_sigreg / n_samples,
+        "recon": total_recon / n_samples,
+        "unif": total_unif / n_samples,
         "code_usage_pct": code_usage_pct,
         "code_ppl_pct": code_ppl_pct,
     }
@@ -1097,19 +1124,12 @@ def main():
                         help="Joint FSQ+Transformer training (STE-routed).")
     parser.add_argument("--fsq-lr", type=float, default=None,
                         help="Peak LR for the FSQ encoder param group (joint mode).")
-    parser.add_argument("--sigreg-weight", type=float, default=None,
-                        help="Weight (lambda) on the SIGReg anti-collapse "
-                             "regularizer. LeWM default 0.1; 0 disables.")
-    parser.add_argument("--sigreg-projections", type=int, default=None,
-                        help="M, random unit-norm projection directions per "
-                             "position. LeWM default 1024.")
-    parser.add_argument("--sigreg-knots", type=int, default=None,
-                        help="K, trapezoid integration knots for the "
-                             "Epps-Pulley test statistic. LeWM default 17.")
-    parser.add_argument("--sigreg-knot-max", type=float, default=None,
-                        help="Upper bound of SIGReg integration range "
-                             "(integral runs over [0, knot_max]). LeWM "
-                             "code default 3.0.")
+    parser.add_argument("--alpha-uniform", type=float, default=None,
+                        help="Weight on CWU anti-collapse regularizer.")
+    parser.add_argument("--recon-weight", type=float, default=None,
+                        help="Scalar multiplier on FSQ recon loss in the "
+                             "joint total. Default 1.0 (no scaling); "
+                             "<1 lets the prediction loss dominate.")
     parser.add_argument("--grad-skip-threshold", type=float, default=None,
                         help="If pre-clip grad norm exceeds this, skip the "
                              "optimizer step for that batch. 0 or None "
@@ -1123,6 +1143,10 @@ def main():
                              "Default 15 when grad_skip_threshold is set.")
     parser.add_argument("--shift-max", type=int, default=None,
                         help="Max per-batch vertical shift pixels. 0 disables.")
+    parser.add_argument("--use-recon", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Include FSQ recon loss in the joint training loss. "
+                             "When off, train a post-hoc decoder separately.")
     parser.add_argument("--learnable-gamma", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="Gamma as nn.Parameter (target distribution rebuilt "
@@ -1248,6 +1272,7 @@ def main():
                     train_weights.append(
                         float(args.death_oversample) if is_death_frame else 1.0)
 
+    use_recon = bool(getattr(args, "use_recon", True) if getattr(args, "use_recon", None) is not None else True)
     learnable_gamma = bool(getattr(args, "learnable_gamma", False) if getattr(args, "learnable_gamma", None) is not None else False)
 
     # Capacity-ratio gamma init: w_d = D * L_d / sum(L), gamma_d = ln(w_d).
@@ -1499,36 +1524,29 @@ def main():
             fsq_levels=args.fsq_levels,
             fsq_sigma=float(args.fsq_sigma) if args.fsq_sigma else 0.9,
         )
-        sigreg_weight = float(getattr(args, "sigreg_weight", None) or 0.0)
-        sigreg_projections = int(getattr(args, "sigreg_projections", None) or 1024)
-        sigreg_knots = int(getattr(args, "sigreg_knots", None) or 17)
-        sigreg_knot_max = float(getattr(args, "sigreg_knot_max", None) or 3.0)
-        sigreg_kwargs = dict(
-            sigreg_weight=sigreg_weight,
-            sigreg_projections=sigreg_projections,
-            sigreg_knots=sigreg_knots,
-            sigreg_knot_max=sigreg_knot_max,
-        )
+        recon_weight = float(getattr(args, "recon_weight", None) or 1.0)
         joint_step_train = JointStep(
             fsq=fsq, wm=model,
+            alpha_uniform=args.alpha_uniform,
             label_smoothing=args.label_smoothing,
             focal_gamma=args.focal_gamma,
             token_noise=args.token_noise, fsq_noise=args.fsq_noise,
-            shift_max=shift_max,
+            shift_max=shift_max, use_recon=use_recon,
+            recon_weight=recon_weight,
             neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
             soft_target_matrix=soft_tm_for_joint,
-            **sigreg_kwargs,
             **joint_kwargs_common,
         ).to(device)
         joint_step_val = JointStep(
             fsq=fsq, wm=model,
+            alpha_uniform=args.alpha_uniform,
             label_smoothing=args.label_smoothing,
             focal_gamma=args.focal_gamma,
             token_noise=0.0, fsq_noise=0.0,          # no noise at eval
-            shift_max=0,                              # no shift at eval
+            shift_max=0, use_recon=use_recon,         # no shift at eval
+            recon_weight=recon_weight,
             neighbor_table=None, neighbor_counts=None,
             soft_target_matrix=soft_tm_for_joint,
-            **sigreg_kwargs,
             **joint_kwargs_common,
         ).to(device)
 
@@ -1575,7 +1593,8 @@ def main():
         scheduler._last_lr = [group["lr"] for group in optimizer.param_groups]
 
     log_path = ckpt_dir / "transformer_log.csv"
-    log_sigreg = joint and float(getattr(args, "sigreg_weight", 0.0) or 0.0) > 0
+    log_unif = joint and float(getattr(args, "alpha_uniform", 0.0) or 0.0) > 0
+    log_recon = joint and use_recon
     log_header = ["epoch", "train_total", "train_loss", "train_acc",
                   "train_death_prec", "train_death_rec", "train_death_f1",
                   "val_total", "val_loss", "val_acc",
@@ -1583,11 +1602,15 @@ def main():
                   "gap", "lr", "time_s"]
     if joint:
         log_header.append("fsq_train_total")
-        if log_sigreg:
-            log_header.append("train_sigreg")
+        if log_recon:
+            log_header.append("train_recon")
+        if log_unif:
+            log_header.append("train_unif")
         log_header.append("fsq_val_total")
-        if log_sigreg:
-            log_header.append("val_sigreg")
+        if log_recon:
+            log_header.append("val_recon")
+        if log_unif:
+            log_header.append("val_unif")
         log_header += ["fsq_gap",
                        "encoder_grad_rms", "transformer_grad_rms",
                        "fsq_lr",
@@ -1676,12 +1699,15 @@ def main():
             val_total = val_loss
             gap = val_total - train_total
 
-            # Joint-mode FSQ-side totals: only the SIGReg term now contributes
-            # to the encoder-side loss (no pixel MSE, no CvM).
+            # Joint-mode FSQ-side totals mirror the transformer's per-
+            # component aggregate so the wandb overview and console line
+            # are symmetric.
             if joint:
-                sw = float(getattr(args, "sigreg_weight", 0.0) or 0.0)
-                fsq_train_total = sw * train_metrics["sigreg"]
-                fsq_val_total = sw * val_metrics["sigreg"]
+                a_u = args.alpha_uniform
+                fsq_train_total = (train_metrics["recon"]
+                                   + a_u * train_metrics["unif"])
+                fsq_val_total = (val_metrics["recon"]
+                                 + a_u * val_metrics["unif"])
                 fsq_gap = fsq_val_total - fsq_train_total
 
             print(
@@ -1693,17 +1719,21 @@ def main():
                 f"gap={gap:+.4f} | LR: {lr:.1e}"
             )
             if joint:
-                train_sigreg_str = (f"sigreg={train_metrics['sigreg']:.4e} "
-                                    if log_sigreg else "")
-                val_sigreg_str = (f"sigreg={val_metrics['sigreg']:.4e} "
-                                  if log_sigreg else "")
+                train_recon_str = (f"recon={train_metrics['recon']:.4f} "
+                                    if log_recon else "")
+                val_recon_str = (f"recon={val_metrics['recon']:.4f} "
+                                  if log_recon else "")
+                train_unif_str = (f"unif={train_metrics['unif']:.4e} "
+                                   if log_unif else "")
+                val_unif_str = (f"unif={val_metrics['unif']:.4e} "
+                                 if log_unif else "")
                 skipped = train_metrics.get("n_skipped", 0)
                 skip_str = (f" | skipped={skipped}/{train_metrics['n_batches']}"
                             if skipped > 0 else "")
                 print(
                     f"  FSQ | "
-                    f"Train: total={fsq_train_total:.4f} {train_sigreg_str}| "
-                    f"Val: total={fsq_val_total:.4f} {val_sigreg_str}| "
+                    f"Train: total={fsq_train_total:.4f} {train_recon_str}{train_unif_str}| "
+                    f"Val: total={fsq_val_total:.4f} {val_recon_str}{val_unif_str}| "
                     f"gap={fsq_gap:+.4f} | "
                     f"grad_rms[enc={train_metrics['enc_grad_rms']:.2e} "
                     f"tr={train_metrics['tr_grad_rms']:.2e}]"
@@ -1738,11 +1768,15 @@ def main():
             ]
             if joint:
                 row.append(f"{fsq_train_total:.6f}")
-                if log_sigreg:
-                    row.append(f"{train_metrics['sigreg']:.6e}")
+                if log_recon:
+                    row.append(f"{train_metrics['recon']:.6f}")
+                if log_unif:
+                    row.append(f"{train_metrics['unif']:.6e}")
                 row.append(f"{fsq_val_total:.6f}")
-                if log_sigreg:
-                    row.append(f"{val_metrics['sigreg']:.6e}")
+                if log_recon:
+                    row.append(f"{val_metrics['recon']:.6f}")
+                if log_unif:
+                    row.append(f"{val_metrics['unif']:.6e}")
                 row += [
                     f"{fsq_gap:.4f}",
                     f"{train_metrics['enc_grad_rms']:.6e}",
@@ -1785,9 +1819,12 @@ def main():
                     "fsq/val/code_ppl_pct": val_metrics["code_ppl_pct"],
                     "transformer/train/grad_rms": train_metrics["tr_grad_rms"],
                 })
-                if log_sigreg:
-                    wandb_payload["fsq/train/sigreg"] = train_metrics["sigreg"]
-                    wandb_payload["fsq/val/sigreg"] = val_metrics["sigreg"]
+                if log_recon:
+                    wandb_payload["fsq/train/recon"] = train_metrics["recon"]
+                    wandb_payload["fsq/val/recon"] = val_metrics["recon"]
+                if log_unif:
+                    wandb_payload["fsq/train/unif"] = train_metrics["unif"]
+                    wandb_payload["fsq/val/unif"] = val_metrics["unif"]
                 if model.sls_gamma is not None:
                     gamma_vals = model.sls_gamma.detach().cpu().tolist()
                     for i, v in enumerate(gamma_vals):
