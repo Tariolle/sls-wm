@@ -1,0 +1,118 @@
+# E6.13 -- SIGReg-regularized world model, two-loss JEPA recipe.
+#
+# Upstream redesign of the latent geometry after the E6.12 slim-WM track
+# failed (two encoder-collapse events during gradient spikes). Instead of
+# shrinking the transformer, keep E6.10's 512d/8L/8H chassis verbatim and
+# replace the ad-hoc pixel-anchor + CvM stack with a single principled
+# regularizer -- SIGReg from LeWorldModel (Maes et al., arXiv:2603.19312).
+#
+# Diff from E6.10:
+#   1. DROP use_recon / recon_weight / alpha_uniform (pixel MSE decoder and
+#      CvM marginal uniform reg). No more decoder at train time; posthoc
+#      decoder script re-inits its own for visualization.
+#   2. ADD SIGReg (sigreg_weight=0.1, LeWM default). Per-position Epps-Pulley
+#      test against N(0, I_4) on the pre-sigmoid encoder output, averaged
+#      across the 64 spatial positions. One tunable lambda.
+#   3. KEEP E6.12's grad-skip safety net (threshold=20, warmup=15 epochs).
+#      Clean-training recipe should not trip it, but the insurance is cheap.
+#   4. controller_ppo.jump_penalty: 0.25 -> 0.15 (carried from E6.12;
+#      controller-side tweak unrelated to the WM change).
+#
+# Total world-model loss terms after this change: 2 (CE + lambda*SIGReg).
+# First discrete-bottleneck JEPA with SIGReg -- genuine novelty beat for
+# the 2026-05-31 paper freeze.
+
+model:
+  vocab_size: 625
+  embed_dim: 512
+  n_heads: 8
+  n_layers: 8
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [5, 5, 5, 5]
+  dropout: 0.10
+  adaln: true
+
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 200
+  batch_size: 1024
+  lr: 0.001
+  lr_min: 0.00005
+  weight_decay: 0.001
+  cpc_weight: 1.0
+  token_noise: 0.0
+  fsq_noise: 0.05
+  label_smoothing: 0.1
+  fsq_kernel: gaussian
+  fsq_sigma: 0.7
+  fsq_dim_weights: [1.0, 1.0, 1.0, 1.0]
+  focal_gamma: 2.0
+  death_oversample: 4
+  seed: 42
+  checkpoint_dir: checkpoints_e6.13
+  joint: true
+  single_group: true
+  grad_clip: 10.0
+  grad_skip_threshold: 20.0
+  grad_skip_warmup_epochs: 15
+  sigreg_weight: 0.1
+  sigreg_projections: 1024
+  sigreg_knots: 17
+  sigreg_knot_min: 0.2
+  sigreg_knot_max: 4.0
+  shift_max: 4
+  use_cpc: false
+  learnable_gamma: false
+
+posthoc_decoder:
+  transformer_checkpoint: checkpoints_e6.13/transformer_best.pt
+  fsq_checkpoint: checkpoints_e6.13/fsq_best.pt
+  epochs: 30
+  batch_size: 512
+  lr: 0.001
+  seed: 42
+  checkpoint_dir: checkpoints_e6.13
+
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_e6.13/transformer_best.pt
+  epochs: 50
+  batch_size: 512
+  lr: 0.0005
+  weight_decay: 0.0001
+  jump_class_weight: 1.5
+  controller_dropout: 0.0
+  val_ratio: 0.1
+  token_embed_dim: 16
+  temporal_dim: 32
+  seed: 42
+  checkpoint_dir: checkpoints_e6.13
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_e6.13/transformer_best.pt
+  pretrained: checkpoints_e6.13/controller_bc_best.pt
+  amp_dtype: bfloat16
+  n_iterations: 5000
+  n_episodes: 4096
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 2048
+  lr_warmup_iters: 50
+  entropy_coeff: 0.001
+  jump_penalty: 0.15
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 25
+  death_threshold: 0.5
+  token_embed_dim: 16
+  temporal_dim: 32
+  controller_dropout: 0.0
+  n_eval_episodes: 512
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_e6.13
