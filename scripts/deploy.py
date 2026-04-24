@@ -31,7 +31,7 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from deepdash.fsq import FSQVAE
 from deepdash.world_model import WorldModel
-from deepdash.controller import MLPPolicy
+from deepdash.controller import CNNPolicy
 
 
 # Win32 helpers for topmost window
@@ -122,6 +122,7 @@ def main():
 
     from deepdash.config import apply_config
     apply_config(args)
+    apply_config(args, section="controller_ppo")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -152,7 +153,14 @@ def main():
     wm.eval()
 
     print("Loading Controller...")
-    controller = MLPPolicy(h_dim=args.embed_dim).to(device)
+    grid_size = int(args.tokens_per_frame ** 0.5)
+    controller = CNNPolicy(
+        vocab_size=args.vocab_size,
+        grid_size=grid_size,
+        token_embed_dim=getattr(args, 'token_embed_dim', 16),
+        h_dim=args.embed_dim,
+        temporal_dim=getattr(args, 'temporal_dim', 32),
+    ).to(device)
     state = torch.load(args.controller_checkpoint, map_location=device,
                        weights_only=True)
     # controller_ppo_best.pt is a raw state_dict; controller_ppo_latest.pt is
@@ -320,7 +328,9 @@ def main():
         # --- Controller: decide action ---
         t1 = time.perf_counter()
         with torch.no_grad():
-            prob, _ = controller(h_t.float())
+            # ctx_tokens is (K, 64); controller wants (B=1, 64) = current frame
+            z_t = ctx_tokens[-1:].clone()
+            prob, _ = controller(z_t, h_t.float())
             jump = prob[0].item() > args.jump_threshold
         t_ctrl = time.perf_counter() - t1
 

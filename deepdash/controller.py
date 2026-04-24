@@ -4,11 +4,13 @@ CMA-ES Controller: numpy-based, for evolutionary optimization.
 PolicyController: nn.Module MLP, for Reinforce policy gradient training.
 TransformerPolicy: ViT encoder (DART-style), sees individual tokens with positions.
 MLPPolicy: MLP on h_t (TWISTER/DreamerV3-style), actor-critic.
+CNNPolicy: CNN on 8x8 token grid + h_t (IRIS/DIAMOND-style), actor-critic.
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class Controller:
@@ -299,4 +301,80 @@ class MLPPolicy(nn.Module):
     def act_deterministic(self, h_t):
         """Greedy action for evaluation."""
         prob, _ = self.forward(h_t)
+        return (prob > 0.5).long()
+
+
+class CNNPolicy(nn.Module):
+    """CNN actor-critic on z_t (spatial) + compressed h_t (temporal).
+
+    Factorization of concerns:
+      - z_t path: FSQ token grid -> learnable embedding -> 2 strided convs
+        -> (64, 2, 2) = 256d, LayerNorm. Carries spatial info.
+      - h_t path: LayerNorm -> Linear(h_dim, temporal_dim=32) -> SiLU.
+        Bottleneck forces a compact temporal state (velocity, jump arc,
+        mode). Dim-imbalanced with spatial (256) >> temporal (32) so the
+        head is biased to read spatial features.
+
+    Init: orthogonal (Engstrom et al. "Implementation Matters").
+    """
+
+    def __init__(self, vocab_size=625, grid_size=8, token_embed_dim=16,
+                 h_dim=512, temporal_dim=32):
+        super().__init__()
+        self.grid_size = grid_size
+        self.temporal_dim = temporal_dim
+
+        self.token_embed = nn.Embedding(vocab_size, token_embed_dim)
+        self.conv1 = nn.Conv2d(token_embed_dim, 32, 3, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, 3, stride=2, padding=1)
+
+        cnn_out = 64 * (grid_size // 4) ** 2  # 256 for 8x8
+        self.spatial_norm = nn.LayerNorm(cnn_out)
+
+        self.h_norm = nn.LayerNorm(h_dim)
+        self.h_proj = nn.Linear(h_dim, temporal_dim)
+
+        head_input = cnn_out + temporal_dim
+        self.actor = nn.Linear(head_input, 1)
+        self.critic = nn.Linear(head_input, 1)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        gain_hidden = 2 ** 0.5  # sqrt(2), SiLU/ReLU effective gain
+        for m in (self.conv1, self.conv2, self.h_proj):
+            nn.init.orthogonal_(m.weight, gain=gain_hidden)
+            nn.init.zeros_(m.bias)
+        nn.init.orthogonal_(self.actor.weight, gain=0.01)
+        nn.init.zeros_(self.actor.bias)
+        nn.init.orthogonal_(self.critic.weight, gain=1.0)
+        nn.init.zeros_(self.critic.bias)
+
+    def _encode(self, token_ids, h_t):
+        B = token_ids.shape[0]
+        G = self.grid_size
+        x = self.token_embed(token_ids)              # (B, 64, E)
+        x = x.permute(0, 2, 1).reshape(B, -1, G, G)  # (B, E, 8, 8)
+        x = F.silu(self.conv1(x))                    # (B, 32, 4, 4)
+        x = F.silu(self.conv2(x))                    # (B, 64, 2, 2)
+        x = x.flatten(1)                              # (B, 256)
+        x = self.spatial_norm(x)
+
+        t = F.silu(self.h_proj(self.h_norm(h_t)))    # (B, temporal_dim)
+        return torch.cat([x, t], dim=1)               # (B, 256 + temporal_dim)
+
+    def forward(self, token_ids, h_t):
+        features = self._encode(token_ids, h_t)
+        prob = self.actor(features).squeeze(-1).sigmoid()
+        value = self.critic(features).squeeze(-1)
+        return prob, value
+
+    def act(self, token_ids, h_t):
+        prob, value = self.forward(token_ids, h_t)
+        dist = torch.distributions.Bernoulli(probs=prob)
+        action = dist.sample()
+        return action.long(), dist.log_prob(action), dist.entropy(), value
+
+    def act_deterministic(self, token_ids, h_t):
+        prob, _ = self.forward(token_ids, h_t)
         return (prob > 0.5).long()

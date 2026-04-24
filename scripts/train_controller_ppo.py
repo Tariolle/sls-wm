@@ -25,7 +25,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.world_model import WorldModel
-from deepdash.controller import MLPPolicy
+from deepdash.controller import CNNPolicy
 
 
 def load_episodes(episodes_dir, context_frames, vae=None, device=None):
@@ -111,8 +111,11 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
     alive = torch.ones(B, dtype=torch.bool, device=device)
     survival = torch.zeros(B, dtype=torch.float32, device=device)
 
+    TPF = ctx_tokens_np.shape[2]  # tokens per frame (no status)
+
     # Cached data for PPO
-    all_h_t = []             # (T, B, 256)
+    all_z_t = []             # (T, B, TPF)
+    all_h_t = []             # (T, B, 512)
     all_actions = []         # (T, B)
     all_old_log_probs = []   # (T, B)
     all_rewards = []         # (T, B)
@@ -131,13 +134,15 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
         alive &= ~died
         survival += alive.float()
 
+        # Controller sees current frame (last of context, strip status) + h_t
+        z_t = ctx_t[:, -1, :TPF]
+
         with torch.no_grad():
-            action, log_prob, _, value = controller.act(h_t.float())
+            action, log_prob, _, value = controller.act(z_t, h_t.float())
 
         if step >= warmup_steps:
             alive_mask = alive.float()
-            # .clone() so stored h_t is not aliased to any upstream buffer
-            # that might be reused on the next iteration.
+            all_z_t.append(z_t.clone())
             all_h_t.append(h_t.float().clone())
             all_actions.append(action)
             all_old_log_probs.append(log_prob)
@@ -158,7 +163,8 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
         return None, survival
 
     rollout = {
-        'h_t': torch.stack(all_h_t),                     # (T, B, 256)
+        'z_t': torch.stack(all_z_t),                      # (T, B, TPF)
+        'h_t': torch.stack(all_h_t),                      # (T, B, 512)
         'actions': torch.stack(all_actions),              # (T, B)
         'old_log_probs': torch.stack(all_old_log_probs),  # (T, B)
         'rewards': torch.stack(all_rewards),              # (T, B)
@@ -240,6 +246,7 @@ def ppo_update(controller, optimizer, rollout, advantages, returns,
         pct_normalizer.update(returns.reshape(-1))
 
     # Flatten rollout for minibatch sampling
+    z_t_flat = rollout['z_t'].reshape(N, -1)
     h_t_flat = rollout['h_t'].reshape(N, -1)
     actions_flat = rollout['actions'].reshape(N)
     old_log_probs_flat = rollout['old_log_probs'].reshape(N)
@@ -263,13 +270,14 @@ def ppo_update(controller, optimizer, rollout, advantages, returns,
         for start in range(0, len(perm), minibatch_size):
             idx = perm[start:start + minibatch_size]
 
+            mb_z_t = z_t_flat[idx]
             mb_h_t = h_t_flat[idx]
             mb_actions = actions_flat[idx]
             mb_advantages = advantages_flat[idx]
             mb_returns = returns_flat[idx]
 
             # Forward pass with current policy
-            prob, value = controller(mb_h_t)
+            prob, value = controller(mb_z_t, mb_h_t)
             prob = prob.clamp(1e-6, 1 - 1e-6)
             dist = torch.distributions.Bernoulli(probs=prob)
             log_prob = dist.log_prob(mb_actions.float())
@@ -348,7 +356,9 @@ def evaluate_fixed(model, controller, ctx_tokens_np, ctx_actions_np,
         alive &= ~died
         survival += alive.float()
 
-        action = controller.act_deterministic(h_t.float())
+        TPF = ctx_t.shape[2] - 1  # strip status column
+        z_t = ctx_t[:, -1, :TPF]
+        action = controller.act_deterministic(z_t, h_t.float())
         total_jumps += (action[alive] == 1).sum().item()
         total_actions += alive.sum().item()
 
@@ -400,6 +410,8 @@ def main():
     parser.add_argument("--n-layers", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--controller-dropout", type=float, default=None)
+    parser.add_argument("--token-embed-dim", type=int, default=None)
+    parser.add_argument("--temporal-dim", type=int, default=None)
     # Output / initialization
     parser.add_argument("--pretrained", type=str, default=None,
                         help="Path to BC-pretrained controller checkpoint")
@@ -489,12 +501,14 @@ def main():
         print("No tokenized episodes found.")
         return
 
-    # MLP actor-critic policy on h_t
-    controller = MLPPolicy(
+    # CNN actor-critic: z_t spatial (8x8 token grid) + compressed h_t temporal
+    grid_size = int(args.tokens_per_frame ** 0.5)
+    controller = CNNPolicy(
+        vocab_size=args.vocab_size,
+        grid_size=grid_size,
+        token_embed_dim=getattr(args, 'token_embed_dim', 16),
         h_dim=args.embed_dim,
-        mlp_hidden=getattr(args, 'mlp_hidden', 512),
-        mlp_layers=getattr(args, 'mlp_layers', 1),
-        dropout=getattr(args, 'controller_dropout', 0.0),
+        temporal_dim=getattr(args, 'temporal_dim', 32),
     ).to(device)
     if args.pretrained:
         state = torch.load(args.pretrained, map_location=device,
@@ -502,7 +516,9 @@ def main():
         controller.load_state_dict(state)
         print(f"Loaded pretrained controller from {args.pretrained}")
     n_params = sum(p.numel() for p in controller.parameters())
-    print(f"Controller: MLPPolicy h_dim={args.embed_dim} "
+    print(f"Controller: CNNPolicy vocab={args.vocab_size} "
+          f"embed={getattr(args, 'token_embed_dim', 16)} "
+          f"h_dim={args.embed_dim} temporal_dim={getattr(args, 'temporal_dim', 32)} "
           f"({n_params:,} params, actor-critic)")
 
     import copy

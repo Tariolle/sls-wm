@@ -33,7 +33,7 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.fsq import FSQVAE
 from deepdash.world_model import WorldModel
-from deepdash.controller import MLPPolicy
+from deepdash.controller import CNNPolicy
 
 
 def compute_val_set(death_dir, expert_dir):
@@ -184,8 +184,17 @@ def main():
     controller = None
     ctrl_path = Path(args.controller_checkpoint)
     if ctrl_path.exists():
-        controller = MLPPolicy(h_dim=args.embed_dim).to(device)
+        grid_size = int(args.tokens_per_frame ** 0.5)
+        controller = CNNPolicy(
+            vocab_size=args.vocab_size,
+            grid_size=grid_size,
+            token_embed_dim=getattr(args, 'token_embed_dim', 16),
+            h_dim=args.embed_dim,
+            temporal_dim=getattr(args, 'temporal_dim', 32),
+        ).to(device)
         state = torch.load(ctrl_path, map_location=device, weights_only=True)
+        if isinstance(state, dict) and "controller" in state:
+            state = state["ema_controller"] if "ema_controller" in state and state["ema_controller"] is not None else state["controller"]
         state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
         controller.load_state_dict(state)
         controller.eval()
@@ -340,7 +349,9 @@ def main():
             # Controller decides
             with torch.no_grad():
                 h_t = wm.encode_context(ctx_t, ctx_a)  # (1, D)
-                prob, _ = controller(h_t)
+                TPF = ctx_t.shape[2] - 1
+                z_t = ctx_t[:, -1, :TPF]
+                prob, _ = controller(z_t, h_t)
                 action = 1 if prob[0].item() > 0.5 else 0
         else:
             keys = pygame.key.get_pressed()

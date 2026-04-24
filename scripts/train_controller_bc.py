@@ -23,7 +23,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.wandb_utils import wandb_init, wandb_log, wandb_finish
 from deepdash.world_model import WorldModel
-from deepdash.controller import MLPPolicy
+from deepdash.controller import CNNPolicy
 
 
 def _unwrap(model):
@@ -145,7 +145,9 @@ def main():
     parser.add_argument("--context-frames", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--controller-dropout", type=float, default=None,
-                        help="Dropout in MLPPolicy trunk (BC only).")
+                        help="(Unused for CNNPolicy; kept for config compat.)")
+    parser.add_argument("--token-embed-dim", type=int, default=None,
+                        help="CNNPolicy token embedding dim.")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
@@ -251,18 +253,25 @@ def main():
         pos_weight = torch.tensor((1 - jump_ratio) / jump_ratio, device=device)
     print(f"Jump class weight: {pos_weight.item():.2f}x (data ratio: {(1-jump_ratio)/jump_ratio:.2f}x)")
 
-    # Initialize controller
-    controller = MLPPolicy(h_dim=args.embed_dim,
-                           dropout=args.controller_dropout,
-                           mlp_layers=getattr(args, 'mlp_layers', 1)).to(device)
-    print(f"MLPPolicy dropout: {args.controller_dropout}")
+    # Initialize controller (CNNPolicy: z_t spatial + h_t temporal)
+    grid_size = int(args.tokens_per_frame ** 0.5)
+    controller = CNNPolicy(
+        vocab_size=args.vocab_size,
+        grid_size=grid_size,
+        token_embed_dim=getattr(args, 'token_embed_dim', 16),
+        h_dim=args.embed_dim,
+    ).to(device)
     optimizer = torch.optim.AdamW(controller.parameters(),
                                   lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=args.lr * 0.01)
 
     n_params = sum(p.numel() for p in controller.parameters())
-    print(f"MLPPolicy: {n_params:,} parameters")
+    print(f"CNNPolicy: {n_params:,} parameters "
+          f"(vocab={args.vocab_size}, embed={getattr(args, 'token_embed_dim', 16)}, h_dim={args.embed_dim})")
+
+    # Precompute z_t (current frame = last ctx frame) for each sample
+    all_z_t = torch.from_numpy(ctx_tokens[:, -1].astype(np.int64))  # (N, 64)
 
     # Logging
     ckpt_dir = Path(args.checkpoint_dir)
@@ -288,11 +297,11 @@ def main():
             batch_perm = perm[start:start + args.batch_size]
             idx = train_idx[batch_perm]
 
-            tokens = all_target_tokens[idx].to(device)
+            z_t = all_z_t[idx].to(device)
             h_t = all_h_t[idx].to(device)
             actions = all_target_actions[idx].to(device)
 
-            features = controller._encode(h_t)
+            features = controller._encode(z_t, h_t)
             logits = controller.actor(features).squeeze(-1)
             loss = F.binary_cross_entropy_with_logits(
                 logits, actions, pos_weight=pos_weight)
@@ -320,11 +329,11 @@ def main():
             for start in range(0, len(val_idx), args.batch_size):
                 idx = val_idx[start:start + args.batch_size]
 
-                tokens = all_target_tokens[idx].to(device)
+                z_t = all_z_t[idx].to(device)
                 h_t = all_h_t[idx].to(device)
                 actions = all_target_actions[idx].to(device)
 
-                features = controller._encode(h_t)
+                features = controller._encode(z_t, h_t)
                 logits = controller.actor(features).squeeze(-1)
                 loss = F.binary_cross_entropy_with_logits(
                     logits, actions, pos_weight=pos_weight)
