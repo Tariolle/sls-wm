@@ -586,7 +586,7 @@ class JointStep(nn.Module):
 
     def __init__(self, fsq, wm, *, alpha_uniform,
                  label_smoothing, focal_gamma, token_noise, fsq_noise,
-                 shift_max=0, use_recon=True,
+                 shift_max=0, use_recon=True, recon_weight=1.0,
                  neighbor_table=None, neighbor_counts=None,
                  soft_target_matrix=None,
                  fsq_levels=None, fsq_sigma=0.9):
@@ -599,6 +599,7 @@ class JointStep(nn.Module):
         self.token_noise = float(token_noise)
         self.fsq_noise = float(fsq_noise)
         self.use_recon = bool(use_recon)
+        self.recon_weight = float(recon_weight)
         self.fsq_sigma = float(fsq_sigma)
         if fsq_levels is not None:
             coords = _fsq_coords(fsq_levels)
@@ -736,7 +737,7 @@ class JointStep(nn.Module):
                 label_smoothing=self.label_smoothing,
             )
 
-        loss = (recon_loss
+        loss = (self.recon_weight * recon_loss
                 + self.alpha_uniform * uniform_loss
                 + token_loss)
 
@@ -1107,6 +1108,10 @@ def main():
                         help="Peak LR for the FSQ encoder param group (joint mode).")
     parser.add_argument("--alpha-uniform", type=float, default=None,
                         help="Weight on CWU anti-collapse regularizer.")
+    parser.add_argument("--recon-weight", type=float, default=None,
+                        help="Scalar multiplier on FSQ recon loss in the "
+                             "joint total. Default 1.0 (no scaling); "
+                             "<1 lets the prediction loss dominate.")
     parser.add_argument("--shift-max", type=int, default=None,
                         help="Max per-batch vertical shift pixels. 0 disables.")
     parser.add_argument("--use-recon", action=argparse.BooleanOptionalAction,
@@ -1482,6 +1487,7 @@ def main():
             fsq_levels=args.fsq_levels,
             fsq_sigma=float(args.fsq_sigma) if args.fsq_sigma else 0.9,
         )
+        recon_weight = float(getattr(args, "recon_weight", None) or 1.0)
         joint_step_train = JointStep(
             fsq=fsq, wm=model,
             alpha_uniform=args.alpha_uniform,
@@ -1489,6 +1495,7 @@ def main():
             focal_gamma=args.focal_gamma,
             token_noise=args.token_noise, fsq_noise=args.fsq_noise,
             shift_max=shift_max, use_recon=use_recon,
+            recon_weight=recon_weight,
             neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
             soft_target_matrix=soft_tm_for_joint,
             **joint_kwargs_common,
@@ -1500,6 +1507,7 @@ def main():
             focal_gamma=args.focal_gamma,
             token_noise=0.0, fsq_noise=0.0,          # no noise at eval
             shift_max=0, use_recon=use_recon,         # no shift at eval
+            recon_weight=recon_weight,
             neighbor_table=None, neighbor_counts=None,
             soft_target_matrix=soft_tm_for_joint,
             **joint_kwargs_common,

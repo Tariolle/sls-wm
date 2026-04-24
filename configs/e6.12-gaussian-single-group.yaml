@@ -1,0 +1,110 @@
+# E6.12 -- WM redesign track (first iteration, 2026-04-24).
+#
+# Three changes from E6.10 baseline:
+#   1. Slim WM (conservative first cut): 512d/8L/8H -> 384d/6L/6H (head_dim=64).
+#      Transformer backbone drops from 38.4M to 16.4M params (2.35x fewer).
+#      Depth preserved (8L is likely overkill but halving to 4L is risky);
+#      if this works, try 4L or 320d in a follow-up. Motivation: E6.10 is
+#      oversized for this task; LeWM solves a harder problem with comparable
+#      budget. Controller plateaued on E6.10 with h_t rich enough for ~17.9
+#      survival but timing-inconsistent -- betting that a tighter bottleneck
+#      forces cleaner, more readable h_t.
+#   2. recon_weight: 0.5 (new knob). Was implicitly 1.0 in E6.10.
+#      Halving lets the next-token prediction loss dominate the joint total
+#      so the transformer optimizes for dream quality over pixel recon.
+#   3. controller_ppo.jump_penalty: 0.25 -> 0.15. E6.10 deploy showed
+#      spaceship-mode regression attributed to over-penalized sustained
+#      jumps; 0.15 still discourages jump-spam exploit of WM bias.
+#
+# Everything else identical to E6.10. Kernel stays Gaussian sigma=0.7.
+
+model:
+  vocab_size: 625
+  embed_dim: 384
+  n_heads: 6
+  n_layers: 6
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [5, 5, 5, 5]
+  dropout: 0.10
+  adaln: true
+
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 200
+  batch_size: 1024
+  lr: 0.001
+  lr_min: 0.00005
+  weight_decay: 0.001
+  cpc_weight: 1.0
+  token_noise: 0.0
+  fsq_noise: 0.05
+  label_smoothing: 0.1
+  fsq_kernel: gaussian
+  fsq_sigma: 0.7
+  fsq_dim_weights: [1.0, 1.0, 1.0, 1.0]
+  focal_gamma: 2.0
+  death_oversample: 4
+  seed: 42
+  checkpoint_dir: checkpoints_e6.12
+  joint: true
+  single_group: true
+  grad_clip: 10.0
+  alpha_uniform: 0.0
+  recon_weight: 0.5
+  shift_max: 4
+  use_cpc: false
+  use_recon: true
+  learnable_gamma: false
+
+posthoc_decoder:
+  transformer_checkpoint: checkpoints_e6.12/transformer_best.pt
+  fsq_checkpoint: checkpoints_e6.12/fsq_best.pt
+  epochs: 30
+  batch_size: 512
+  lr: 0.001
+  seed: 42
+  checkpoint_dir: checkpoints_e6.12
+
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_e6.12/transformer_best.pt
+  epochs: 50
+  batch_size: 512
+  lr: 0.0005
+  weight_decay: 0.0001
+  jump_class_weight: 1.5
+  controller_dropout: 0.0
+  val_ratio: 0.1
+  token_embed_dim: 16
+  temporal_dim: 32
+  seed: 42
+  checkpoint_dir: checkpoints_e6.12
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_e6.12/transformer_best.pt
+  pretrained: checkpoints_e6.12/controller_bc_best.pt
+  amp_dtype: bfloat16
+  n_iterations: 5000
+  n_episodes: 4096
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 2048
+  lr_warmup_iters: 50
+  entropy_coeff: 0.001
+  jump_penalty: 0.15
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 25
+  death_threshold: 0.5
+  token_embed_dim: 16
+  temporal_dim: 32
+  controller_dropout: 0.0
+  n_eval_episodes: 512
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_e6.12
