@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Structured Label Smoothing for Joint-Embedding Discrete World Models</title>
+
+  <meta name="description" content="Structured Label Smoothing (SLS) exploits FSQ codebook lattice geometry for joint-embedding discrete world models. Trained end-to-end on Geometry Dash, deployed at 30 FPS on consumer hardware." />
+  <meta name="author" content="Florent Tariolle" />
+
+  <meta property="og:title" content="Structured Label Smoothing for Joint-Embedding Discrete World Models" />
+  <meta property="og:description" content="A training objective that exploits the FSQ codebook lattice so near-miss predictions are treated as near-misses rather than gross errors." />
+  <meta property="og:image" content="static/images/pipeline.png" />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://tariolle.github.io/sls-wm/" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:wght@400;600;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" />
+
+  <link rel="stylesheet" href="static/css/style.css" />
+</head>
+
+<body>
+
+<!-- Hero: title, authors, buttons -->
+<section class="hero">
+  <div class="hero-body">
+    <div class="container is-max-desktop">
+      <h1 class="publication-title">
+        Structured Label Smoothing<br />
+        over Finite Scalar Quantization<br />
+        for Joint-Embedding Discrete World Models
+      </h1>
+
+      <div class="publication-authors">
+        <span>Florent Tariolle</span>
+        <div class="affiliation">INSA Rouen Normandy</div>
+        <div class="correspondence">
+          Correspondence to <code>florent.tariolle@insa-rouen.fr</code>
+        </div>
+      </div>
+
+      <div class="publication-links">
+        <a class="link-button" href="static/pdfs/sls_wm.pdf" target="_blank" rel="noopener">
+          <span class="icon"><i class="fas fa-file-pdf"></i></span>
+          <span>Paper</span>
+        </a>
+        <a class="link-button" href="https://github.com/Tariolle/sls-wm" target="_blank" rel="noopener">
+          <span class="icon"><i class="fab fa-github"></i></span>
+          <span>Code</span>
+        </a>
+        <a class="link-button" href="#bibtex">
+          <span class="icon"><i class="fas fa-quote-left"></i></span>
+          <span>BibTeX</span>
+        </a>
+      </div>
+
+      <div class="notice">
+        <strong>Pre-freeze research.</strong> Model freeze targeted for 2026-05-31, NeurIPS 2026 workshop submission. This page describes the method and architecture; numerical results and ablation tables will land with the final model.
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<!-- Abstract -->
+<section>
+  <div class="container-narrow">
+    <h2 class="section-title">Abstract</h2>
+    <p class="abstract">
+      Discrete world models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer. Standard cross-entropy training treats every incorrect prediction as equally wrong, discarding a signal that Finite Scalar Quantization (FSQ) makes available by construction: each code sits at a point on an integer coordinate lattice, so some wrong predictions are near-misses (one quantization step away in one dimension, a near-identical reconstruction) while others are gross errors (opposite corner of the codebook, unrelated content).
+    </p>
+    <p class="abstract">
+      We introduce <em>FSQ-Structured Label Smoothing</em> (SLS), a training objective that replaces uniform label smoothing with a kernel over the integer-lattice coordinates of the FSQ codebook, so a near-miss prediction is treated as a near-miss rather than a gross error. We train the FSQ encoder jointly with the dynamics transformer entirely in the discrete latent space: prediction gradients flow back into the encoder through a learnable linear projection and a straight-through estimator, and a light pixel-reconstruction loss is retained as an anti-collapse regularizer on the encoder, not as a predictive objective.
+    </p>
+    <p class="abstract">
+      We study three kernel families (Gaussian, Laplace, Cauchy) under this joint-training setup and use an isotropic kernel with bandwidth set by a first-neighbour rule, which requires zero data-derived hyperparameters. We evaluate on Geometry Dash, a deterministic platformer with binary actions and precision timing, where the controller is trained entirely in imagination and deployed at 30&nbsp;FPS on the real game via screen capture.
+    </p>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<!-- Pipeline overview -->
+<section>
+  <div class="container-narrow">
+    <h2 class="section-title">Pipeline overview</h2>
+    <figure class="centered">
+      <img src="static/images/pipeline.png" alt="Vision-Model-Controller pipeline overview" />
+      <figcaption>
+        Vision-Model-Controller pipeline. The FSQ-VAE <strong>(V)</strong> tokenizes Sobel edge maps into a grid of discrete codes, the causal transformer <strong>(M)</strong> predicts next-frame tokens conditioned on actions via AdaLN, and the MLP controller <strong>(C)</strong> selects actions from the transformer's hidden state. The action feedback loop enables autoregressive dreaming.
+      </figcaption>
+    </figure>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<!-- SLS figure -->
+<section>
+  <div class="container-narrow">
+    <h2 class="section-title">Structured Label Smoothing</h2>
+    <p>
+      Uniform label smoothing distributes mass equally across the vocabulary, treating all incorrect tokens as equally wrong. SLS replaces the uniform component with a kernel over FSQ lattice coordinates, so tokens one quantization step away from the target receive most of the smoothing mass and distant tokens receive negligible weight.
+    </p>
+    <figure class="centered">
+      <img src="static/images/sls_kernel.png" alt="SLS kernel visualization: 2D slice and sorted distribution vs. uniform" />
+      <figcaption>
+        <strong>(a)</strong> 2D slice of SLS weights over two FSQ lattice dimensions with the remaining two fixed at the target's values; the red square marks the target token and weights decay with lattice distance.
+        <strong>(b)</strong> All <em>V</em>−1 alternative tokens sorted by SLS weight (log scale) versus uniform label smoothing. SLS concentrates mass on near-miss tokens while suppressing distant ones by orders of magnitude.
+      </figcaption>
+    </figure>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<!-- Method highlights -->
+<section>
+  <div class="container-narrow">
+    <h2 class="section-title">Method highlights</h2>
+    <ul>
+      <li><strong>Joint-embedding training.</strong> A single online FSQ encoder embeds both context and target frames into a shared discrete latent space; the transformer predicts future tokens <em>z<sub>t+1</sub></em> from past tokens <em>z<sub>≤t</sub></em> in that space, with no pixel-prediction head.</li>
+      <li><strong>Prediction-gradient routing.</strong> A learnable linear projection sits between the encoder's continuous latents and the transformer input; it contributes zero in the forward path (discrete indices still drive the transformer) but, under a straight-through estimator, carries prediction gradients back into the encoder.</li>
+      <li><strong>Anti-collapse anchor.</strong> A light pixel-reconstruction loss is retained only as an anti-collapse regularizer on the encoder. Removing it causes the joint encoder + transformer to degenerate. Finding a decoder-free discrete anti-collapse signal (a discrete counterpart to SIGReg) is open work.</li>
+      <li><strong>Zero-calibration kernel.</strong> The SLS bandwidth is set by a first-neighbour rule on the FSQ lattice, so no per-dataset sensitivity probe is needed and the hyperparameter is robust to codebook drift under joint training.</li>
+      <li><strong>Real-time deployment.</strong> The full V-M-C pipeline runs at 30&nbsp;FPS on consumer hardware, driving Geometry Dash in real time via screen capture with GPU-resident token buffers, CUDA Graphs, and <code>torch.compile</code> in <code>reduce-overhead</code> mode.</li>
+    </ul>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<!-- BibTeX -->
+<section id="bibtex">
+  <div class="container-narrow">
+    <h2 class="section-title">BibTeX</h2>
+<pre class="bibtex">@misc{tariolle2026sls,
+  author        = {Tariolle, Florent},
+  title         = {Structured Label Smoothing over Finite Scalar Quantization
+                   for Joint-Embedding Discrete World Models},
+  year          = {2026},
+  howpublished  = {\url{https://tariolle.github.io/sls-wm/}},
+  note          = {Preprint}
+}</pre>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<!-- Acknowledgments -->
+<section>
+  <div class="container-narrow">
+    <h2 class="section-title">Acknowledgments</h2>
+    <p>
+      We thank Ma&euml;l Planchot for contributing gameplay data. The NVIDIA A100 GPU used for all primary training runs was provided by MesoNet (CRIANN, Rouen) through the Representation Learning course at INSA Rouen Normandy. Geometry Dash is developed by RobTop Games.
+    </p>
+    <p>
+      This project page template is adapted from the <a href="https://le-wm.github.io/" target="_blank" rel="noopener">LeWorldModel</a> page, which itself builds on the <a href="https://nerfies.github.io/" target="_blank" rel="noopener">Nerfies</a> template.
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>&copy; 2026 Florent Tariolle. Source on <a href="https://github.com/Tariolle/sls-wm" target="_blank" rel="noopener">GitHub</a>.</div>
+</footer>
+
+</body>
+</html>
