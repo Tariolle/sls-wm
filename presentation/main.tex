@@ -136,10 +136,10 @@
       \textbf{Phase 2 -- Controller}\\[0.4em]
       \scriptsize BC pretraining\\
       \scriptsize $\downarrow$\\
-      \scriptsize PPO in dreams (WM frozen)
+      \scriptsize PPO in dreams
     };
 
-    \draw[arr] (wm) -- node[above, lbl] {frozen WM} node[below, lbl] {$\mathbf{h}_t$ representations} (ctrl);
+    \draw[arr] (wm) -- node[above, lbl] { } node[below, lbl] {$\mathbf{h}_t$} (ctrl);
   \end{tikzpicture}%
   }
   \end{center}
@@ -420,8 +420,20 @@
 
 \end{frame}
 
-\begin{frame}{Training: FSQ-Neighbor Token Noise}
+\begin{frame}{FSQ-Structured Label Smoothing}
   \vspace{0.5em}
+  \textbf{Problem}: standard CE assigns zero mass to every non-target token: a near-miss neighbour is penalised as harshly as a random code.
+
+  \vspace{0.5em}
+  \textbf{SLS}: replace the one-hot target with a narrow Gaussian centered on the correct code in FSQ coordinate space ($\sigma = 0.7$). Near neighbours get small positive mass; distant codes get none.
+
+  \vspace{0.5em}
+  Rewards near-misses without diluting confidence in the correct code.
+
+\end{frame}
+
+\begin{frame}{Training: FSQ-Neighbor Token Noise}
+  \vspace{1.2em}
   \begin{columns}[T]
     \column{0.55\textwidth}
     Noise on context tokens during training: with probability 5\% per token, replace it by a $\pm 1$ neighbour in one FSQ dimension.
@@ -441,24 +453,6 @@
   \end{columns}
 \end{frame}
 
-\begin{frame}[t]{FSQ-Structured Label Smoothing}
-  \vspace{0.4em}
-  \textbf{Problem}: uniform smoothing treats an FSQ neighbour like a random token.
-
-  \vspace{0.3em}
-  \textbf{Kernel study} over FSQ coordinate distance $d = \lVert \mathbf{c}_i - \mathbf{c}_j \rVert$:
-  \vspace{-0.2em}
-  \[
-    k_{\text{Gauss}}(d) = e^{-d^2/2\sigma^2}, \quad
-    k_{\text{Laplace}}(d) = e^{-d/\sigma}, \quad
-    k_{\text{Cauchy}}(d) = \frac{1}{1 + d^2/\sigma^2}
-  \]
-
-  \vspace{0.2em}
-  \textbf{Design choice}: narrow Gaussian ($\sigma = 0.7$). Gaussian's squared-exponential tails decay faster than Laplace or Cauchy, so distant neighbours receive negligible mass. The goal is to reward near-misses without tempting the predictor to commit less strongly to the correct code.
-
-\end{frame}
-
 \begin{frame}{V + M: Joint Training}
   \vspace{1em}
   \begin{center}
@@ -474,7 +468,7 @@
     \node[block, fill=vcolor!20, draw=vcolor, right=0.6cm of in] (enc) {Encoder};
     \node[block, fill=vcolor!35, draw=vcolor, right=0.5cm of enc] (fsq) {FSQ};
     \node[block, fill=vcolor!15, draw=vcolor, above right=0.2cm and 0.7cm of fsq] (dec) {Decoder};
-    \node[loss, right=0.5cm of dec] (mse) {pixel MSE\\(anchor)};
+    \node[loss, right=0.5cm of dec] (mse) {MSE\\(anchor)};
     \node[block, fill=mcolor!20, draw=mcolor, below right=0.2cm and 0.7cm of fsq] (tfm) {Transformer};
     \node[loss, right=0.5cm of tfm] (ce) {CE + SLS};
 
@@ -497,11 +491,9 @@
 \begin{frame}{FSQ-VAE: Training}
   \begin{itemize}
     \item $\sim$252K frames ($\sim$\naugeps{} episodes), batch 1024
-    \item \textbf{Jointly} optimized with the transformer: no frozen pre-stage
-    \item Pixel MSE kept as an \textbf{anchor} on codebook semantics
-    \item Prediction gradients route back into the encoder via a straight-through estimator (STE) through a learnable linear projection \texttt{fsq\_grad\_proj}
     \item \textbf{Single-group optimizer} (encoder + transformer share one AdamW group, LR $10^{-3}$, weight decay $10^{-3}$) + \textbf{single global grad clip at 10.0} (sized to the recon-dominated encoder gradient scale)
     \item Cosine LR schedule + linear warmup, 200 epochs
+    \item TODO: here put the training curves
   \end{itemize}
 \end{frame}
 
@@ -510,7 +502,7 @@
     \includegraphics[width=\textwidth]{fsq_reconstructions.png}
   \end{center}
   \begin{center}
-    \small{55$\times$ compression}: $32{,}768 \to 594$ bits/frame
+    \small{\textbf{55$\times$} compression}: $32{,}768 \to 594$ bits/frame
   \end{center}
 \end{frame}
 
@@ -552,24 +544,36 @@
   \end{center}
 \end{frame}
 
-\begin{frame}{Controller: Training Protocol}
-  \vspace{0.5em}
-  \textbf{Stage 1: Behavioral Cloning} (initialization)
-  \begin{itemize}
-    \item Death + expert episodes, class-weighted BCE (1.5$\times$ jump weight)
-    \item Feed context through world model $\to$ get $\mathbf{h}_t$, predict expert action
-  \end{itemize}
+\begin{frame}{Controller: Training}
+  \vspace{1em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    phase/.style={rectangle, draw, rounded corners, minimum height=2.2cm, minimum width=4.5cm, align=center, font=\small, line width=1.2pt},
+    arr/.style={-{Stealth[length=4mm]}, thick},
+    lbl/.style={font=\scriptsize, align=center},
+  ]
+    \node[phase, fill=ccolor!10, draw=ccolor!60] (bc) {
+      \textbf{Stage 1 -- BC}\\[0.4em]
+      \scriptsize Imitate expert on\\
+      \scriptsize frozen WM hidden states
+    };
+    \node[phase, fill=mcolor!10, draw=mcolor!60, right=2.5cm of bc] (ppo) {
+      \textbf{Stage 2 -- PPO}\\[0.4em]
+      \scriptsize Train in imagination\\
+      \scriptsize (WM frozen)
+    };
+
+    \draw[arr] (bc) -- node[above, lbl] {warm init} (ppo);
+  \end{tikzpicture}%
+  }
+  \end{center}
 
   \vspace{0.5em}
-  \textbf{Stage 2: PPO in Dream} (generalization)
-  \begin{itemize}
-    \item Reward: $+1$ per step survived $-0.25$ per jump, rollout stops at death prediction
-    \item 4096 episodes/iteration, 25-step rollouts, 4 PPO epochs, GAE ($\gamma$=0.995, $\lambda$=0.95)
-    \item Clipped surrogate + percentile advantage norm + EMA target critic
-  \end{itemize}
-
-  \vspace{0.5em}
-  \textbf{Test:} zero-shot deployment on the real game (no fine-tuning)
+  \begin{center}
+    \small
+    Zero-shot deployment on the real game after PPO.
+  \end{center}
 \end{frame}
 
 % ==========================================================
@@ -582,10 +586,8 @@
     \item \textbf{FSQ-VAE}: sharp, 100\% utilization, no tuning
     \item \textbf{Sobel}: filters visual noise $\to$ structural perception
     \item \textbf{Vertical shifts}: massively reduced overfitting, physically valid
-    \item \textbf{Parallel decoding}: 1 pass vs 65 $\to$ real-time
     \item \textbf{Structured label smoothing}: narrow Gaussian on FSQ lattice distance
-    \item \textbf{AdaLN-Zero}: action conditioning from DiT
-    \item \textbf{QK-norm}: stabilized AdaLN (4 runs diverged without)
+    \item \textbf{AdaLN-Zero + QK-norm}: stable action conditioning -- 4 runs diverged without QK-norm
   \end{itemize}
 \end{frame}
 
@@ -596,7 +598,7 @@
     \item \textbf{Pure RL (CMA-ES)}: $\sim$12 steps (local optimum) $\to$ BC required
     \item \textbf{MaskGIT}: degraded on 64 tokens, parallel single-step better
     \item \textbf{CNN controller on $\mathbf{z}_t$}: duplicated work the transformer already did
-    \item \textbf{Pure-JEPA} (no pixel anchor): codebook collapse; our marginal anti-collapse regularizer (CvM adapted from LeWorldModel's SIGReg) was insufficient for joint-distribution degeneracy
+    \item \textbf{Pure-JEPA} (no pixel anchor): codebook collapse, regularizer insufficient
   \end{itemize}
 \end{frame}
 
@@ -606,8 +608,9 @@
 
 \begin{frame}{Limitations \& Future Work}
   \begin{itemize}
-    \item \textbf{Scope}: only one game (and standard levels). Generalization to other games/levels unknown
-    \item \textbf{Sample efficiency}: $\sim$250K frames (only 2h20 of gameplay) is extremely small for deep learning
+    \item \textbf{Sample efficiency}: trained on only 2h20 of gameplay -- world models make this tractable
+    \item \textbf{Dream horizon}: dreams stay coherent for tens to hundreds of frames, then hallucinate -- repeated obstacles, impassable sections, or empty levels
+    \item \textbf{Scope}: trained on simple mechanics (portals, jump pads, orbs, standard gravity). Complex levels with noisy backgrounds and harder dynamics are the natural next step.
   \end{itemize}
 \end{frame}
 
@@ -623,7 +626,7 @@
     \item Burchi, M. \& Timofte, R. (2025). \href{https://arxiv.org/abs/2503.04416}{\textit{TWISTER: Transformer-based World Models with AC-CPC}}. ICLR
     \item Mentzer, F. et al. (2024). \href{https://arxiv.org/abs/2309.15505}{\textit{Finite Scalar Quantization: VQ-VAE Made Simple}}. ICLR
     \item Vali, M. et al. (2026). \href{https://arxiv.org/abs/2601.17124}{\textit{iFSQ: Improving FSQ for Image Generation}}. ICLR
-    \item Wang, T. \& Isola, P. (2020). \href{https://arxiv.org/abs/2005.10242}{\textit{Alignment and Uniformity on the Hypersphere}}. ICML
+    \item Su, J. et al. (2024). \href{https://arxiv.org/abs/2104.09864}{\textit{RoFormer: Enhanced Transformer with Rotary Position Embedding}}. Neurocomputing
     \item Hafner, D. et al. (2025). \href{https://arxiv.org/abs/2301.04104}{\textit{Mastering Diverse Control Tasks through World Models}} (DreamerV3). Nature
     \item Maes, L. et al. (2026). \href{https://arxiv.org/abs/2603.19312}{\textit{LeWorldModel: Stable End-to-End JEPA from Pixels}}. Preprint
     \item Peebles, W. \& Xie, S. (2023). \href{https://arxiv.org/abs/2212.09748}{\textit{Scalable Diffusion Models with Transformers}} (DiT). ICCV
