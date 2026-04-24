@@ -10,27 +10,21 @@
 #   1. DROP use_recon / recon_weight / alpha_uniform (pixel MSE decoder and
 #      CvM marginal uniform reg). No more decoder at train time; posthoc
 #      decoder script re-inits its own for visualization.
-#   2. ADD SIGReg (sigreg_weight=10.0, rescaled from LeWM default 0.1).
-#      Per-position Epps-Pulley test against N(0, I_4) on the pre-sigmoid
-#      encoder output, averaged across the 64 spatial positions. The paper
-#      default lambda=0.1 is tied to their loss magnitudes: LeWM's SIGReg
-#      loss starts near 40 and the MSE prediction loss near 0.25, so
-#      0.1*SIGReg ~16x the prediction loss at init. Our CE token loss
-#      starts near 4.5 and SIGReg near 0.14 (conv encoders produce roughly-
-#      Gaussian outputs at init, unlike ViT post-LayerNorm), so lambda=0.1
-#      makes SIGReg's contribution ~0.003x CE -- regularizer becomes a
-#      spectator, CE wins the race to trivial code collapse (E6.13 v1 at
-#      lambda=0.1: val ppl 18.7% -> 1.9% between epochs 5 and 6). Bumped
-#      to 10.0 to match LeWM's effective regularization strength for our
-#      scales. Will bisect from here if it over- or under-regularizes.
+#   2. ADD SIGReg (sigreg_weight=0.1, LeWM default). Per-(time, position)
+#      Epps-Pulley test against N(0, I_4) on the pre-sigmoid encoder output,
+#      averaged across (K+1)*64 = 320 (timestep, spatial-position) triples.
+#      Module matches LeWM's reference implementation verbatim
+#      (lucas-maes/le-wm, module.py), including the standard Epps-Pulley
+#      N-multiplier (statistic is B times the per-projection integral) that
+#      v1/v2 were missing. That missing multiplier was the root cause of
+#      the magnitude confusion in earlier runs: without it our SIGReg was
+#      ~B=1024 times too small, leading to bogus lambda-scaling debates.
 #   3. DROP E6.12's grad-skip safety net (threshold=0, disabled). LeWM runs
 #      without gradient skipping -- a principled 2-term JEPA doesn't produce
 #      the slim-WM outlier-spike failure mode that justified grad_skip in
-#      E6.12. Empirically v2 (lambda=10, threshold=20) hit threshold=20 on
-#      every non-outlier batch after epoch 15 because SIGReg's gradient
-#      contribution shifted steady-state grad_rms from 6.67 to ~24, so the
-#      safety net locked out all training. Simpler to drop it; if outlier
-#      spikes reappear they can come back calibrated to the new scale.
+#      E6.12. The v2 spurious skipping was a symptom of the missing N
+#      multiplier (gradients were weirdly large in a way that doesn't
+#      recur after the module fix).
 #   4. controller_ppo.jump_penalty: 0.25 -> 0.15 (carried from E6.12;
 #      controller-side tweak unrelated to the WM change).
 #
@@ -73,11 +67,10 @@ transformer:
   grad_clip: 10.0
   grad_skip_threshold: 0.0
   grad_skip_warmup_epochs: 0
-  sigreg_weight: 10.0
+  sigreg_weight: 0.1
   sigreg_projections: 1024
   sigreg_knots: 17
-  sigreg_knot_min: 0.2
-  sigreg_knot_max: 4.0
+  sigreg_knot_max: 3.0
   shift_max: 4
   use_cpc: false
   learnable_gamma: false

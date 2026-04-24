@@ -588,7 +588,7 @@ class JointStep(nn.Module):
                  label_smoothing, focal_gamma, token_noise, fsq_noise,
                  shift_max=0,
                  sigreg_weight=0.0, sigreg_projections=1024,
-                 sigreg_knots=17, sigreg_knot_min=0.2, sigreg_knot_max=4.0,
+                 sigreg_knots=17, sigreg_knot_max=3.0,
                  neighbor_table=None, neighbor_counts=None,
                  soft_target_matrix=None,
                  fsq_levels=None, fsq_sigma=0.9):
@@ -602,7 +602,6 @@ class JointStep(nn.Module):
         self.sigreg_weight = float(sigreg_weight)
         self.sigreg_projections = int(sigreg_projections)
         self.sigreg_knots = int(sigreg_knots)
-        self.sigreg_knot_min = float(sigreg_knot_min)
         self.sigreg_knot_max = float(sigreg_knot_max)
         self.fsq_sigma = float(fsq_sigma)
         if fsq_levels is not None:
@@ -648,16 +647,15 @@ class JointStep(nn.Module):
             self.fsq, raw_frames, K, tpf, fsq_dim,
             run_decoder=False)
 
-        # Per-position SIGReg on the pre-sigmoid encoder output. Treats each
-        # of the H*W spatial positions as an independent D-dim distribution
-        # across B*(K+1) frames and pushes each toward N(0, I_D). Fresh random
-        # projections per call. Two-loss-total design: CE token loss + SIGReg.
-        B_, K1_, D_, H_, W_ = z_e_all.shape
+        # Per-(time, position) SIGReg on the pre-sigmoid encoder output.
+        # Treats each (t, h, w) triple as an independent D-dim distribution
+        # of B samples and pushes each toward N(0, I_D). Standard Epps-Pulley
+        # N-multiplier is baked in (see deepdash/sigreg.py). Matches LeWM's
+        # reference SIGReg implementation. Two-loss-total design: CE + SIGReg.
         sigreg_loss = sigreg_per_position(
-            z_e_all.reshape(B_ * K1_, D_, H_, W_),
+            z_e_all,  # (B, K+1, D, H, W)
             n_projections=self.sigreg_projections,
             n_knots=self.sigreg_knots,
-            knot_min=self.sigreg_knot_min,
             knot_max=self.sigreg_knot_max,
         )
 
@@ -1108,13 +1106,10 @@ def main():
     parser.add_argument("--sigreg-knots", type=int, default=None,
                         help="K, trapezoid integration knots for the "
                              "Epps-Pulley test statistic. LeWM default 17.")
-    parser.add_argument("--sigreg-knot-min", type=float, default=None,
-                        help="Lower bound of the SIGReg integration range "
-                             "in characteristic-function frequency t. "
-                             "LeWM default 0.2.")
     parser.add_argument("--sigreg-knot-max", type=float, default=None,
-                        help="Upper bound of the SIGReg integration range. "
-                             "LeWM default 4.0.")
+                        help="Upper bound of SIGReg integration range "
+                             "(integral runs over [0, knot_max]). LeWM "
+                             "code default 3.0.")
     parser.add_argument("--grad-skip-threshold", type=float, default=None,
                         help="If pre-clip grad norm exceeds this, skip the "
                              "optimizer step for that batch. 0 or None "
@@ -1507,13 +1502,11 @@ def main():
         sigreg_weight = float(getattr(args, "sigreg_weight", None) or 0.0)
         sigreg_projections = int(getattr(args, "sigreg_projections", None) or 1024)
         sigreg_knots = int(getattr(args, "sigreg_knots", None) or 17)
-        sigreg_knot_min = float(getattr(args, "sigreg_knot_min", None) or 0.2)
-        sigreg_knot_max = float(getattr(args, "sigreg_knot_max", None) or 4.0)
+        sigreg_knot_max = float(getattr(args, "sigreg_knot_max", None) or 3.0)
         sigreg_kwargs = dict(
             sigreg_weight=sigreg_weight,
             sigreg_projections=sigreg_projections,
             sigreg_knots=sigreg_knots,
-            sigreg_knot_min=sigreg_knot_min,
             sigreg_knot_max=sigreg_knot_max,
         )
         joint_step_train = JointStep(
