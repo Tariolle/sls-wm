@@ -23,8 +23,14 @@
 #      lambda=0.1: val ppl 18.7% -> 1.9% between epochs 5 and 6). Bumped
 #      to 10.0 to match LeWM's effective regularization strength for our
 #      scales. Will bisect from here if it over- or under-regularizes.
-#   3. KEEP E6.12's grad-skip safety net (threshold=20, warmup=15 epochs).
-#      Clean-training recipe should not trip it, but the insurance is cheap.
+#   3. DROP E6.12's grad-skip safety net (threshold=0, disabled). LeWM runs
+#      without gradient skipping -- a principled 2-term JEPA doesn't produce
+#      the slim-WM outlier-spike failure mode that justified grad_skip in
+#      E6.12. Empirically v2 (lambda=10, threshold=20) hit threshold=20 on
+#      every non-outlier batch after epoch 15 because SIGReg's gradient
+#      contribution shifted steady-state grad_rms from 6.67 to ~24, so the
+#      safety net locked out all training. Simpler to drop it; if outlier
+#      spikes reappear they can come back calibrated to the new scale.
 #   4. controller_ppo.jump_penalty: 0.25 -> 0.15 (carried from E6.12;
 #      controller-side tweak unrelated to the WM change).
 #
@@ -65,8 +71,8 @@ transformer:
   joint: true
   single_group: true
   grad_clip: 10.0
-  grad_skip_threshold: 20.0
-  grad_skip_warmup_epochs: 15
+  grad_skip_threshold: 0.0
+  grad_skip_warmup_epochs: 0
   sigreg_weight: 10.0
   sigreg_projections: 1024
   sigreg_knots: 17
