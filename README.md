@@ -1,12 +1,12 @@
 # SLS-WM
 ### Structured Label Smoothing for Joint-Embedding Discrete World Models
 
-[Florent Tariolle](mailto:florent.tariolle@insa-rouen.fr), INSA Rouen Normandy
+[Florent Tariolle](mailto:florent.tariolle@insa-rouen.fr)
 
 **Abstract:** Discrete world models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer. Standard cross-entropy treats every incorrect prediction as equally wrong, discarding a signal that Finite Scalar Quantization (FSQ) makes available by construction: each code sits on an integer coordinate lattice, so some wrong predictions are near-misses while others are gross errors. We introduce *FSQ-Structured Label Smoothing* (SLS), a training objective that replaces uniform label smoothing with a kernel over FSQ lattice coordinates, and train the encoder jointly with the dynamics transformer entirely in the discrete latent space. We evaluate on Geometry Dash, a deterministic platformer with binary actions, where the controller is trained in imagination and deployed at 30 FPS on the real game via screen capture.
 
 <p align="center">
-   <b>[ <a href="https://tariolle.github.io/sls-wm/">Website</a> | <a href="https://github.com/Tariolle/sls-wm">Code</a> ]</b>
+   <b>[ <a href="https://tariolle.github.io/sls-wm/static/pdfs/sls_wm.pdf">Paper Draft</a> | <a href="https://tariolle.github.io/sls-wm/">Website</a> ]</b>
 </p>
 
 <p align="center">
