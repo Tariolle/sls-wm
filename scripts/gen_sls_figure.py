@@ -4,14 +4,15 @@ Two panels:
   (a) 2D heatmap slice of SLS weights for a center token
   (b) Sorted SLS vs uniform distribution comparison (log scale)
 
-Defaults reflect the current V5 baseline (FSQ [5,5,5,5] with calibrated
-per-dim weights). Override via CLI for other codebooks or ablations.
+Defaults reflect the E6.10 isotropic first-neighbour recipe:
+FSQ [5,5,5,5], isotropic Gaussian kernel with sigma=0.7, epsilon=0.1,
+uniform dim weights [1,1,1,1]. Override via CLI for ablations.
 
 Usage:
     python scripts/gen_sls_figure.py
     python scripts/gen_sls_figure.py --output paper/figures/sls_kernel.pdf
     python scripts/gen_sls_figure.py --levels 5 5 5 5 \\
-        --dim-weights 1.02 0.94 0.83 1.20 --target-coords 2 2 2 2
+        --dim-weights 1 1 1 1 --target-coords 2 2 2 2
 """
 
 import argparse
@@ -22,7 +23,7 @@ import numpy as np
 import torch
 
 
-def build_sls_row(levels, target_idx, sigma=0.9, smoothing=0.1, dim_weights=None):
+def build_sls_row(levels, target_idx, sigma=0.7, smoothing=0.1, dim_weights=None):
     """Build the SLS target distribution for a single token (CPU-only)."""
     vocab_size = math.prod(levels)
     n_dims = len(levels)
@@ -66,13 +67,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="paper/figures/sls_kernel.pdf")
     parser.add_argument("--levels", type=int, nargs="+", default=[5, 5, 5, 5],
-                        help="FSQ codebook levels (default: V5 baseline [5,5,5,5])")
-    parser.add_argument("--sigma", type=float, default=0.9)
+                        help="FSQ codebook levels (default: [5,5,5,5])")
+    parser.add_argument("--sigma", type=float, default=0.7,
+                        help="Gaussian kernel bandwidth (default: 0.7, "
+                             "first-neighbour rule)")
     parser.add_argument("--smoothing", type=float, default=0.1,
                         help="Label smoothing epsilon")
     parser.add_argument("--dim-weights", type=float, nargs="+",
-                        default=[1.02, 0.94, 0.83, 1.20],
-                        help="Per-dim sensitivity weights (default: V5 baseline)")
+                        default=[1.0, 1.0, 1.0, 1.0],
+                        help="Per-dim weights (default: isotropic [1,1,1,1])")
     parser.add_argument("--target-coords", type=int, nargs="+",
                         default=None,
                         help="Target token coordinates as ints per dim "
