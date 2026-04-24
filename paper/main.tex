@@ -1,8 +1,12 @@
 \documentclass{article}
 
+% Force numeric (and compressed) citations: natbib is loaded without
+% options by neurips_2026.sty, so options must be pushed before the
+% style file loads.
+\PassOptionsToPackage{numbers,compress}{natbib}
+
 \usepackage[preprint]{neurips_2026}
 
-\usepackage[numbers]{natbib}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage{hyperref}
@@ -14,6 +18,22 @@
 \usepackage{microtype}
 \usepackage{xcolor}
 \usepackage{graphicx}
+\usepackage[most]{tcolorbox}
+\usepackage{fontawesome5}
+\usepackage[scale=0.85]{plex-mono}  % IBM Plex Mono as \ttfamily, scaled to match Times x-height
+
+% Light rounded "link button" (Bulma is-rounded is-light), used under the
+% author block for Website / Code links.
+\definecolor{buttonbg}{HTML}{F5F5F5}
+\definecolor{buttonfg}{HTML}{7A7A7A}
+\newtcbox{\linkbutton}{%
+  on line, boxsep=0pt,
+  left=12pt, right=12pt, top=5pt, bottom=5pt,
+  arc=9pt, boxrule=0pt,
+  colback=buttonbg, colframe=buttonbg,
+  coltext=buttonfg,
+}
+\newcommand{\headerlink}[3]{\href{#3}{\linkbutton{\ttfamily#1~#2}}}
 
 % ===== Architectural constants (change once, propagate everywhere) =====
 \newcommand{\hdim}{512}
@@ -28,26 +48,30 @@
 \newcommand{\focalgamma}{2.0}
 \newcommand{\ctrlparams}{\sim\!265\text{K}}
 
-\title{Structured Label Smoothing over Finite Scalar Quantization\\for Joint-Embedding Discrete World Models}
+\title{Structured Label Smoothing\\over Finite Scalar Quantization\\for Joint-Embedding Discrete World Models}
 
 \author{%
-  Florent Tariolle \\
-  INSA Rouen Normandy \\
-  \texttt{florent.tariolle@gmail.com} \\
+  Florent Tariolle\thanks{\normalsize Correspondence to \texttt{florent.tariolle@insa-rouen.fr}} \\
+  INSA Rouen Normandy
 }
 
 \begin{document}
 
 \maketitle
 
+\vspace{-1.8em}
+\begin{center}
+  \headerlink{\faGlobe}{Website}{https://tariolle.github.io/sls-wm}\hspace{1em}%
+  \headerlink{\faGithub}{Code}{https://github.com/Tariolle/sls-wm}
+\end{center}
+
 \begin{abstract}
 Discrete World Models (WMs) tokenize observations with a learned quantizer and predict next-frame tokens with a transformer.
 Standard cross-entropy training treats every incorrect prediction as equally wrong, discarding a signal that Finite Scalar Quantization (FSQ) makes available by construction: each code sits at a point on an integer coordinate lattice, so some wrong predictions are near-misses (one quantization step away in one dimension, a near-identical reconstruction) while others are gross errors (opposite corner of the codebook, unrelated content).
 We introduce \emph{FSQ-Structured Label Smoothing} (SLS), a training objective that replaces uniform label smoothing with a kernel over the integer-lattice coordinates of the FSQ codebook, so a near-miss prediction is treated as a near-miss rather than a gross error.
-We train the FSQ encoder jointly with the dynamics transformer: prediction gradients flow back into the encoder through a learnable linear projection and a straight-through estimator, so the codebook is shaped by both reconstruction and prediction.
+We train the FSQ encoder jointly with the dynamics transformer entirely in the discrete latent space: prediction gradients flow back into the encoder through a learnable linear projection and a straight-through estimator, and a light pixel-reconstruction loss is retained as an anti-collapse regularizer on the encoder, not as a predictive objective.
 We study three kernel families (Gaussian, Laplace, Cauchy) under this joint-training setup and use an isotropic kernel with bandwidth set by a first-neighbour rule, which requires zero data-derived hyperparameters.
 We evaluate on Geometry Dash, a deterministic platformer with binary actions and precision timing, where the controller is trained entirely in imagination and deployed at 30\,FPS on the real game via screen capture.
-Code is available at \url{https://github.com/Tariolle/sls-wm}.
 \end{abstract}
 
 % ===========================================================================
@@ -103,8 +127,10 @@ iFSQ~\citep{vali2026ifsq} introduces a simple modification of the FSQ bounding f
 
 \paragraph{Joint-Embedding Predictive Architectures (JEPA).}
 LeWorldModel~\citep{maes2026leworldmodel} recently demonstrated a stable end-to-end JEPA WM from pixels using continuous latents and a SIGReg anti-collapse regularizer.
-SLS-WM sits at the intersection of JEPA-style joint training and discrete tokenization: the FSQ lattice is what makes SLS possible, but a pure-JEPA variant (no pixel decoder) is unstable in our setting.
-We attempted to adapt SIGReg to the discrete factorized FSQ case via a Cramér-von-Mises test against a factorized uniform target (a marginal anti-collapse signal in the spirit of~\citep{wang2020uniformity}); in our experiments this was insufficient to prevent joint-distribution degeneracy when the prediction target comes from the online encoder, and we retain a light pixel-reconstruction loss as a semantics anchor.
+SLS-WM is joint-embedding in the architectural sense that context and target frames are encoded by a single online FSQ encoder into a shared discrete latent space, and the transformer predicts future tokens $z_{t+1}$ from past tokens $z_{\le t}$ in that space, with no pixel-prediction head.
+It departs from strict JEPA in two respects: the embedding space is discrete rather than continuous, and the predictive loss is a cross-entropy over FSQ indices rather than a distance between continuous embeddings -- SLS can be read as narrowing this gap, by replacing uniform CE with a lattice-metric-weighted CE that reflects embedding distance on the codebook.
+The pixel decoder is retained only as an anti-collapse regularizer on the encoder, via a light pixel-reconstruction loss that plays no role in the predictive loop; removing it causes the encoder to collapse under joint training.
+We attempted to replace the decoder by adapting SIGReg to the discrete factorized FSQ case via a Cramér-von-Mises test against a factorized uniform target (a marginal anti-collapse signal in the spirit of~\citep{wang2020uniformity}); in our experiments this was insufficient to prevent joint-distribution degeneracy when the prediction target comes from the online encoder, and finding a decoder-free discrete anti-collapse signal is left as open work.
 
 \paragraph{Label smoothing.}
 Label smoothing~\citep{szegedy2016rethinking} proposed replacing one-hot targets with a uniform mixture to reduce overconfidence.
@@ -157,12 +183,13 @@ We instead train the encoder jointly with the transformer so that prediction gra
 The transformer consumes discrete token indices via an embedding table, so prediction gradients cannot flow through rounding in the usual way.
 We insert a learnable linear projection \texttt{fsq\_grad\_proj} between the encoder's continuous latents (pre-rounding) and the transformer's input representation.
 The projection contributes zero in the forward path (the transformer still reads the discrete indices) but, under a straight-through estimator, carries the prediction gradient back into the encoder's continuous features.
-The encoder therefore receives two gradient signals: pixel reconstruction through the decoder, and next-token prediction through the straight-through path.
+The encoder therefore receives two gradient signals: next-token prediction through the straight-through path, which shapes the codebook for the predictive task, and pixel reconstruction through the decoder, which acts as an anti-collapse regularizer (discussed below).
 
-\paragraph{Pixel anchor.}
-We keep the pixel-MSE reconstruction loss as a semantics anchor.
-A pure-JEPA variant without the pixel decoder collapses in our experiments; our adaptation of SIGReg~\citep{maes2026leworldmodel} to the discrete factorized FSQ case, using a Cramér-von-Mises test against a factorized uniform target, was insufficient to prevent joint-distribution degeneracy when the prediction target comes from the online encoder.
-Finding an anti-collapse regularizer strong enough to remove the pixel anchor is left as future work.
+\paragraph{Anti-collapse regularization on the encoder.}
+Prediction happens entirely in the FSQ latent space, so the decoder plays no role in the predictive loop.
+Without an external signal, however, joint training of a single online encoder with its own prediction target admits a trivial degenerate solution: the encoder maps every input to the same point and the transformer predicts that point with zero loss.
+We prevent this by keeping a light pixel-MSE reconstruction loss on the encoder, which is therefore used as an anti-collapse regularizer rather than as a predictive objective.
+Our adaptation of SIGReg~\citep{maes2026leworldmodel} to the discrete factorized FSQ case, using a Cramér-von-Mises test against a factorized uniform target, was insufficient to prevent joint-distribution degeneracy in our setting; finding a decoder-free anti-collapse signal strong enough to remove the pixel-MSE crutch is left as future work.
 
 \paragraph{Single-group optimization and global gradient clipping.}
 Under joint training the pixel-MSE and cross-entropy gradients live on different scales, but we do not separate them into different parameter groups.
@@ -402,7 +429,8 @@ This progression demonstrates that in AdaLN-conditioned WM transformers, attenti
 
 Our evaluation is limited to a single game (Geometry Dash) with a binary action space and deterministic level layouts.
 The generalization of SLS to environments with higher-dimensional actions, stochastic dynamics, or RGB observations remains to be validated.
-The pixel-MSE anchor in the joint-training setup is a practical solution, not a principled one: finding an anti-collapse loss strong enough to support a pure-JEPA variant over a discrete FSQ codebook (where our adaptation of SIGReg to the factorized-uniform case via a Cramér-von-Mises test was insufficient for joint-distribution degeneracy) is open work.
+The pixel decoder is retained only as an anti-collapse regularizer on the encoder: prediction is otherwise entirely in FSQ latent space, and the decoder plays no role at inference time.
+This is a practical solution, not a principled one: finding a decoder-free discrete anti-collapse signal (our adaptation of SIGReg to the factorized-uniform case via a Cramér-von-Mises test was insufficient against joint-distribution degeneracy) is open work.
 
 % ===========================================================================
 \section{Conclusion}
