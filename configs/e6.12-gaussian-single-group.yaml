@@ -1,6 +1,6 @@
-# E6.12 -- WM redesign track (first iteration, 2026-04-24).
+# E6.12 -- WM redesign track (first iteration, 2026-04-24; v2 after v1 blowup).
 #
-# Three changes from E6.10 baseline:
+# Four changes from E6.10 baseline:
 #   1. Slim WM (conservative first cut): 512d/8L/8H -> 384d/6L/6H (head_dim=64).
 #      Transformer backbone drops from 38.4M to 16.4M params (2.35x fewer).
 #      Depth preserved (8L is likely overkill but halving to 4L is risky);
@@ -9,10 +9,23 @@
 #      budget. Controller plateaued on E6.10 with h_t rich enough for ~17.9
 #      survival but timing-inconsistent -- betting that a tighter bottleneck
 #      forces cleaner, more readable h_t.
-#   2. recon_weight: 0.5 (new knob). Was implicitly 1.0 in E6.10.
-#      Halving lets the next-token prediction loss dominate the joint total
-#      so the transformer optimizes for dream quality over pixel recon.
-#   3. controller_ppo.jump_penalty: 0.25 -> 0.15. E6.10 deploy showed
+#   2. recon_weight: 0.3 (new knob). Was implicitly 1.0 in E6.10.
+#      Pulling the pixel-anchor ratio down to 0.3 lets the next-token
+#      prediction loss dominate the joint total, while keeping a nontrivial
+#      joint-distribution anti-collapse pressure (E6.5 failed at 0.0).
+#   3. grad_skip_threshold: 20.0 + grad_skip_warmup_epochs: 15 (new knobs).
+#      v1 ran clean 49 epochs then exploded at epoch 50 (grad_rms 6.3 -> 67.3);
+#      the clipped-to-10 step still destroyed the encoder because (a) clipping
+#      preserves the bad direction and (b) global-norm clipping can't sanitize
+#      a localized spike. Skip bypasses the optimizer step entirely when
+#      pre-clip norm exceeds 20.0 (~3x steady-state grad_rms 6.67, tight
+#      enough to catch spikes well before the v1 blowup at 67), preventing
+#      outlier batches from contributing. The warmup_epochs=15 gate is
+#      essential: early training has naturally huge grad norms (epoch 1
+#      ~700, epoch 5 ~25, epoch 13 ~10) from random init + low-LR warmup,
+#      and without this gate every batch would be skipped and training
+#      wouldn't start. grad_clip stays at E6.10's 10.0; skip handles outliers.
+#   4. controller_ppo.jump_penalty: 0.25 -> 0.15. E6.10 deploy showed
 #      spaceship-mode regression attributed to over-penalized sustained
 #      jumps; 0.15 still discourages jump-spam exploit of WM bias.
 #
@@ -51,8 +64,10 @@ transformer:
   joint: true
   single_group: true
   grad_clip: 10.0
+  grad_skip_threshold: 20.0
+  grad_skip_warmup_epochs: 15
   alpha_uniform: 0.0
-  recon_weight: 0.5
+  recon_weight: 0.3
   shift_max: 4
   use_cpc: false
   use_recon: true

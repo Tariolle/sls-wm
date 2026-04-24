@@ -800,7 +800,7 @@ def _codebook_stats(code_counts):
 
 def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
                       amp_dtype=torch.bfloat16, grad_clip=1.0,
-                      single_group=False):
+                      single_group=False, grad_skip_threshold=0.0):
     """Run one training epoch by calling the compiled JointStep per batch.
 
     The joint_step module (typically torch.compile-wrapped) captures
@@ -826,6 +826,7 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
     tp = fp = fn = 0
     enc_grad_sq = tr_grad_sq = 0.0
     n_batches = 0
+    n_skipped = 0
     code_counts_total = None
 
     fwd_events, bwd_events, step_events = [], [], []
@@ -882,8 +883,23 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
             ss = torch.cuda.Event(enable_timing=True)
             se = torch.cuda.Event(enable_timing=True)
             ss.record()
-        scaler.step(optimizer)
-        scaler.update()
+        # Outlier-batch skip: if the pre-clip norm is far above steady state,
+        # the update direction is likely anomalous (exploding gradient from a
+        # rare batch). Clipping only bounds magnitude, not direction; a full
+        # clip-magnitude step in a bad direction can still destabilize the
+        # encoder on slim models. Skipping the optimizer step keeps weights
+        # frozen for this batch, preventing cascades.
+        if grad_skip_threshold > 0:
+            skip = bool((total_norm if single_group else torch.maximum(
+                wm_norm, fsq_norm)).item() > grad_skip_threshold)
+        else:
+            skip = False
+        if skip:
+            n_skipped += 1
+            scaler.update()
+        else:
+            scaler.step(optimizer)
+            scaler.update()
         if is_cuda:
             se.record()
             step_events.append((ss, se))
@@ -965,6 +981,8 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
         "tr_grad_rms": (tr_grad_sq / max(1, n_batches)) ** 0.5,
         "code_usage_pct": code_usage_pct,
         "code_ppl_pct": code_ppl_pct,
+        "n_skipped": n_skipped,
+        "n_batches": n_batches,
         "bottlenecks": bottlenecks,
     }
 
@@ -1112,6 +1130,17 @@ def main():
                         help="Scalar multiplier on FSQ recon loss in the "
                              "joint total. Default 1.0 (no scaling); "
                              "<1 lets the prediction loss dominate.")
+    parser.add_argument("--grad-skip-threshold", type=float, default=None,
+                        help="If pre-clip grad norm exceeds this, skip the "
+                             "optimizer step for that batch. 0 or None "
+                             "disables. Set to ~3-5x steady-state grad_rms "
+                             "to kill outlier-batch cascades on slim WMs.")
+    parser.add_argument("--grad-skip-warmup-epochs", type=int, default=None,
+                        help="Skip threshold is ignored until this epoch. "
+                             "Early training has naturally huge gradients "
+                             "(random init, low-LR warmup) that would "
+                             "otherwise trip the threshold and stall training. "
+                             "Default 15 when grad_skip_threshold is set.")
     parser.add_argument("--shift-max", type=int, default=None,
                         help="Max per-batch vertical shift pixels. 0 disables.")
     parser.add_argument("--use-recon", action=argparse.BooleanOptionalAction,
@@ -1325,6 +1354,11 @@ def main():
 
     single_group = bool(getattr(args, "single_group", None) or False)
     grad_clip = float(getattr(args, "grad_clip", None) or 1.0)
+    grad_skip_threshold = float(getattr(args, "grad_skip_threshold", None) or 0.0)
+    grad_skip_warmup_epochs = int(
+        getattr(args, "grad_skip_warmup_epochs", None)
+        if getattr(args, "grad_skip_warmup_epochs", None) is not None
+        else (15 if grad_skip_threshold > 0 else 0))
     if joint:
         fsq_lr_val = args.fsq_lr if args.fsq_lr is not None else 1e-3
         optimizer = build_optimizer(
@@ -1334,6 +1368,9 @@ def main():
         optimizer = build_optimizer(model, args)
     print(f"Optimizer groups: {len(optimizer.param_groups)} "
           f"(single_group={single_group}, grad_clip={grad_clip})")
+    if grad_skip_threshold > 0:
+        print(f"Grad-skip: threshold={grad_skip_threshold} "
+              f"(active after epoch {grad_skip_warmup_epochs})")
 
     # Resolve AMP dtype and compile mode with A100 defaults; local configs
     # (RTX 2060 SUPER / Turing) override via --amp-dtype float16 and
@@ -1613,10 +1650,14 @@ def main():
         for epoch in range(start_epoch, args.epochs + 1):
             t0 = time.time()
             if joint:
+                effective_skip = (grad_skip_threshold
+                                  if epoch > grad_skip_warmup_epochs
+                                  else 0.0)
                 train_metrics = train_epoch_joint(
                     joint_step_train, train_loader, optimizer, scaler, device,
                     amp_dtype=amp_dtype, grad_clip=grad_clip,
-                    single_group=single_group)
+                    single_group=single_group,
+                    grad_skip_threshold=effective_skip)
                 val_metrics = val_epoch_joint(
                     joint_step_val, val_loader, device, amp_dtype=amp_dtype)
                 train_loss = train_metrics["loss"]
@@ -1686,6 +1727,9 @@ def main():
                                    if log_unif else "")
                 val_unif_str = (f"unif={val_metrics['unif']:.4e} "
                                  if log_unif else "")
+                skipped = train_metrics.get("n_skipped", 0)
+                skip_str = (f" | skipped={skipped}/{train_metrics['n_batches']}"
+                            if skipped > 0 else "")
                 print(
                     f"  FSQ | "
                     f"Train: total={fsq_train_total:.4f} {train_recon_str}{train_unif_str}| "
@@ -1693,6 +1737,7 @@ def main():
                     f"gap={fsq_gap:+.4f} | "
                     f"grad_rms[enc={train_metrics['enc_grad_rms']:.2e} "
                     f"tr={train_metrics['tr_grad_rms']:.2e}]"
+                    + skip_str
                     + (f" | LR: {fsq_lr_now:.1e}" if fsq_lr_now is not None else "")
                 )
                 print(
