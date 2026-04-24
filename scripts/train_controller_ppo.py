@@ -551,8 +551,17 @@ def main():
         optimizer.load_state_dict(ckpt["optimizer"])
         start_iteration = ckpt["iteration"] + 1
         if scheduler is not None:
-            for _ in range(start_iteration - 1):
-                scheduler.step()
+            if "scheduler" in ckpt:
+                scheduler.load_state_dict(ckpt["scheduler"])
+            else:
+                # Back-compat: checkpoint predates scheduler persistence.
+                # LinearLR.get_lr() is multiplicative on group['lr'], so the
+                # naive catch-up loop re-applies the warmup ramp on top of
+                # the already-warmed saved lr. Jump past warmup and pin lr.
+                scheduler.last_epoch = max(start_iteration - 1,
+                                           args.lr_warmup_iters)
+                for group in optimizer.param_groups:
+                    group["lr"] = args.lr
         best_eval = ckpt.get("best_eval", -float("inf"))
         wandb_resume_id = ckpt.get("wandb_run_id")
         # Restore RNG state for reproducible continuation
@@ -709,7 +718,7 @@ def main():
 
         # Save latest checkpoint for resume
         if iteration % args.eval_interval == 0:
-            torch.save({
+            ckpt_payload = {
                 "iteration": iteration,
                 "controller": controller.state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -719,7 +728,10 @@ def main():
                 "pct_low": pct_normalizer.low,
                 "pct_high": pct_normalizer.high,
                 "wandb_run_id": wandb_run_id(),
-            }, ckpt_dir / "controller_ppo_latest.pt")
+            }
+            if scheduler is not None:
+                ckpt_payload["scheduler"] = scheduler.state_dict()
+            torch.save(ckpt_payload, ckpt_dir / "controller_ppo_latest.pt")
 
         eval_str = f" | eval={eval_surv} jmp={jump_ratio_str}" \
             if eval_surv else ""
