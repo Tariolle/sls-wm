@@ -587,7 +587,7 @@ class JointStep(nn.Module):
     def __init__(self, fsq, wm, *, alpha_uniform,
                  label_smoothing, focal_gamma, token_noise, fsq_noise,
                  shift_max=0, shift_max_x=0,
-                 use_recon=True, recon_weight=1.0,
+                 use_recon=True, recon_weight=1.0, recon_loss_type='mse',
                  neighbor_table=None, neighbor_counts=None,
                  soft_target_matrix=None,
                  fsq_levels=None, fsq_sigma=0.9):
@@ -601,6 +601,7 @@ class JointStep(nn.Module):
         self.fsq_noise = float(fsq_noise)
         self.use_recon = bool(use_recon)
         self.recon_weight = float(recon_weight)
+        self.recon_loss_type = str(recon_loss_type)
         self.fsq_sigma = float(fsq_sigma)
         if fsq_levels is not None:
             coords = _fsq_coords(fsq_levels)
@@ -682,8 +683,8 @@ class JointStep(nn.Module):
         if self.use_recon:
             recon_last = recon_all[:, K - 1]
             recon_tgt = recon_all[:, K]
-            recon_loss = (fsqvae_loss(recon_last, frame_last)
-                          + fsqvae_loss(recon_tgt, frame_tgt)) / 2
+            recon_loss = (fsqvae_loss(recon_last, frame_last, self.recon_loss_type)
+                          + fsqvae_loss(recon_tgt, frame_tgt, self.recon_loss_type)) / 2
         else:
             recon_loss = torch.zeros((), device=raw_frames.device,
                                      dtype=frames_f.dtype)
@@ -1143,6 +1144,12 @@ def main():
                         help="Scalar multiplier on FSQ recon loss in the "
                              "joint total. Default 1.0 (no scaling); "
                              "<1 lets the prediction loss dominate.")
+    parser.add_argument("--recon-loss-type", type=str, default=None,
+                        choices=["mse", "l1"],
+                        help="FSQ recon loss form. mse (default) sums squared "
+                             "errors; l1 sums absolute errors and is ~30x larger "
+                             "in magnitude at convergence -- recalibrate "
+                             "recon-weight when switching.")
     parser.add_argument("--grad-skip-threshold", type=float, default=None,
                         help="If pre-clip grad norm exceeds this, skip the "
                              "optimizer step for that batch. 0 or None "
@@ -1541,6 +1548,7 @@ def main():
             fsq_sigma=float(args.fsq_sigma) if args.fsq_sigma else 0.9,
         )
         recon_weight = float(getattr(args, "recon_weight", None) or 1.0)
+        recon_loss_type = str(getattr(args, "recon_loss_type", None) or "mse")
         joint_step_train = JointStep(
             fsq=fsq, wm=model,
             alpha_uniform=args.alpha_uniform,
@@ -1549,7 +1557,7 @@ def main():
             token_noise=args.token_noise, fsq_noise=args.fsq_noise,
             shift_max=shift_max, shift_max_x=shift_max_x,
             use_recon=use_recon,
-            recon_weight=recon_weight,
+            recon_weight=recon_weight, recon_loss_type=recon_loss_type,
             neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
             soft_target_matrix=soft_tm_for_joint,
             **joint_kwargs_common,
@@ -1562,7 +1570,7 @@ def main():
             token_noise=0.0, fsq_noise=0.0,                # no noise at eval
             shift_max=0, shift_max_x=0,                    # no shift at eval
             use_recon=use_recon,
-            recon_weight=recon_weight,
+            recon_weight=recon_weight, recon_loss_type=recon_loss_type,
             neighbor_table=None, neighbor_counts=None,
             soft_target_matrix=soft_tm_for_joint,
             **joint_kwargs_common,

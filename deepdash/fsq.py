@@ -200,10 +200,17 @@ class FSQVAE(nn.Module):
         return self.decoder(z_q)
 
 
-def fsqvae_loss(recon_x, x):
-    """MSE reconstruction loss only. FSQ has no codebook loss."""
-    recon_loss = F.mse_loss(recon_x, x, reduction='sum') / x.size(0)
-    return recon_loss
+def fsqvae_loss(recon_x, x, loss_type='mse'):
+    """Reconstruction loss only. FSQ has no codebook loss.
+
+    loss_type='mse': sum of squared errors per sample (legacy default).
+    loss_type='l1': sum of absolute errors per sample. Sharper output
+        under uncertainty (median vs L2's mean), but ~30x larger absolute
+        magnitude at convergence -- recon_weight must be calibrated.
+    """
+    if loss_type == 'l1':
+        return F.l1_loss(recon_x, x, reduction='sum') / x.size(0)
+    return F.mse_loss(recon_x, x, reduction='sum') / x.size(0)
 
 
 def grwm_slowness(z_e_t, z_e_t1):

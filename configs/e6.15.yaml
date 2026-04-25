@@ -1,0 +1,118 @@
+# E6.15 -- E6.14 + L1 recon + recalibrated recon_weight.
+#
+# E6.14 (per-sample shift) destabilized at epoch ~50 with slow co-adaptation
+# breakdown: train_total drifted 1.55 -> 3.0+, recon climbed back from 3.5 to
+# 6+, never recovered. Diagnosis: per-sample shift forces the encoder to
+# handle ~81 distinct (dx,dy) combos every batch under L2 + full recon
+# weight, which over-anchors the encoder to pixel-perfect reconstruction of
+# every shifted variant.
+#
+# Two changes vs E6.14:
+#   1. recon_loss_type: l2 -> l1. L1 minimizer is the median (sharp, commits
+#      to one shift mode) rather than L2's mean (blur from averaging shift
+#      variants). For Geometry Dash at 64x64 where 2-pixel obstacle errors
+#      are the difference between life and death, sharp commits matter.
+#      Standard image-restoration result (Zhao et al. 2017, IRIS, SimPLE).
+#   2. recon_weight: 1.0 -> 0.015. L1 sum-of-abs-errors is ~30x larger than
+#      L2 sum-of-squared-errors at convergence (RMS pixel error ~0.025 ->
+#      L1 sum ~100, L2 sum ~2.5). Calibrated to give roughly 60% of E6.10's
+#      effective recon contribution at convergence (0.015 * 100 = 1.5 vs
+#      E6.10's 1.0 * 2.5 = 2.5). Frees the encoder to spend capacity on
+#      death-relevant features rather than pixel-perfect shift reconstruction.
+#
+# Per-sample shift kept (per-batch was a vectorization hack; per-sample is
+# the principled SSL convention). Death-prediction levers (status weight,
+# focal_gamma, death_oversample) deliberately untouched -- attribute first.
+
+model:
+  vocab_size: 625
+  embed_dim: 512
+  n_heads: 8
+  n_layers: 8
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [5, 5, 5, 5]
+  dropout: 0.10
+  adaln: true
+
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 200
+  batch_size: 1024
+  lr: 0.001
+  lr_min: 0.00005
+  weight_decay: 0.001
+  cpc_weight: 1.0
+  token_noise: 0.0
+  fsq_noise: 0.05
+  label_smoothing: 0.1
+  fsq_kernel: gaussian
+  fsq_sigma: 0.7
+  fsq_dim_weights: [1.0, 1.0, 1.0, 1.0]
+  focal_gamma: 2.0
+  death_oversample: 4
+  seed: 42
+  checkpoint_dir: checkpoints_e6.15
+  joint: true
+  single_group: true
+  grad_clip: 10.0
+  alpha_uniform: 0.0
+  shift_max: 4
+  shift_max_x: 4
+  use_cpc: false
+  use_recon: true
+  recon_weight: 0.015
+  recon_loss_type: l1
+  learnable_gamma: false
+
+posthoc_decoder:
+  transformer_checkpoint: checkpoints_e6.15/transformer_best.pt
+  fsq_checkpoint: checkpoints_e6.15/fsq_best.pt
+  epochs: 30
+  batch_size: 512
+  lr: 0.001
+  seed: 42
+  checkpoint_dir: checkpoints_e6.15
+
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_e6.15/transformer_best.pt
+  epochs: 50
+  batch_size: 512
+  lr: 0.0005
+  weight_decay: 0.0001
+  jump_class_weight: 1.5
+  controller_dropout: 0.0
+  val_ratio: 0.1
+  token_embed_dim: 16
+  temporal_dim: 32
+  seed: 42
+  checkpoint_dir: checkpoints_e6.15
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_e6.15/transformer_best.pt
+  pretrained: checkpoints_e6.15/controller_bc_best.pt
+  amp_dtype: bfloat16
+  n_iterations: 5000
+  n_episodes: 4096
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 2048
+  lr_warmup_iters: 50
+  entropy_coeff: 0.001
+  jump_penalty: 0.15
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 25
+  death_threshold: 0.5
+  token_embed_dim: 16
+  temporal_dim: 32
+  controller_dropout: 0.0
+  n_eval_episodes: 512
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_e6.15
