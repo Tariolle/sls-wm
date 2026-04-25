@@ -81,7 +81,7 @@ We evaluate on Geometry Dash, where the controller is trained entirely in imagin
 
 Learning WMs that predict future observations from actions is central to model-based reinforcement learning~\citep{ha2018world}.
 Recent approaches tokenize visual frames into discrete codes and train autoregressive transformers to predict token sequences~\citep{micheli2023iris, hafner2025dreamerv3}.
-Finite Scalar Quantization~\citep[FSQ;][]{mentzer2024fsq} offers a simple alternative to VQ-VAE codebooks: each latent vector is independently rounded to one of $L$ levels per dimension, yielding $\prod_d L_d$ implicit codes with no codebook collapse and no auxiliary losses.
+Finite Scalar Quantization (FSQ)~\citep{mentzer2024fsq} offers a simple alternative to VQ-VAE codebooks: each latent vector is independently rounded to one of $L$ levels per dimension, yielding $\prod_d L_d$ implicit codes with no codebook collapse and no auxiliary losses.
 
 A key property of FSQ, largely unexploited in downstream tasks, is that its codebook has a natural coordinate structure.
 Each code maps to a point on a $D$-dimensional integer lattice, and the distance between two codes in this space is semantically meaningful: codes that differ by one step in one dimension represent visually similar patches.
