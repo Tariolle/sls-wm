@@ -64,7 +64,7 @@ def load_episodes(episodes_dir, context_frames, vae=None, device=None):
 
 
 def extract_bc_samples(episodes, context_frames, trim_end=0):
-    """Extract (context_tokens, context_actions, target_tokens, target_action) tuples.
+    """Extract (context_tokens, context_actions, target_action) tuples.
 
     Args:
         trim_end: exclude last N frames per episode (e.g. 2*K for death episodes).
@@ -72,7 +72,6 @@ def extract_bc_samples(episodes, context_frames, trim_end=0):
     K = context_frames
     all_ctx_tokens = []
     all_ctx_actions = []
-    all_target_tokens = []
     all_target_actions = []
 
     for tokens, actions in episodes:
@@ -80,12 +79,10 @@ def extract_bc_samples(episodes, context_frames, trim_end=0):
         for i in range(K, T):
             all_ctx_tokens.append(tokens[i - K:i])
             all_ctx_actions.append(actions[i - K:i])
-            all_target_tokens.append(tokens[i])
             all_target_actions.append(actions[i])
 
     return (np.array(all_ctx_tokens),      # (N, K, 64)
             np.array(all_ctx_actions),      # (N, K)
-            np.array(all_target_tokens),    # (N, 64)
             np.array(all_target_actions))   # (N,)
 
 
@@ -180,6 +177,8 @@ def main():
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
     wm.load_state_dict(state, strict=False)
     wm.eval()
+    for p in wm.parameters():
+        p.requires_grad_(False)
     print("World model loaded")
 
     vae = None
@@ -210,15 +209,14 @@ def main():
     val_eps = [(t, a) for t, a, name in all_eps if is_val_episode(name, val_set)]
 
     # Extract BC samples: trim last 2*K frames (death: outcome determined, expert: win animation)
-    train_ctx, train_act, train_tok, train_actions = \
+    train_ctx, train_act, train_actions = \
         extract_bc_samples(train_eps, K, trim_end=K * 2)
-    val_ctx, val_act, val_tok, val_actions = \
+    val_ctx, val_act, val_actions = \
         extract_bc_samples(val_eps, K, trim_end=K * 2)
 
     # Concatenate for unified indexing
     ctx_tokens = np.concatenate([train_ctx, val_ctx])
     ctx_actions = np.concatenate([train_act, val_act])
-    target_tokens = np.concatenate([train_tok, val_tok])
     target_actions = np.concatenate([train_actions, val_actions])
     N = len(target_actions)
 
@@ -242,16 +240,20 @@ def main():
         torch.cuda.empty_cache()
 
     # Prepare tensors
-    all_target_tokens = torch.from_numpy(target_tokens).long()
     all_target_actions = torch.from_numpy(target_actions).float()
 
-    # Class weight: upweight jumps so model can't just predict idle
-    jump_ratio = target_actions.mean()
+    # Class weight: upweight jumps so model can't just predict idle.
+    # Compute ratio from train split only -- including val leaks val
+    # statistics into the training loss.
+    train_actions_arr = target_actions[train_idx]
+    train_jump_ratio = train_actions_arr.mean()
     if args.jump_class_weight > 0:
         pos_weight = torch.tensor(args.jump_class_weight, device=device)
     else:
-        pos_weight = torch.tensor((1 - jump_ratio) / jump_ratio, device=device)
-    print(f"Jump class weight: {pos_weight.item():.2f}x (data ratio: {(1-jump_ratio)/jump_ratio:.2f}x)")
+        pos_weight = torch.tensor(
+            (1 - train_jump_ratio) / train_jump_ratio, device=device)
+    print(f"Jump class weight: {pos_weight.item():.2f}x "
+          f"(train data ratio: {(1-train_jump_ratio)/train_jump_ratio:.2f}x)")
 
     # Initialize controller (CNNPolicy: z_t spatial + h_t temporal)
     grid_size = int(args.tokens_per_frame ** 0.5)
