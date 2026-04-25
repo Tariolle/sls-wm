@@ -151,7 +151,7 @@
       <li><strong>Prediction-gradient routing.</strong> A learnable linear projection sits between the encoder's continuous latents and the transformer input; it contributes zero in the forward path (discrete indices still drive the transformer) but, under a straight-through estimator, carries prediction gradients back into the encoder.</li>
       <li><strong>Anti-collapse anchor.</strong> A light pixel-reconstruction loss is retained only as an anti-collapse regularizer on the encoder. Removing it causes the joint encoder + transformer to degenerate. Finding a decoder-free discrete anti-collapse signal (a discrete counterpart to SIGReg) is open work.</li>
       <li><strong>Zero-calibration kernel.</strong> The SLS bandwidth is set by a first-neighbour rule on the FSQ lattice, so no per-dataset sensitivity probe is needed and the hyperparameter is robust to codebook drift under joint training.</li>
-      <li><strong>Real-time deployment.</strong> The full V-M-C pipeline runs at 30&nbsp;FPS on consumer hardware, driving Geometry Dash in real time via screen capture with GPU-resident token buffers, CUDA Graphs, and <code>torch.compile</code> in <code>reduce-overhead</code> mode.</li>
+      <li><strong>Real-time deployment.</strong> The full V-M-C pipeline runs at 30&nbsp;FPS on consumer hardware, with screen capture overlapped onto GPU inference via pinned-memory non-blocking transfers, a GPU-resident token ring buffer, CUDA Graphs, and <code>torch.compile</code> in <code>reduce-overhead</code> mode.</li>
     </ul>
   </div>
 </section>
