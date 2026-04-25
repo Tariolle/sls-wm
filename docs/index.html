@@ -85,9 +85,6 @@
 <section id="abstract">
   <div class="container-narrow">
     <h2 class="section-title">Abstract</h2>
-    <p class="tldr">
-      <strong>TL;DR.</strong> A training objective that exploits the FSQ codebook lattice so near-miss predictions are treated as near-misses rather than gross errors, studied under joint encoder + transformer training and deployed at 30&nbsp;FPS on Geometry Dash.
-    </p>
     <p class="abstract">
       Discrete World Models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer, but standard cross-entropy treats every incorrect prediction as equally wrong. Finite Scalar Quantization (FSQ) makes a richer signal available by construction: each code sits on an integer coordinate lattice, so a token one step away in one dimension is a near-miss while a token at the opposite corner is a gross error.
     </p>
@@ -96,6 +93,9 @@
     </p>
     <p class="abstract">
       An isotropic kernel with bandwidth fixed by a first-neighbour rule gives a zero-calibration hyperparameter that is robust to codebook drift. We evaluate on Geometry Dash, where the controller is trained entirely in imagination and deployed at 30&nbsp;FPS on the real game via screen capture.
+    </p>
+    <p class="tldr">
+      <strong>TL;DR.</strong> A training objective that exploits the FSQ codebook lattice so near-miss predictions are treated as near-misses rather than gross errors, studied under joint encoder + transformer training and deployed at 30&nbsp;FPS on Geometry Dash.
     </p>
   </div>
 </section>

@@ -127,7 +127,7 @@ section h2.section-title {
   padding: 0.7rem 1rem;
   border-radius: 4px;
   font-size: 0.95rem;
-  margin: 0 auto 1.4rem;
+  margin: 1.4rem auto 0;
   color: #333;
 }
 
