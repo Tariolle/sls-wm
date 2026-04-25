@@ -21,8 +21,20 @@
 
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/academicons@1.9.4/css/academicons.min.css" />
 
   <link rel="stylesheet" href="static/css/style.css" />
+
+  <script>
+    window.MathJax = {
+      tex: {
+        inlineMath: [['$', '$'], ['\\(', '\\)']],
+        displayMath: [['$$', '$$'], ['\\[', '\\]']]
+      },
+      svg: { fontCache: 'global' }
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
 </head>
 
 <body>
@@ -70,9 +82,12 @@
 <hr class="divider" />
 
 <!-- Abstract -->
-<section>
+<section id="abstract">
   <div class="container-narrow">
     <h2 class="section-title">Abstract</h2>
+    <p class="tldr">
+      <strong>TL;DR.</strong> A training objective that exploits the FSQ codebook lattice so near-miss predictions are treated as near-misses rather than gross errors, studied under joint encoder + transformer training and deployed at 30&nbsp;FPS on Geometry Dash.
+    </p>
     <p class="abstract">
       Discrete World Models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer, but standard cross-entropy treats every incorrect prediction as equally wrong. Finite Scalar Quantization (FSQ) makes a richer signal available by construction: each code sits on an integer coordinate lattice, so a token one step away in one dimension is a near-miss while a token at the opposite corner is a gross error.
     </p>
@@ -88,7 +103,7 @@
 <hr class="divider" />
 
 <!-- Pipeline overview -->
-<section>
+<section id="pipeline">
   <div class="container-narrow">
     <h2 class="section-title">Pipeline overview</h2>
     <figure class="centered">
@@ -103,11 +118,17 @@
 <hr class="divider" />
 
 <!-- SLS figure -->
-<section>
+<section id="sls">
   <div class="container-narrow">
     <h2 class="section-title">Structured Label Smoothing</h2>
     <p>
-      Uniform label smoothing distributes mass equally across the vocabulary, treating all incorrect tokens as equally wrong. SLS replaces the uniform component with a kernel over FSQ lattice coordinates, so tokens one quantization step away from the target receive most of the smoothing mass and distant tokens receive negligible weight.
+      One-hot cross-entropy ignores codebook geometry entirely. SLS replaces the one-hot training target with a kernel over FSQ lattice coordinates, so tokens one quantization step away from the target receive most of the supervision mass and distant tokens receive negligible weight. Concretely, given the target token $i$ and an alternative $j$ with FSQ coordinates $\mathbf{c}(i), \mathbf{c}(j)$ on the integer lattice:
+    </p>
+    <p class="equation">
+      $$q_{\text{SLS}}(j \mid i) \;\propto\; k\!\left(\lVert \mathbf{c}(j) - \mathbf{c}(i) \rVert\right), \qquad k(d) = e^{-d^{2}/2\sigma^{2}}.$$
+    </p>
+    <p>
+      The bandwidth $\sigma$ is fixed by a first-neighbour rule (immediate lattice neighbour at the kernel's half-maximum), giving a zero-calibration hyperparameter that is robust to codebook drift under joint training. Classical uniform label smoothing is the structureless limit of this construction.
     </p>
     <figure class="centered">
       <img src="static/images/sls_kernel.png" alt="SLS kernel visualization: 2D slice and sorted distribution vs. uniform" />
@@ -122,7 +143,7 @@
 <hr class="divider" />
 
 <!-- Method highlights -->
-<section>
+<section id="method">
   <div class="container-narrow">
     <h2 class="section-title">Method highlights</h2>
     <ul>

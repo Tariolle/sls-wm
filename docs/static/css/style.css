@@ -121,6 +121,22 @@ section h2.section-title {
   text-align: justify;
 }
 
+.tldr {
+  background: #f7f9fc;
+  border-left: 3px solid var(--accent);
+  padding: 0.7rem 1rem;
+  border-radius: 4px;
+  font-size: 0.95rem;
+  margin: 0 auto 1.4rem;
+  color: #333;
+}
+
+.equation {
+  text-align: center;
+  margin: 1.2rem 0;
+  overflow-x: auto;
+}
+
 figure.centered {
   margin: 0 auto;
   text-align: center;
