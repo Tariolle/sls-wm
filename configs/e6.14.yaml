@@ -1,26 +1,20 @@
-# E6.14 -- E6.10 baseline + jump_penalty=0.15.
+# E6.14 -- E6.10 + restore horizontal shift augmentation + jump_penalty=0.15.
 #
-# Forks E6.10 (the last known-stable WM recipe) and carries forward the
-# only orthogonal tweak that survived the failed E6.12 (slim WM) and E6.13
-# (SIGReg) detours: controller_ppo.jump_penalty 0.25 -> 0.15. Everything
-# else identical to E6.10: 512d/8L/8H transformer, joint FSQ+transformer,
-# pixel MSE recon (use_recon=true), Gaussian SLS sigma=0.7, single-group
-# AdamW, grad_clip=10.0.
+# Restores per-batch horizontal shift augmentation that was silently dropped
+# in 2026-03-24 (a480ef3) when the on-the-fly augment_batch was refactored
+# into shift_episodes.py with dx hardcoded to 0. The pre-fix V1/V2 FSQ saw
+# random per-sample x+y shifts in [-4, +4]; the resulting "smoothed" codebook
+# is what the V3-best 512d transformer (val_acc 35%, deploy 20% level 1) was
+# trained on. Every checkpoint since lost that scroll-phase invariance.
 #
-# Why this config:
-#   - E6.12 (slim WM): two encoder-collapse events from gradient spikes.
-#     Slim track abandoned; recon=0.3 + tighter capacity broke HP balance.
-#   - E6.13 (SIGReg replaces recon): SIGReg curves matched LeWM's shape
-#     and the codebook stayed healthy, but train token loss plateaued at
-#     ~3.4 (vs E6.10's ~2.5) and death_F1 stayed at 0 across 49 epochs.
-#     SIGReg constrains batch-distribution Gaussianity but provides no
-#     per-frame fidelity signal -- pixel MSE was doing both jobs in
-#     E6.10. Discrete-CE prediction (ours) doesn't supply that fidelity
-#     either, unlike LeWM's continuous-MSE prediction.
+# With stride-8 tokens (64x64 frames -> 8x8 token grid), shifts of [-4, +4]
+# in both axes cover all 64 sub-patch phases (8x8 period). The encoder
+# becomes invariant to where in a patch the world has scrolled to, which
+# matters because Geometry Dash scrolls horizontally and the deploy-time
+# scroll phase doesn't pixel-align to training.
 #
-# Ship E6.10 chassis as-is, attack the controller plateau through the
-# WM<->controller interface (h_t readout, dream policy, etc.) instead of
-# trying to reshape the latent geometry upstream.
+# Also carries forward jump_penalty 0.25 -> 0.15 from the failed E6.12/E6.13
+# detours. Everything else identical to E6.10.
 
 model:
   vocab_size: 625
@@ -57,6 +51,7 @@ transformer:
   grad_clip: 10.0
   alpha_uniform: 0.0
   shift_max: 4
+  shift_max_x: 4
   use_cpc: false
   use_recon: true
   learnable_gamma: false

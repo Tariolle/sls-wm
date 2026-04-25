@@ -586,7 +586,8 @@ class JointStep(nn.Module):
 
     def __init__(self, fsq, wm, *, alpha_uniform,
                  label_smoothing, focal_gamma, token_noise, fsq_noise,
-                 shift_max=0, use_recon=True, recon_weight=1.0,
+                 shift_max=0, shift_max_x=0,
+                 use_recon=True, recon_weight=1.0,
                  neighbor_table=None, neighbor_counts=None,
                  soft_target_matrix=None,
                  fsq_levels=None, fsq_sigma=0.9):
@@ -608,6 +609,7 @@ class JointStep(nn.Module):
         else:
             self._has_coords = False
         self.shift_max = int(shift_max)
+        self.shift_max_x = int(shift_max_x)
         self._has_fsq_levels = fsq_levels is not None
         if neighbor_table is not None:
             self.register_buffer("neighbor_table", neighbor_table, persistent=False)
@@ -639,6 +641,13 @@ class JointStep(nn.Module):
                                device=raw_frames.device)
             row_idx = (torch.arange(H, device=raw_frames.device) - dy).clamp(0, H - 1)
             raw_frames = raw_frames.index_select(-2, row_idx)
+
+        if self.training and self.shift_max_x > 0:
+            W = raw_frames.shape[-1]
+            dx = torch.randint(-self.shift_max_x, self.shift_max_x + 1, (1,),
+                               device=raw_frames.device)
+            col_idx = (torch.arange(W, device=raw_frames.device) - dx).clamp(0, W - 1)
+            raw_frames = raw_frames.index_select(-1, col_idx)
 
         z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
             self.fsq, raw_frames, K, tpf, fsq_dim,
@@ -1143,6 +1152,8 @@ def main():
                              "Default 15 when grad_skip_threshold is set.")
     parser.add_argument("--shift-max", type=int, default=None,
                         help="Max per-batch vertical shift pixels. 0 disables.")
+    parser.add_argument("--shift-max-x", type=int, default=None,
+                        help="Max per-batch horizontal shift pixels. 0 disables.")
     parser.add_argument("--use-recon", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="Include FSQ recon loss in the joint training loss. "
@@ -1517,6 +1528,7 @@ def main():
     joint_step_val = None
     if joint:
         shift_max = int(getattr(args, "shift_max", 0) or 0)
+        shift_max_x = int(getattr(args, "shift_max_x", 0) or 0)
         # Under learnable γ the soft_target_matrix is irrelevant (rebuilt
         # per forward). Pass None to save the buffer copy.
         soft_tm_for_joint = None if learnable_gamma else soft_target_matrix
@@ -1531,7 +1543,8 @@ def main():
             label_smoothing=args.label_smoothing,
             focal_gamma=args.focal_gamma,
             token_noise=args.token_noise, fsq_noise=args.fsq_noise,
-            shift_max=shift_max, use_recon=use_recon,
+            shift_max=shift_max, shift_max_x=shift_max_x,
+            use_recon=use_recon,
             recon_weight=recon_weight,
             neighbor_table=neighbor_table, neighbor_counts=neighbor_counts,
             soft_target_matrix=soft_tm_for_joint,
@@ -1542,8 +1555,9 @@ def main():
             alpha_uniform=args.alpha_uniform,
             label_smoothing=args.label_smoothing,
             focal_gamma=args.focal_gamma,
-            token_noise=0.0, fsq_noise=0.0,          # no noise at eval
-            shift_max=0, use_recon=use_recon,         # no shift at eval
+            token_noise=0.0, fsq_noise=0.0,                # no noise at eval
+            shift_max=0, shift_max_x=0,                    # no shift at eval
+            use_recon=use_recon,
             recon_weight=recon_weight,
             neighbor_table=None, neighbor_counts=None,
             soft_target_matrix=soft_tm_for_joint,
