@@ -637,17 +637,21 @@ class JointStep(nn.Module):
 
         if self.training and self.shift_max > 0:
             H = raw_frames.shape[-2]
-            dy = torch.randint(-self.shift_max, self.shift_max + 1, (1,),
+            dy = torch.randint(-self.shift_max, self.shift_max + 1, (B,),
                                device=raw_frames.device)
-            row_idx = (torch.arange(H, device=raw_frames.device) - dy).clamp(0, H - 1)
-            raw_frames = raw_frames.index_select(-2, row_idx)
+            row_idx = (torch.arange(H, device=raw_frames.device)[None, :]
+                       - dy[:, None]).clamp(0, H - 1)
+            row_idx = row_idx[:, None, :, None].expand_as(raw_frames)
+            raw_frames = torch.gather(raw_frames, -2, row_idx)
 
         if self.training and self.shift_max_x > 0:
             W = raw_frames.shape[-1]
-            dx = torch.randint(-self.shift_max_x, self.shift_max_x + 1, (1,),
+            dx = torch.randint(-self.shift_max_x, self.shift_max_x + 1, (B,),
                                device=raw_frames.device)
-            col_idx = (torch.arange(W, device=raw_frames.device) - dx).clamp(0, W - 1)
-            raw_frames = raw_frames.index_select(-1, col_idx)
+            col_idx = (torch.arange(W, device=raw_frames.device)[None, :]
+                       - dx[:, None]).clamp(0, W - 1)
+            col_idx = col_idx[:, None, None, :].expand_as(raw_frames)
+            raw_frames = torch.gather(raw_frames, -1, col_idx)
 
         z_e_all, z_q_all, indices_all, recon_all, frames_f = _encode_joint(
             self.fsq, raw_frames, K, tpf, fsq_dim,
