@@ -1,8 +1,8 @@
 """Train controller via PPO in dream rollouts.
 
-MLP actor-critic policy on h_t. PPO reuses dream rollout data for
-multiple gradient updates via clipped surrogate objective.
-GAE advantages, survival reward.
+CNN actor-critic on z_t (token grid) + h_t projection. PPO reuses dream
+rollout data for multiple gradient updates via clipped surrogate
+objective. GAE advantages, survival reward.
 
 Usage:
     python scripts/train_controller_ppo.py
@@ -18,12 +18,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from deepdash.wandb_utils import wandb_init, wandb_log, wandb_finish, wandb_run_id
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from deepdash.wandb_utils import wandb_init, wandb_log, wandb_finish, wandb_run_id
 from deepdash.world_model import WorldModel
 from deepdash.controller import CNNPolicy
 
@@ -162,6 +160,22 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
     if not all_rewards:
         return None, survival
 
+    # Bootstrap value V(s_T) for envs still alive at truncation. Without
+    # this, GAE would drop the tail value entirely on truncated rollouts
+    # and bias returns low. Mask by `alive` so terminated envs contribute
+    # zero bootstrap.
+    if alive.any():
+        with torch.no_grad(), torch.autocast(
+                "cuda", dtype=amp_dtype, enabled=device.type == "cuda"):
+            _, _, h_t_boot = model.predict_next_frame(
+                ctx_t, ctx_a, temperature=0.0, return_hidden=True)
+        z_t_boot = ctx_t[:, -1, :TPF]
+        with torch.no_grad():
+            _, _, _, bootstrap_value = controller.act(z_t_boot, h_t_boot.float())
+        bootstrap_value = bootstrap_value * alive.float()
+    else:
+        bootstrap_value = torch.zeros(B, device=device)
+
     rollout = {
         'z_t': torch.stack(all_z_t),                      # (T, B, TPF)
         'h_t': torch.stack(all_h_t),                      # (T, B, 512)
@@ -170,16 +184,23 @@ def dream_rollout(model, controller, ctx_tokens_np, ctx_actions_np,
         'rewards': torch.stack(all_rewards),              # (T, B)
         'values': torch.stack(all_values),                # (T, B)
         'alive_masks': torch.stack(all_alive_masks),      # (T, B)
+        'bootstrap_value': bootstrap_value,               # (B,)
     }
     return rollout, survival
 
 
-def compute_gae(rewards, values, gamma, lam):
-    """Compute GAE advantages and returns.
+def compute_gae(rewards, values, gamma, lam, alive_masks, bootstrap_value):
+    """Compute GAE advantages and returns with terminal masking.
 
     Args:
         rewards: (T, B)
         values: (T, B)
+        alive_masks: (T, B) -- 1.0 if step t is a valid (alive) transition.
+            Bootstrap from values[t+1] is gated by alive_masks[t+1] so dead
+            transitions do not propagate ghost-alive value.
+        bootstrap_value: (B,) -- critic value at the post-truncation state
+            for rollouts that reached the horizon alive. Pass zeros if the
+            caller wants the legacy "drop the tail" behavior.
     Returns:
         advantages: (T, B)
         returns: (T, B)
@@ -190,11 +211,13 @@ def compute_gae(rewards, values, gamma, lam):
 
     for t in reversed(range(T)):
         if t == T - 1:
-            next_value = torch.zeros(B, device=rewards.device)
+            next_value = bootstrap_value
+            next_alive = alive_masks[t]
         else:
             next_value = values[t + 1]
-        delta = rewards[t] + gamma * next_value - values[t]
-        gae = delta + gamma * lam * gae
+            next_alive = alive_masks[t + 1]
+        delta = rewards[t] + gamma * next_value * next_alive - values[t]
+        gae = delta + gamma * lam * next_alive * gae
         advantages[t] = gae
 
     returns = advantages + values
@@ -222,7 +245,11 @@ class PercentileNormalizer:
             self.high = self.momentum * self.high + (1 - self.momentum) * p95
 
     def normalize(self, advantages):
-        scale = max(1.0, self.high - self.low)
+        # Tiny eps avoids divide-by-zero before any update; remove the
+        # 1.0 floor so the scale tracks the actual return spread (the
+        # floor under-scaled advantages on short rollouts where the
+        # 5/95 spread is naturally below 1).
+        scale = max(1e-8, self.high - self.low)
         return advantages / scale
 
 
@@ -432,6 +459,15 @@ def main():
     if args.no_pretrained:
         args.pretrained = None
 
+    # Hard-block controller dropout under PPO. The eval-rollout vs
+    # train-update asymmetry turns the importance ratio into a measure
+    # of dropout-mask noise (see feedback_ppo_no_dropout.md). CNNPolicy
+    # has no dropout module today, but a future config could add one.
+    assert float(getattr(args, "controller_dropout", 0.0) or 0.0) == 0.0, (
+        "controller_dropout must be 0 under PPO; eval/train mask asymmetry "
+        "collapses entropy. See feedback_ppo_no_dropout.md."
+    )
+
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
@@ -458,6 +494,8 @@ def main():
     state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
     model.load_state_dict(state, strict=False)
     model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
 
     # AMP dtype: bfloat16 on A100+, float16 on Turing (RTX 2060 etc.)
     amp_dtype_str = getattr(args, 'amp_dtype', 'bfloat16')
@@ -567,6 +605,10 @@ def main():
         # Restore RNG state for reproducible continuation
         rng = np.random.default_rng()
         rng.bit_generator.state = ckpt["rng_state"]
+        if "torch_rng_state" in ckpt:
+            torch.set_rng_state(ckpt["torch_rng_state"])
+        if "torch_cuda_rng_state_all" in ckpt and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(ckpt["torch_cuda_rng_state_all"])
         # Restore EMA controller and percentile normalizer
         if "ema_controller" in ckpt:
             ema_controller.load_state_dict(ckpt["ema_controller"])
@@ -654,7 +696,9 @@ def main():
         with torch.no_grad():
             advantages, returns = compute_gae(
                 rollout['rewards'], rollout['values'],
-                args.gamma, args.lam)
+                args.gamma, args.lam,
+                alive_masks=rollout['alive_masks'],
+                bootstrap_value=rollout['bootstrap_value'])
 
         # PPO update (4 epochs on cached data)
         controller.train()
@@ -724,6 +768,10 @@ def main():
                 "optimizer": optimizer.state_dict(),
                 "best_eval": best_eval,
                 "rng_state": rng.bit_generator.state,
+                "torch_rng_state": torch.get_rng_state(),
+                "torch_cuda_rng_state_all": (
+                    torch.cuda.get_rng_state_all()
+                    if torch.cuda.is_available() else None),
                 "ema_controller": ema_controller.state_dict(),
                 "pct_low": pct_normalizer.low,
                 "pct_high": pct_normalizer.high,
