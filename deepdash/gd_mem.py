@@ -93,7 +93,7 @@ def _get_base_address(pid: int, module_name: str) -> int:
         raise RuntimeError("Module32First failed")
     while True:
         if entry.szModule.decode("utf-8", "replace").lower() == module_name.lower():
-            addr = ctypes.addressof(entry.modBaseAddr.contents)
+            addr = ctypes.cast(entry.modBaseAddr, ctypes.c_void_p).value
             kernel32.CloseHandle(snap)
             return addr
         if not kernel32.Module32Next(snap, ctypes.byref(entry)):
@@ -111,12 +111,14 @@ def _read_u64(handle: int, addr: int) -> int:
     return struct.unpack("<Q", buf.raw)[0]
 
 
-def _read_u8(handle: int, addr: int) -> int:
+def _read_u8(handle: int, addr: int):
+    """Read one byte from the target process. Returns None on failure so
+    callers can distinguish a real zero (alive) from a failed read."""
     buf = ctypes.create_string_buffer(1)
     n = ctypes.c_size_t(0)
     ok = kernel32.ReadProcessMemory(handle, addr, buf, 1, ctypes.byref(n))
     if not ok:
-        return 0
+        return None
     return buf.raw[0]
 
 
@@ -159,11 +161,13 @@ class GDReader:
         return play_layer != 0
 
     def is_dead(self) -> bool:
-        """True if m_player1->m_isDead is set."""
+        """True if m_player1->m_isDead is set. Treats RPM failures as
+        terminal (not alive) to avoid hiding deploy bugs."""
         addr = self._follow_chain(OFF_PLAY_LAYER, OFF_PLAYER1, OFF_IS_DEAD)
         if addr == 0:
             return False
-        return _read_u8(self.handle, addr) != 0
+        b = _read_u8(self.handle, addr)
+        return b is None or b != 0
 
     def get_state(self) -> dict:
         """Read full game state: in_level, is_dead."""
@@ -176,7 +180,8 @@ class GDReader:
         player1 = _read_u64(self.handle, play_layer + OFF_PLAYER1)
         if player1 == 0:
             return {"in_level": True, "is_dead": False}
-        is_dead = _read_u8(self.handle, player1 + OFF_IS_DEAD) != 0
+        b = _read_u8(self.handle, player1 + OFF_IS_DEAD)
+        is_dead = b is None or b != 0
         return {"in_level": True, "is_dead": is_dead}
 
     def __enter__(self):
