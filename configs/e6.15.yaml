@@ -13,12 +13,17 @@
 #      variants). For Geometry Dash at 64x64 where 2-pixel obstacle errors
 #      are the difference between life and death, sharp commits matter.
 #      Standard image-restoration result (Zhao et al. 2017, IRIS, SimPLE).
-#   2. recon_weight: 1.0 -> 0.015. L1 sum-of-abs-errors is ~30x larger than
-#      L2 sum-of-squared-errors at convergence (RMS pixel error ~0.025 ->
-#      L1 sum ~100, L2 sum ~2.5). Calibrated to give roughly 60% of E6.10's
-#      effective recon contribution at convergence (0.015 * 100 = 1.5 vs
-#      E6.10's 1.0 * 2.5 = 2.5). Frees the encoder to spend capacity on
-#      death-relevant features rather than pixel-perfect shift reconstruction.
+#   2. recon_weight: 1.0 -> 0.5. First-attempt 0.015 (calibrated to match
+#      ~60% of E6.10's late-training recon contribution) collapsed the
+#      codebook to <15 effective codes by epoch 2 (val_acc 0.99, ppl 0.2%):
+#      the predict-most-common-code attractor. Failure mode mirrors E6.13
+#      SIGReg. Root cause: L1/L2 magnitude ratio is non-stationary -- ~2x
+#      at high error (epoch 1) but ~30x at convergence -- so 0.015 was only
+#      0.03 in L2-equivalent terms during the critical early epochs, far
+#      too weak to anchor the encoder against CE collapse. 0.5 matches
+#      E6.10's early-stage L2 anchor strength (since L1 ~ L2 at high
+#      error), preventing collapse, while accepting stronger late-stage
+#      anchoring than E6.10 had.
 #
 # Per-sample shift kept (per-batch was a vectorization hack; per-sample is
 # the principled SSL convention). Death-prediction levers (status weight,
@@ -62,7 +67,7 @@ transformer:
   shift_max_x: 4
   use_cpc: false
   use_recon: true
-  recon_weight: 0.015
+  recon_weight: 0.5
   recon_loss_type: l1
   learnable_gamma: false
 
