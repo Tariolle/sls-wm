@@ -66,12 +66,12 @@
 \end{center}
 
 \begin{abstract}
-Discrete World Models (WMs) tokenize observations with a learned quantizer and predict next-frame tokens with a transformer.
-Standard cross-entropy training treats every incorrect prediction as equally wrong, discarding a signal that Finite Scalar Quantization (FSQ) makes available by construction: each code sits at a point on an integer coordinate lattice, so some wrong predictions are near-misses (one quantization step away in one dimension, a near-identical reconstruction) while others are gross errors (opposite corner of the codebook, unrelated content).
-We introduce \emph{FSQ-Structured Label Smoothing} (SLS), a training objective that replaces uniform label smoothing with a kernel over the integer-lattice coordinates of the FSQ codebook, so a near-miss prediction is treated as a near-miss rather than a gross error.
-We train the FSQ encoder jointly with the dynamics transformer entirely in the discrete latent space: prediction gradients flow back into the encoder through a learnable linear projection and a straight-through estimator, and a light pixel-reconstruction loss is retained as an anti-collapse regularizer on the encoder, not as a predictive objective.
-We study three kernel families (Gaussian, Laplace, Cauchy) under this joint-training setup and use an isotropic kernel with bandwidth set by a first-neighbour rule, which requires zero data-derived hyperparameters.
-We evaluate on Geometry Dash, a deterministic platformer with binary actions and precision timing, where the controller is trained entirely in imagination and deployed at 30\,FPS on the real game via screen capture.
+Discrete World Models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer, but standard cross-entropy treats every incorrect prediction as equally wrong.
+Finite Scalar Quantization (FSQ) makes a richer signal available by construction: each code sits on an integer coordinate lattice, so a token one step away in one dimension is a near-miss while a token at the opposite corner is a gross error.
+We introduce \emph{Structured Label Smoothing} (SLS), which replaces the one-hot training target with a kernel over codebook coordinates, so a near-miss prediction is treated as a near-miss rather than a gross error.
+We study SLS under joint training of the FSQ encoder and the dynamics transformer in a single discrete latent space, with a straight-through path carrying prediction gradients back into the encoder and a light pixel-reconstruction loss retained only as an anti-collapse regularizer.
+An isotropic kernel with bandwidth fixed by a first-neighbour rule gives a zero-calibration hyperparameter that is robust to codebook drift.
+We evaluate on Geometry Dash, where the controller is trained entirely in imagination and deployed at 30\,FPS on the real game via screen capture.
 \end{abstract}
 
 % ===========================================================================
@@ -85,14 +85,12 @@ Finite Scalar Quantization~\citep[FSQ;][]{mentzer2024fsq} offers a simple altern
 
 A key property of FSQ, largely unexploited in downstream tasks, is that its codebook has a natural coordinate structure.
 Each code maps to a point on a $D$-dimensional integer lattice, and the distance between two codes in this space is semantically meaningful: codes that differ by one step in one dimension represent visually similar patches.
-Yet standard cross-entropy training treats all incorrect predictions as equally wrong, discarding this metric information entirely.
+Yet discrete WMs supervise next-token prediction with one-hot cross-entropy on tokenizer indices~\citep{micheli2023iris}, which exploits no coordinate metric on the latent space and treats a near-miss (one lattice step from the target) and a gross error (opposite corner of the codebook) as equally informative training signals.
 
-Label smoothing~\citep{szegedy2016rethinking} is a well-known regularizer that replaces hard targets with a mixture of the ground truth and a uniform distribution over classes.
-We observe that for FSQ-tokenized WMs, the uniform assumption is suboptimal: a token one lattice step away from the target is a near-miss, while a token at the opposite corner of the codebook is a gross error.
-We propose \emph{Structured Label Smoothing} (SLS), which replaces the uniform component with a kernel over FSQ coordinate distances.
+We propose \emph{Structured Label Smoothing} (SLS), a soft-target objective whose target distribution is a kernel over FSQ coordinate distances, so the supervision signal reflects the geometry the quantizer has already learned.
+Classical uniform label smoothing~\citep{szegedy2016rethinking} is the structureless limit of this construction and a natural ablation, not the baseline SLS improves over.
 
 This can be viewed as part of a broader shift from data-agnostic heuristics to structure derived from learned representations, analogous to how learned strided convolutions replaced fixed max-pooling for spatial downsampling~\citep{springenberg2015striving}.
-Uniform label smoothing treats the label space as structureless; SLS recovers the metric that the quantizer has already learned.
 Unlike knowledge distillation, which requires a separate teacher model to produce soft targets, SLS exploits geometry already present in the FSQ codebook at no additional cost.
 
 We study SLS under a joint-training setup in which the FSQ encoder and the transformer are optimized together, so that prediction gradients shape the codebook rather than consuming a fixed tokenization.
@@ -102,7 +100,7 @@ The full pipeline runs in real time at 30\,FPS on consumer hardware.
 
 Our contributions are:
 \begin{enumerate}
-  \item \textbf{FSQ-Structured Label Smoothing (SLS)}: a training objective that exploits FSQ coordinate geometry to distribute smoothing mass according to codebook distance. We study three kernel families and adopt an isotropic bandwidth set by a first-neighbour rule, giving a zero-calibration hyperparameter that is robust to codebook drift under joint training. The formulation generalizes to any discrete latent space with a coordinate metric.
+  \item \textbf{Structured Label Smoothing (SLS)}: a training objective that exploits FSQ coordinate geometry to distribute smoothing mass according to codebook distance. We study three kernel families and adopt an isotropic bandwidth set by a first-neighbour rule, giving a zero-calibration hyperparameter that is robust to codebook drift under joint training. The formulation generalizes to any discrete latent space with a coordinate metric.
   \item \textbf{A real-time WM system}: a complete V-M-C pipeline for Geometry Dash running at 30\,FPS, combining joint-trained FSQ tokenization with prediction-gradient feedback, AdaLN-conditioned transformers, and PPO-in-dreams.
 \end{enumerate}
 

@@ -74,13 +74,13 @@
   <div class="container-narrow">
     <h2 class="section-title">Abstract</h2>
     <p class="abstract">
-      Discrete world models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer. Standard cross-entropy training treats every incorrect prediction as equally wrong, discarding a signal that Finite Scalar Quantization (FSQ) makes available by construction: each code sits at a point on an integer coordinate lattice, so some wrong predictions are near-misses (one quantization step away in one dimension, a near-identical reconstruction) while others are gross errors (opposite corner of the codebook, unrelated content).
+      Discrete World Models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer, but standard cross-entropy treats every incorrect prediction as equally wrong. Finite Scalar Quantization (FSQ) makes a richer signal available by construction: each code sits on an integer coordinate lattice, so a token one step away in one dimension is a near-miss while a token at the opposite corner is a gross error.
     </p>
     <p class="abstract">
-      We introduce <em>FSQ-Structured Label Smoothing</em> (SLS), a training objective that replaces uniform label smoothing with a kernel over the integer-lattice coordinates of the FSQ codebook, so a near-miss prediction is treated as a near-miss rather than a gross error. We train the FSQ encoder jointly with the dynamics transformer entirely in the discrete latent space: prediction gradients flow back into the encoder through a learnable linear projection and a straight-through estimator, and a light pixel-reconstruction loss is retained as an anti-collapse regularizer on the encoder, not as a predictive objective.
+      We introduce <em>Structured Label Smoothing</em> (SLS), which replaces the one-hot training target with a kernel over codebook coordinates, so a near-miss prediction is treated as a near-miss rather than a gross error. We study SLS under joint training of the FSQ encoder and the dynamics transformer in a single discrete latent space, with a straight-through path carrying prediction gradients back into the encoder and a light pixel-reconstruction loss retained only as an anti-collapse regularizer.
     </p>
     <p class="abstract">
-      We study three kernel families (Gaussian, Laplace, Cauchy) under this joint-training setup and use an isotropic kernel with bandwidth set by a first-neighbour rule, which requires zero data-derived hyperparameters. We evaluate on Geometry Dash, a deterministic platformer with binary actions and precision timing, where the controller is trained entirely in imagination and deployed at 30&nbsp;FPS on the real game via screen capture.
+      An isotropic kernel with bandwidth fixed by a first-neighbour rule gives a zero-calibration hyperparameter that is robust to codebook drift. We evaluate on Geometry Dash, where the controller is trained entirely in imagination and deployed at 30&nbsp;FPS on the real game via screen capture.
     </p>
   </div>
 </section>
