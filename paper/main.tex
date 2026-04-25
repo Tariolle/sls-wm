@@ -376,6 +376,13 @@ A secondary NVIDIA RTX 2060 SUPER (Turing, SM 7.5) was used in parallel for auxi
 Turing lacks native BF16 (software-emulated and much slower than FP32 on this card) and has no TF32 support; Inductor's channels-last layout heuristic additionally triggers a stride assertion in the convolution backward, which we disable by setting \texttt{torch.\_inductor.config.layout\_optimization = False}.
 Under these constraints the best local configuration is \texttt{torch.compile} in \texttt{default} mode with FP16 and a \texttt{GradScaler}.
 
+\paragraph{Real-time inference.}
+Deployment must process each frame within a 33\,ms budget to sustain 30\,FPS in the live game.
+We overlap screen capture with GPU inference: each captured frame is staged into a pinned-memory tensor and uploaded to the GPU with \texttt{non\_blocking=True}, so the next CPU-side capture can issue while the previous frame's encode-and-predict pass is still executing.
+The transformer's context window is held as a GPU-resident ring buffer of FSQ token indices, eliminating a GPU$\to$CPU$\to$GPU round-trip per frame.
+The encoder forward pass is wrapped in a CUDA Graph after a short warm-up, and the entire model graph is compiled with \texttt{torch.compile} in \texttt{reduce-overhead} mode.
+Under these optimizations the full pipeline (screen capture, Sobel preprocessing, FSQ encode, transformer step, controller action) sustains 30\,FPS on a single RTX 2060 SUPER.
+
 \paragraph{BC pretraining ablation.}
 To verify that BC pretraining is a convergence accelerator rather than a stability requirement, we train one PPO run from random initialization.
 Cold-start PPO converges to the same plateau as BC-initialized PPO on all metrics (eval survival, entropy, jump ratio) but requires roughly 2{,}000 additional iterations (${\approx}6$ hours on A100); BC itself takes $\sim$5 minutes, giving a large compute ROI.
