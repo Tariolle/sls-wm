@@ -1,0 +1,125 @@
+# E6.16 -- E6.10 + per-sample horizontal shift + recon_weight=0.5 (L2).
+#
+# Single-knob delta from E6.10: per-sample shift augmentation in [-4, +4] on
+# both axes (was absent in E6.10), plus recon_weight halved to 0.5 to free
+# the encoder from full-pixel obligation under the new 81-phase load. Loss
+# form stays L2 (stationary scaling, unlike E6.15's L1 which scaled 7x at
+# convergence relative to E6.10's anchor budget).
+#
+# Why this run:
+#   - E6.15 (L1 + per-sample shift + recon_weight=0.5) trained smoothly but
+#     underperformed E6.10 by -3.5 val_death_F1 / -2.4 val_acc. Encoder
+#     grad_rms 23.9 vs E6.10's 6.4 (4x), train_acc drifted *down* late
+#     (0.355 epoch 25 -> 0.336 epoch 200). Diagnosis: L1 magnitude grows
+#     ~30x from epoch 1 to convergence, so 0.5*L1 was 7x heavier than
+#     E6.10's recon contribution at convergence -- encoder was over-anchored
+#     to pixel sharpness late, suppressing prediction.
+#   - L1 vs L2 cannot be answered cleanly from E6.15 because L1 was
+#     confounded with the recon_weight rebalance. Reverting to L2 with the
+#     same 0.5 weight cleanly isolates "shift augmentation + half anchor"
+#     as the single delta from E6.10.
+#
+# Decision rules after E6.16:
+#   - matches/beats E6.10 death_F1: shift augmentation is fine, L1 swap
+#     in E6.15 was the regression.
+#   - underperforms E6.10 by similar margin: the 81-phase encoder load is
+#     the structural cost, not the loss form. shift_max=4 is the bottleneck.
+#   - early collapse: 0.5 is too weak vs shift pressure. Bump to 0.75.
+#
+# Per-sample shift kept (per-batch was a vectorization hack; per-sample is
+# the principled SSL convention, matches IRIS/SimCLR/V-JEPA practice).
+# Death-prediction levers (status weight, focal_gamma, death_oversample)
+# deliberately untouched -- attribute first.
+
+model:
+  vocab_size: 625
+  embed_dim: 512
+  n_heads: 8
+  n_layers: 8
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [5, 5, 5, 5]
+  dropout: 0.10
+  adaln: true
+
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 200
+  batch_size: 1024
+  lr: 0.001
+  lr_min: 0.00005
+  weight_decay: 0.001
+  cpc_weight: 1.0
+  token_noise: 0.0
+  fsq_noise: 0.05
+  label_smoothing: 0.1
+  fsq_kernel: gaussian
+  fsq_sigma: 0.7
+  fsq_dim_weights: [1.0, 1.0, 1.0, 1.0]
+  focal_gamma: 2.0
+  death_oversample: 4
+  seed: 42
+  checkpoint_dir: checkpoints_e6.16
+  joint: true
+  single_group: true
+  grad_clip: 10.0
+  alpha_uniform: 0.0
+  shift_max: 4
+  shift_max_x: 4
+  use_cpc: false
+  use_recon: true
+  recon_weight: 0.5
+  recon_loss_type: mse
+  learnable_gamma: false
+
+posthoc_decoder:
+  transformer_checkpoint: checkpoints_e6.16/transformer_best.pt
+  fsq_checkpoint: checkpoints_e6.16/fsq_best.pt
+  epochs: 30
+  batch_size: 512
+  lr: 0.001
+  seed: 42
+  checkpoint_dir: checkpoints_e6.16
+
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_e6.16/transformer_best.pt
+  epochs: 50
+  batch_size: 512
+  lr: 0.0005
+  weight_decay: 0.0001
+  jump_class_weight: 1.5
+  controller_dropout: 0.0
+  val_ratio: 0.1
+  token_embed_dim: 16
+  temporal_dim: 32
+  seed: 42
+  checkpoint_dir: checkpoints_e6.16
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_e6.16/transformer_best.pt
+  pretrained: checkpoints_e6.16/controller_bc_best.pt
+  amp_dtype: bfloat16
+  n_iterations: 5000
+  n_episodes: 4096
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 2048
+  lr_warmup_iters: 50
+  entropy_coeff: 0.001
+  jump_penalty: 0.15
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 25
+  death_threshold: 0.5
+  token_embed_dim: 16
+  temporal_dim: 32
+  controller_dropout: 0.0
+  n_eval_episodes: 512
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_e6.16
