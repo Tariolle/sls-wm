@@ -106,7 +106,6 @@ def build_structured_smooth_targets(levels, full_vocab_size, sigma=1.0, smoothin
         soft_targets: (full_vocab_size, full_vocab_size) float tensor.
             Row i is the target distribution when the correct token is i.
     """
-    import math
     vocab_size = math.prod(levels)
     n_dims = len(levels)
 
@@ -211,7 +210,6 @@ def build_fsq_neighbor_table(levels):
         neighbor_table: (codebook_size, max_neighbors) long - padded neighbor indices.
         neighbor_counts: (codebook_size,) long - number of valid neighbors per token.
     """
-    import math
     codebook_size = math.prod(levels)
     n_dims = len(levels)
 
@@ -293,7 +291,6 @@ def _fsq_coords(levels):
     so the learnable-γ path produces identical outputs to the fixed
     precomputed path when γ = ln(dim_weights).
     """
-    import math
     vocab_size = math.prod(levels)
     n_dims = len(levels)
     divisors = []
@@ -364,8 +361,7 @@ def _build_soft_targets(target_indices, coords, gamma, sigma, smoothing,
     # Place target mass via out-of-place scatter (preserves autograd).
     # Visual targets: 1 - smoothing (complement to the ε spread in
     # neighbours). Status targets: 1.0 (hard one-hot).
-    target_mass = ((1.0 - smoothing) * is_visual.squeeze(1)
-                   + (1.0 - is_visual.squeeze(1)))  # (N,)
+    target_mass = 1.0 - smoothing * is_visual.squeeze(1)  # (N,)
     soft = soft.scatter(1, target_indices.unsqueeze(1),
                          target_mass.unsqueeze(1))
     return soft
@@ -374,7 +370,8 @@ def _build_soft_targets(target_indices, coords, gamma, sigma, smoothing,
 def train_epoch(model, loader, optimizer, scaler, device,
                 token_noise=0.0, fsq_noise=0.0, neighbor_table=None,
                 neighbor_counts=None, label_smoothing=0.0, focal_gamma=2.0,
-                soft_target_matrix=None, amp_dtype=torch.bfloat16):
+                soft_target_matrix=None, amp_dtype=torch.bfloat16,
+                grad_clip=1.0):
     model.train()
     m = _unwrap(model)
     tpf = m.tokens_per_frame
@@ -421,7 +418,7 @@ def train_epoch(model, loader, optimizer, scaler, device,
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         scaler.step(optimizer)
         scaler.update()
 
@@ -901,19 +898,24 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
         # the update direction is likely anomalous (exploding gradient from a
         # rare batch). Clipping only bounds magnitude, not direction; a full
         # clip-magnitude step in a bad direction can still destabilize the
-        # encoder on slim models. Skipping the optimizer step keeps weights
-        # frozen for this batch, preventing cascades.
+        # encoder on slim models. We zero gradients on skip rather than
+        # branching on a host-synced bool: this keeps the decision on GPU
+        # and folds into the per-batch metric .tolist() below (one sync
+        # instead of two). AdamW m/v decay by beta on a zero-grad step
+        # rather than staying frozen; for the rare-skip regime this is
+        # numerically negligible.
         if grad_skip_threshold > 0:
-            skip = bool((total_norm if single_group else torch.maximum(
-                wm_norm, fsq_norm)).item() > grad_skip_threshold)
+            norm_for_skip = (total_norm if single_group
+                             else torch.maximum(wm_norm, fsq_norm))
+            skip_t = (norm_for_skip > grad_skip_threshold).to(loss.dtype)
+            keep = 1.0 - skip_t
+            for p in (list(js.wm.parameters()) + list(js.fsq.parameters())):
+                if p.grad is not None:
+                    p.grad.mul_(keep)
         else:
-            skip = False
-        if skip:
-            n_skipped += 1
-            scaler.update()
-        else:
-            scaler.step(optimizer)
-            scaler.update()
+            skip_t = torch.zeros((), device=device, dtype=loss.dtype)
+        scaler.step(optimizer)
+        scaler.update()
         if is_cuda:
             se.record()
             step_events.append((ss, se))
@@ -941,9 +943,11 @@ def train_epoch_joint(joint_step, loader, optimizer, scaler, device,
             metrics["death_tp"].detach().float(),
             metrics["death_fp"].detach().float(),
             metrics["death_fn"].detach().float(),
+            skip_t.detach().float(),
         ]).tolist()
         (fsq_n, wm_n, tok_l, rec_l, unif_l,
-         cor, nt, d_tp, d_fp, d_fn) = scalars
+         cor, nt, d_tp, d_fp, d_fn, skipped) = scalars
+        n_skipped += int(skipped)
         enc_grad_sq += fsq_n ** 2
         tr_grad_sq += wm_n ** 2
         total_token_loss += tok_l * B
@@ -1372,14 +1376,16 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
                               sampler=train_sampler, num_workers=0, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
-                            shuffle=True, num_workers=0, pin_memory=True)
+                            shuffle=False, num_workers=0, pin_memory=True)
 
-    single_group = bool(getattr(args, "single_group", None) or False)
-    grad_clip = float(getattr(args, "grad_clip", None) or 1.0)
-    grad_skip_threshold = float(getattr(args, "grad_skip_threshold", None) or 0.0)
+    single_group = bool(getattr(args, "single_group", False) or False)
+    _gc = getattr(args, "grad_clip", None)
+    grad_clip = float(_gc) if _gc is not None else 1.0
+    _gst = getattr(args, "grad_skip_threshold", None)
+    grad_skip_threshold = float(_gst) if _gst is not None else 0.0
+    _gswe = getattr(args, "grad_skip_warmup_epochs", None)
     grad_skip_warmup_epochs = int(
-        getattr(args, "grad_skip_warmup_epochs", None)
-        if getattr(args, "grad_skip_warmup_epochs", None) is not None
+        _gswe if _gswe is not None
         else (15 if grad_skip_threshold > 0 else 0))
     if joint:
         fsq_lr_val = args.fsq_lr if args.fsq_lr is not None else 1e-3
@@ -1401,7 +1407,8 @@ def main():
     amp_dtype_name = getattr(args, "amp_dtype", None) or "bfloat16"
     amp_dtype = {"bfloat16": torch.bfloat16,
                  "float16": torch.float16}[amp_dtype_name]
-    compile_mode = getattr(args, "compile_mode", None) or "reduce-overhead"
+    _cm = getattr(args, "compile_mode", None)
+    compile_mode = _cm if _cm is not None else "reduce-overhead"
     # GradScaler is only needed for float16 (bfloat16 has enough range to
     # skip scaling).
     scaler_enabled = (amp_dtype == torch.float16) and device.type == "cuda"
@@ -1538,8 +1545,10 @@ def main():
     joint_step_train = None
     joint_step_val = None
     if joint:
-        shift_max = int(getattr(args, "shift_max", 0) or 0)
-        shift_max_x = int(getattr(args, "shift_max_x", 0) or 0)
+        _sm = getattr(args, "shift_max", None)
+        shift_max = int(_sm) if _sm is not None else 0
+        _smx = getattr(args, "shift_max_x", None)
+        shift_max_x = int(_smx) if _smx is not None else 0
         # Under learnable γ the soft_target_matrix is irrelevant (rebuilt
         # per forward). Pass None to save the buffer copy.
         soft_tm_for_joint = None if learnable_gamma else soft_target_matrix
@@ -1547,8 +1556,10 @@ def main():
             fsq_levels=args.fsq_levels,
             fsq_sigma=float(args.fsq_sigma) if args.fsq_sigma else 0.9,
         )
-        recon_weight = float(getattr(args, "recon_weight", None) or 1.0)
-        recon_loss_type = str(getattr(args, "recon_loss_type", None) or "mse")
+        _rw = getattr(args, "recon_weight", None)
+        recon_weight = float(_rw) if _rw is not None else 1.0
+        _rlt = getattr(args, "recon_loss_type", None)
+        recon_loss_type = str(_rlt) if _rlt is not None else "mse"
         joint_step_train = JointStep(
             fsq=fsq, wm=model,
             alpha_uniform=args.alpha_uniform,
@@ -1612,11 +1623,15 @@ def main():
         return final_ratio + (1.0 - final_ratio) * cos
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_factor)
     if resume_state is not None:
-        # last_epoch semantics: optimizer.step() already ran `start_epoch - 1`
-        # times before the first pending step, so set last_epoch accordingly
-        # and let LambdaLR recompute the factor analytically from lr_factor().
-        scheduler.last_epoch = start_epoch - 1
-        scheduler._last_lr = [group["lr"] for group in optimizer.param_groups]
+        if "scheduler" in resume_state:
+            scheduler.load_state_dict(resume_state["scheduler"])
+        else:
+            # Back-compat: pre-fix checkpoint without scheduler state.
+            # last_epoch semantics: optimizer.step() already ran
+            # `start_epoch - 1` times, so set last_epoch and let LambdaLR
+            # recompute the factor analytically from lr_factor().
+            scheduler.last_epoch = start_epoch - 1
+            scheduler._last_lr = [group["lr"] for group in optimizer.param_groups]
 
     log_path = ckpt_dir / "transformer_log.csv"
     log_unif = joint and float(getattr(args, "alpha_uniform", 0.0) or 0.0) > 0
@@ -1705,7 +1720,7 @@ def main():
                     label_smoothing=args.label_smoothing,
                     focal_gamma=args.focal_gamma,
                     soft_target_matrix=soft_target_matrix,
-                    amp_dtype=amp_dtype)
+                    amp_dtype=amp_dtype, grad_clip=grad_clip)
                 val_loss, val_acc, val_d_prec, val_d_rec, val_d_f1 = val_epoch(
                     model, val_loader, device,
                     label_smoothing=args.label_smoothing,
