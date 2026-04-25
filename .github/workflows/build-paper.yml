@@ -1,0 +1,87 @@
+name: Build paper PDF
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'paper/main.tex'
+      - 'paper/references.bib'
+      - 'paper/checklist.tex'
+      - 'paper/neurips_2026.sty'
+      - 'paper/Makefile'
+      - 'scripts/gen_sls_figure.py'
+      - 'docs/pipeline.tex'
+      - '.github/workflows/build-paper.yml'
+  pull_request:
+    paths:
+      - 'paper/main.tex'
+      - 'paper/references.bib'
+      - 'paper/checklist.tex'
+      - 'paper/neurips_2026.sty'
+      - 'paper/Makefile'
+      - 'scripts/gen_sls_figure.py'
+      - 'docs/pipeline.tex'
+      - '.github/workflows/build-paper.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install figure-generation deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install matplotlib numpy
+
+      - name: Generate SLS kernel figure
+        run: |
+          mkdir -p paper/figures
+          python scripts/gen_sls_figure.py --output paper/figures/sls_kernel.pdf
+
+      - name: Compile pipeline figure
+        uses: xu-cheng/latex-action@v3
+        with:
+          working_directory: docs
+          root_file: pipeline.tex
+
+      - name: Copy pipeline figure into paper
+        run: cp docs/pipeline.pdf paper/figures/pipeline.pdf
+
+      - name: Compile paper
+        uses: xu-cheng/latex-action@v3
+        with:
+          working_directory: paper
+          root_file: main.tex
+
+      - name: Copy paper PDF to docs
+        run: cp paper/main.pdf docs/static/pdfs/sls_wm.pdf
+
+      - name: Upload PDF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-pdf
+          path: paper/main.pdf
+
+      - name: Commit updated PDF
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet docs/static/pdfs/sls_wm.pdf; then
+            echo "No PDF changes"
+            exit 0
+          fi
+          git add docs/static/pdfs/sls_wm.pdf
+          git commit -m "ci: rebuild paper PDF [skip ci]"
+          git push
