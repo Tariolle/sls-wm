@@ -65,8 +65,9 @@ class FSQQuantizer(nn.Module):
         """
         # Bound and round per channel.
         # Odd L:  values in {-floor(L/2), ..., +floor(L/2)}  (symmetric)
-        # Even L: values in {-L/2+1, ..., L/2}  then shift by -0.5 to center
-        # Following the FSQ paper's approach for even levels.
+        # Even L: values in {-L/2, ..., +L/2 - 1}  (asymmetric: clamp upper
+        # by 1 because half=L//2 is L/2 exactly, so the symmetric range
+        # would have L+1 ints).
         half = self.half_levels.view(1, -1, 1, 1)  # (1, D, 1, 1)
         z_bounded = self.bound(z_e)
         z_q = z_bounded.round()

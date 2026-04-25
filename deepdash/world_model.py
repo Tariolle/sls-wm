@@ -265,10 +265,10 @@ class WorldModel(nn.Module):
         """Build hybrid attention mask.
 
         Context frames: block-causal (bidirectional within frame block, causal across).
-        Target frame: causal within the block.
+        Target frame: bidirectional within the block (parallel decode design).
 
         Returns:
-            mask: (seq_len, seq_len) bool — True = blocked.
+            mask: (seq_len, seq_len) bool, True = blocked.
         """
         S = self.seq_len
         K = self.context_frames
@@ -433,10 +433,11 @@ class WorldModel(nn.Module):
 
         if 0 < top_p < 1.0:
             sorted_logits, sorted_indices = logits.sort(dim=-1, descending=True)
-            cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+            sorted_probs = sorted_logits.softmax(dim=-1)
+            cumulative_probs = sorted_probs.cumsum(dim=-1)
             # Remove tokens with cumulative probability above the threshold
             # (keep at least one token)
-            remove = cumulative_probs - sorted_logits.softmax(dim=-1) >= top_p
+            remove = cumulative_probs - sorted_probs >= top_p
             sorted_logits[remove] = float('-inf')
             logits = sorted_logits.scatter(-1, sorted_indices, sorted_logits)
 
@@ -567,8 +568,11 @@ class WorldModel(nn.Module):
             temperature, top_k, top_p,
         ).reshape(B, n_tokens)
 
-        # Death probability from status token (position 64)
-        death_prob = F.softmax(logits[:, -1], dim=-1)[:, self.DEATH_TOKEN]
+        # Death probability from status token (position 64). Restrict the
+        # softmax to {ALIVE, DEATH}: any leakage of mass to visual codes at
+        # the status row would otherwise underestimate P(DEATH).
+        status_logits = logits[:, -1, [self.ALIVE_TOKEN, self.DEATH_TOKEN]]
+        death_prob = F.softmax(status_logits, dim=-1)[:, 1]
 
         if return_hidden:
             return predicted[:, :TPF], death_prob, h_t
