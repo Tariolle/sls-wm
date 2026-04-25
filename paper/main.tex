@@ -377,11 +377,11 @@ Turing lacks native BF16 (software-emulated and much slower than FP32 on this ca
 Under these constraints the best local configuration is \texttt{torch.compile} in \texttt{default} mode with FP16 and a \texttt{GradScaler}.
 
 \paragraph{Real-time inference.}
-Deployment must process each frame within a 33\,ms budget to sustain 30\,FPS in the live game.
-We overlap screen capture with GPU inference: each captured frame is staged into a pinned-memory tensor and uploaded to the GPU with \texttt{non\_blocking=True}, so the next CPU-side capture can issue while the previous frame's encode-and-predict pass is still executing.
+The deployed agent processes each frame at a fixed 30\,FPS cadence, with a per-iteration sleep padding any spare time so the capture rate stays constant rather than racing the GPU.
+Within each iteration we minimize stalls: the captured image is staged into a pinned-memory tensor and uploaded with \texttt{non\_blocking=True}, so the CPU returns from the H2D copy immediately and queues the subsequent CUDA dispatches (FSQ encode, transformer, controller) without waiting for the transfer to physically complete.
 The transformer's context window is held as a GPU-resident ring buffer of FSQ token indices, eliminating a GPU$\to$CPU$\to$GPU round-trip per frame.
 The encoder forward pass is wrapped in a CUDA Graph after a short warm-up, and the entire model graph is compiled with \texttt{torch.compile} in \texttt{reduce-overhead} mode.
-Under these optimizations the full pipeline (screen capture, Sobel preprocessing, FSQ encode, transformer step, controller action) sustains 30\,FPS on a single RTX 2060 SUPER.
+Under these optimizations the full pipeline (screen capture, Sobel preprocessing, FSQ encode, transformer step, controller action) fits comfortably within the 33\,ms budget on a single RTX 2060 SUPER.
 
 \paragraph{BC pretraining ablation.}
 To verify that BC pretraining is a convergence accelerator rather than a stability requirement, we train one PPO run from random initialization.
