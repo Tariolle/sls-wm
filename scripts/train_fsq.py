@@ -31,6 +31,7 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.fsq import FSQVAE, fsqvae_loss, grwm_slowness, grwm_uniformity
+from deepdash.wandb_utils import wandb_init, wandb_log, wandb_finish
 
 
 SHIFT_AUG_RE = re.compile(r"_s[+-]\d+_[+-]\d+$")
@@ -176,6 +177,11 @@ def main():
     args.compile_mode = args.compile_mode or "reduce-overhead"
     args.val_interval = args.val_interval if args.val_interval is not None else 10
 
+    # W&B (graceful no-op if not installed / not logged in).
+    wandb_init(project="deepdash",
+               name=f"fsq-{'-'.join(str(x) for x in args.levels)}",
+               config=vars(args))
+
     def _sigterm_handler(sig, frame):
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, _sigterm_handler)
@@ -285,6 +291,18 @@ def main():
             ])
             log_file.flush()
 
+            wandb_payload = {
+                "epoch": epoch,
+                "fsq/train/recon": train_recon,
+                "fsq/train/slow": train_slow,
+                "fsq/train/unif": train_uniform,
+                "fsq/lr": lr,
+                "fsq/epoch_time_s": dt,
+            }
+            if do_val:
+                wandb_payload["fsq/val/recon"] = val_recon
+            wandb_log(wandb_payload)
+
             if do_val and val_recon < best_val_recon:
                 best_val_recon = val_recon
                 clean_state = {k.removeprefix("_orig_mod."): v
@@ -294,6 +312,7 @@ def main():
         print("\nInterrupted - saving final checkpoint...")
 
     log_file.close()
+    wandb_finish()
     clean_state = {k.removeprefix("_orig_mod."): v
                    for k, v in model.state_dict().items()}
     torch.save(clean_state, ckpt_dir / "fsq_final.pt")
