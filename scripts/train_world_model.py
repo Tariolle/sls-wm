@@ -1809,7 +1809,7 @@ def main():
                 f" | LR={lr:.1e}\n"
                 f"{pad} | Val:   total={val_total:.4f} loss={val_loss:.4f}{vl_cpc} |"
                 f" acc={val_acc:.3f} death[P={val_d_prec:.3f} R={val_d_rec:.3f} F1={val_d_f1:.3f}]"
-                f" | gap={gap:+.5f}"
+                f" | gap={gap:+.4f}"
             )
             if joint:
                 train_recon_str = (f"recon={train_metrics['recon']:.4f} "
