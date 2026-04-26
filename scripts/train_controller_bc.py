@@ -330,7 +330,6 @@ def main():
                          "val_loss", "val_acc", "lr", "time_s"])
 
     best_val_loss = float("inf")
-    patience_counter = 0
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
@@ -418,22 +417,16 @@ def main():
             "bc/lr": lr,
         })
 
-        # Save best + early stopping. Strip _orig_mod. prefix from
-        # torch.compile-wrapped state so downstream loaders (PPO) can
-        # load directly into an uncompiled controller.
+        # Save best. Strip _orig_mod. prefix from torch.compile-wrapped
+        # state so downstream loaders (PPO) can load directly into an
+        # uncompiled controller.
         def _clean_state():
             return {k.removeprefix("_orig_mod."): v
                     for k, v in controller.state_dict().items()}
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            patience_counter = 0
             torch.save(_clean_state(), ckpt_dir / "controller_bc_best.pt")
-        else:
-            patience_counter += 1
-            if patience_counter >= 10:
-                print(f"Early stopping at epoch {epoch}")
-                break
 
     log_file.close()
     wandb_finish()
