@@ -1799,14 +1799,17 @@ def main():
                                  + a_u * val_metrics["unif"])
                 fsq_gap = fsq_val_total - fsq_train_total
 
-            cpc_str = (f" cpc={train_cpc:.4f}/{val_cpc:.4f}" if use_cpc else "")
+            prefix = f"Epoch {epoch:3d}/{args.epochs} ({dt:.1f}s)"
+            pad = " " * len(prefix)
+            tr_cpc = f" cpc={train_cpc:.4f}" if use_cpc else ""
+            vl_cpc = f" cpc={val_cpc:.4f}" if use_cpc else ""
             print(
-                f"Epoch {epoch:3d}/{args.epochs} ({dt:.1f}s) | "
-                f"Train: total={train_total:.4f} loss={train_loss:.4f} acc={train_acc:.3f} "
-                f"death[P={train_d_prec:.3f} R={train_d_rec:.3f} F1={train_d_f1:.3f}] "
-                f"Val: total={val_total:.4f} loss={val_loss:.4f} acc={val_acc:.3f} "
-                f"death[P={val_d_prec:.3f} R={val_d_rec:.3f} F1={val_d_f1:.3f}] "
-                f"gap={gap:+.4f}{cpc_str} | LR: {lr:.1e}"
+                f"{prefix} | Train: total={train_total:.4f} loss={train_loss:.4f}{tr_cpc} |"
+                f" acc={train_acc:.3f} death[P={train_d_prec:.3f} R={train_d_rec:.3f} F1={train_d_f1:.3f}]"
+                f" | LR={lr:.1e}\n"
+                f"{pad} | Val:   total={val_total:.4f} loss={val_loss:.4f}{vl_cpc} |"
+                f" acc={val_acc:.3f} death[P={val_d_prec:.3f} R={val_d_rec:.3f} F1={val_d_f1:.3f}]"
+                f" | gap={gap:+.5f}"
             )
             if joint:
                 train_recon_str = (f"recon={train_metrics['recon']:.4f} "
