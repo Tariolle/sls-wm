@@ -146,6 +146,13 @@ def main():
                         help="Cap gradient steps per epoch (0/None = full loader). "
                              "Useful for restoring V3-deploy's accidental 5-15x "
                              "compute via longer training without aug-dir duplication.")
+    parser.add_argument("--val-interval", type=int, default=None,
+                        help="Run val + best-checkpoint selection every N "
+                             "epochs (default 10). At epochs=1000 a per-"
+                             "epoch val burns ~10%% of training time on a "
+                             "frozen-distribution metric; default keeps the "
+                             "per-step LR shape and best-selection signal "
+                             "while spending much less compute on val.")
     parser.add_argument("--amp-dtype", choices=["bfloat16", "float16", "none"],
                         default=None, help="Default bfloat16 (A100).")
     parser.add_argument("--compile-mode",
@@ -167,6 +174,7 @@ def main():
     args.alpha_uniform = args.alpha_uniform if args.alpha_uniform is not None else 0.01
     args.amp_dtype = args.amp_dtype or "bfloat16"
     args.compile_mode = args.compile_mode or "reduce-overhead"
+    args.val_interval = args.val_interval if args.val_interval is not None else 10
 
     def _sigterm_handler(sig, frame):
         raise KeyboardInterrupt()
@@ -248,29 +256,36 @@ def main():
                          "val_recon", "lr", "time_s"])
 
     max_steps = args.steps_per_epoch or 0
+    val_interval = max(1, int(args.val_interval))
+    print(f"Val interval: every {val_interval} epoch(s)")
     try:
         for epoch in range(1, args.epochs + 1):
             t0 = time.time()
             train_recon, train_slow, train_uniform = train_epoch(
                 model, train_loader, optimizer, args.alpha_slow, args.alpha_uniform,
                 amp_dtype=amp_dtype, augment=True, max_steps=max_steps)
-            val_recon = val_epoch(model, val_loader, amp_dtype=amp_dtype)
             scheduler.step()
+
+            # Val every val_interval epochs, plus the final epoch.
+            do_val = (epoch % val_interval == 0) or (epoch == args.epochs)
+            val_recon = val_epoch(model, val_loader, amp_dtype=amp_dtype) if do_val else None
             dt = time.time() - t0
             lr = optimizer.param_groups[0]["lr"]
 
+            val_str = f"recon={val_recon:.4f}" if do_val else "skipped"
             print(
                 f"Epoch {epoch:4d}/{args.epochs} ({dt:.1f}s) | "
                 f"Train: recon={train_recon:.4f} slow={train_slow:.4f} unif={train_uniform:.4f} | "
-                f"Val: recon={val_recon:.4f} | LR: {lr:.1e}"
+                f"Val: {val_str} | LR: {lr:.1e}"
             )
             log_writer.writerow([
                 epoch, f"{train_recon:.6f}", f"{train_slow:.6f}", f"{train_uniform:.6f}",
-                f"{val_recon:.6f}", f"{lr:.1e}", f"{dt:.1f}"
+                f"{val_recon:.6f}" if do_val else "",
+                f"{lr:.1e}", f"{dt:.1f}"
             ])
             log_file.flush()
 
-            if val_recon < best_val_recon:
+            if do_val and val_recon < best_val_recon:
                 best_val_recon = val_recon
                 clean_state = {k.removeprefix("_orig_mod."): v
                                for k, v in model.state_dict().items()}

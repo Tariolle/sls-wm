@@ -35,6 +35,10 @@ fsq:
   levels: [8, 5, 5, 5]
   alpha_slow: 0.1
   alpha_uniform: 0.01
+  # Val every 10 epochs at epochs=1000 keeps best-selection signal while
+  # cutting val cost from ~10% to ~1% of training time. Final epoch
+  # always runs val regardless of interval.
+  val_interval: 10
   seed: 42
   amp_dtype: bfloat16
   compile_mode: reduce-overhead
