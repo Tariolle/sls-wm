@@ -1,0 +1,113 @@
+# V7 Phase 0 -- reproduce V3-deploy on current code.
+#
+# Strategy: V3 architecture exactly (384d × 8L × 8H, no AdaLN, vocab 1000,
+# levels [8,5,5,5], AC-CPC ON, frozen FSQ → sequential transformer). FSQ
+# trained at 5x compute equivalent to V3-deploy's accidental aug-dir
+# duplication bug (see project_v3_fsq_aug_bug.md): un-bugged code at
+# --epochs 1000 with cosine T_max=1000.
+#
+# Phase 0 ship gate: deploy survival on level 1 ≥ 11% over ≥30 attempts.
+
+model:
+  vocab_size: 1000
+  embed_dim: 384
+  n_heads: 8
+  n_layers: 8
+  tokens_per_frame: 64
+  context_frames: 4
+  levels: [8, 5, 5, 5]
+  dropout: 0.1
+  adaln: false
+
+fsq:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  # 5x V3-deploy nominal epochs to recover the compute lost by removing the
+  # aug-dir duplication bug. T_max scales with --epochs so per-step LR
+  # trajectory matches the bug's effective shape (5 cosines stitched at
+  # T_max=200 vs one cosine at T_max=1000 are different schedules; we
+  # pick the simpler single cosine here -- if reproduction fails, try
+  # the alternative shape as a Phase 0 follow-up).
+  epochs: 1000
+  batch_size: 2048
+  lr: 0.001
+  lr_min: 0.00001
+  levels: [8, 5, 5, 5]
+  alpha_slow: 0.1
+  alpha_uniform: 0.01
+  seed: 42
+  amp_dtype: bfloat16
+  compile_mode: reduce-overhead
+  checkpoint_dir: checkpoints_v7
+
+transformer:
+  episodes_dir: data/death_episodes
+  expert_episodes_dir: data/expert_episodes
+  epochs: 200
+  batch_size: 512
+  lr: 0.002
+  lr_min: 0.00005
+  weight_decay: 0.01
+  cpc_weight: 1.0
+  use_cpc: true
+  token_noise: 0.05
+  fsq_noise: 0.05
+  label_smoothing: 0.1
+  fsq_kernel: gaussian
+  fsq_sigma: 0.9
+  focal_gamma: 2.0
+  death_oversample: 5
+  steps_per_epoch: 500
+  seed: 42
+  checkpoint_dir: checkpoints_v7
+  joint: false
+  use_recon: false
+  learnable_gamma: false
+  grad_clip: 1.0
+  amp_dtype: bfloat16
+  compile_mode: reduce-overhead
+
+controller_bc:
+  expert_episodes_dir: data/expert_episodes
+  transformer_checkpoint: checkpoints_v7/transformer_best.pt
+  epochs: 50
+  batch_size: 512
+  lr: 0.001
+  weight_decay: 0.0001
+  jump_class_weight: 1.5
+  controller_dropout: 0.0
+  val_ratio: 0.1
+  token_embed_dim: 16
+  # V3-faithful controller: direct h_t concat, ReLU+MaxPool, MTP head.
+  # See V3CNNPolicy in deepdash/controller.py.
+  policy_class: v3_cnn
+  seed: 42
+  checkpoint_dir: checkpoints_v7
+
+controller_ppo:
+  transformer_checkpoint: checkpoints_v7/transformer_best.pt
+  pretrained: checkpoints_v7/controller_bc_best.pt
+  amp_dtype: bfloat16
+  n_iterations: 15000
+  n_episodes: 512
+  lr: 0.0001
+  gamma: 0.995
+  lam: 0.95
+  clip_eps: 0.2
+  ppo_epochs: 4
+  minibatch_size: 512
+  entropy_coeff: 0.01
+  jump_penalty: 0.25
+  critic_coeff: 0.5
+  max_grad_norm: 0.5
+  max_dream_steps: 45
+  death_threshold: 0.5
+  token_embed_dim: 16
+  policy_class: v3_cnn
+  mtp_coeff: 0.1     # V3 default. BCE on next 8 actions from MTP head.
+  mtp_steps: 8
+  controller_dropout: 0.0
+  n_eval_episodes: 512
+  eval_interval: 10
+  seed: 42
+  checkpoint_dir: checkpoints_v7

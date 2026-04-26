@@ -256,8 +256,13 @@ class PercentileNormalizer:
 def ppo_update(controller, optimizer, rollout, advantages, returns,
                clip_eps=0.2, entropy_coeff=0.01, critic_coeff=0.5,
                max_grad_norm=0.5, n_epochs=4, minibatch_size=None,
-               pct_normalizer=None, ema_controller=None, ema_decay=0.98):
+               pct_normalizer=None, ema_controller=None, ema_decay=0.98,
+               mtp_coeff=0.0, amp_dtype=torch.bfloat16):
     """PPO update with multiple epochs on cached rollout data.
+
+    With ``mtp_coeff > 0`` and a controller that exposes a ``mtp_head``
+    (V3CNNPolicy), adds the V3-style multi-token prediction auxiliary
+    loss (BCE on the next ``controller.mtp_steps`` actions).
 
     Returns:
         mean_loss, mean_entropy, mean_value
@@ -281,6 +286,21 @@ def ppo_update(controller, optimizer, rollout, advantages, returns,
     returns_flat = returns.reshape(N)
     alive_flat = rollout['alive_masks'].reshape(N)
 
+    # MTP targets: for each transition (t, b), the next L actions
+    # (t+1..t+L-1, padded with 0 past the end). Built once per update.
+    use_mtp = mtp_coeff > 0 and hasattr(controller, "mtp_head")
+    mtp_targets_flat = None
+    if use_mtp:
+        L = controller.mtp_steps
+        actions_seq = rollout['actions']  # (T, B)
+        mtp_targets = torch.zeros(T, B, L, device=actions_flat.device,
+                                  dtype=torch.float32)
+        for k in range(L):
+            end = T - k
+            if end > 0:
+                mtp_targets[:end, :, k] = actions_seq[k:k + end].float()
+        mtp_targets_flat = mtp_targets.reshape(N, L)
+
     # Only train on alive transitions
     alive_idx = alive_flat.nonzero(as_tuple=True)[0]
     if len(alive_idx) == 0:
@@ -303,31 +323,41 @@ def ppo_update(controller, optimizer, rollout, advantages, returns,
             mb_advantages = advantages_flat[idx]
             mb_returns = returns_flat[idx]
 
-            # Forward pass with current policy
-            prob, value = controller(mb_z_t, mb_h_t)
-            prob = prob.clamp(1e-6, 1 - 1e-6)
-            dist = torch.distributions.Bernoulli(probs=prob)
-            log_prob = dist.log_prob(mb_actions.float())
-            entropy = dist.entropy()
+            use_amp = amp_dtype is not None and mb_z_t.is_cuda
+            with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                prob, value = controller(mb_z_t, mb_h_t)
+                prob = prob.clamp(1e-6, 1 - 1e-6)
+                dist = torch.distributions.Bernoulli(probs=prob)
+                log_prob = dist.log_prob(mb_actions.float())
+                entropy = dist.entropy()
 
-            # Clipped surrogate objective
-            ratio = (log_prob - old_log_probs_flat[idx]).exp()
-            if pct_normalizer is not None:
-                norm_adv = pct_normalizer.normalize(mb_advantages)
-            else:
-                norm_adv = (mb_advantages - mb_advantages.mean()) / \
-                    (mb_advantages.std() + 1e-8)
-            surr1 = ratio * norm_adv
-            surr2 = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps) * norm_adv
-            actor_loss = -torch.min(surr1, surr2).mean()
+                # Clipped surrogate objective
+                ratio = (log_prob - old_log_probs_flat[idx]).exp()
+                if pct_normalizer is not None:
+                    norm_adv = pct_normalizer.normalize(mb_advantages)
+                else:
+                    norm_adv = (mb_advantages - mb_advantages.mean()) / \
+                        (mb_advantages.std() + 1e-8)
+                surr1 = ratio * norm_adv
+                surr2 = ratio.clamp(1.0 - clip_eps, 1.0 + clip_eps) * norm_adv
+                actor_loss = -torch.min(surr1, surr2).mean()
 
-            # Critic loss
-            critic_loss = F.mse_loss(value, mb_returns)
+                # Critic loss
+                critic_loss = F.mse_loss(value, mb_returns)
 
-            # Entropy bonus
-            entropy_loss = -entropy_coeff * entropy.mean()
+                # Entropy bonus
+                entropy_loss = -entropy_coeff * entropy.mean()
 
-            loss = actor_loss + critic_coeff * critic_loss + entropy_loss
+                loss = actor_loss + critic_coeff * critic_loss + entropy_loss
+
+                # MTP auxiliary loss (V3): BCE on next L action probabilities
+                # predicted from the same features as the actor.
+                if use_mtp:
+                    mtp_probs = controller.predict_future_actions(mb_z_t, mb_h_t)
+                    mtp_probs = mtp_probs.clamp(1e-6, 1 - 1e-6)
+                    mtp_loss = F.binary_cross_entropy(
+                        mtp_probs, mtp_targets_flat[idx], reduction='mean')
+                    loss = loss + mtp_coeff * mtp_loss
 
             # Skip NaN updates
             if torch.isnan(loss) or torch.isinf(loss):
@@ -439,6 +469,24 @@ def main():
     parser.add_argument("--controller-dropout", type=float, default=None)
     parser.add_argument("--token-embed-dim", type=int, default=None)
     parser.add_argument("--temporal-dim", type=int, default=None)
+    parser.add_argument("--policy-class", type=str, default=None,
+                        choices=["cnn", "v3_cnn"],
+                        help="Controller architecture. 'cnn' = E6.10-era "
+                             "CNNPolicy (h_proj + temporal_dim). 'v3_cnn' = "
+                             "V3-deploy faithful (direct h_t concat, "
+                             "ReLU+MaxPool, MTP head).")
+    parser.add_argument("--mtp-coeff", type=float, default=None,
+                        help="Coefficient on MTP auxiliary loss in PPO. "
+                             "V3 default: 0.1. Set to 0 to disable. Only "
+                             "active when controller has an mtp_head "
+                             "(V3CNNPolicy).")
+    parser.add_argument("--mtp-steps", type=int, default=None,
+                        help="Number of future actions predicted by the MTP "
+                             "head. V3 default: 8.")
+    parser.add_argument("--compile-mode", type=str, default=None,
+                        choices=["reduce-overhead", "default", "none"],
+                        help="torch.compile mode for both the world model "
+                             "and the controller. Default reduce-overhead.")
     # Output / initialization
     parser.add_argument("--pretrained", type=str, default=None,
                         help="Path to BC-pretrained controller checkpoint")
@@ -502,11 +550,13 @@ def main():
     amp_dtype = getattr(torch, amp_dtype_str, torch.bfloat16)
     print(f"AMP dtype: {amp_dtype}")
 
-    try:
-        model = torch.compile(model, mode="reduce-overhead")
-        print("torch.compile enabled (reduce-overhead)")
-    except Exception as e:
-        print(f"torch.compile not available: {e}")
+    compile_mode = getattr(args, "compile_mode", None) or "reduce-overhead"
+    if compile_mode != "none":
+        try:
+            model = torch.compile(model, mode=compile_mode)
+            print(f"torch.compile enabled on world model (mode={compile_mode})")
+        except Exception as e:
+            print(f"torch.compile not available: {e}")
 
     vae = None
     if args.fsq_checkpoint is not None:
@@ -539,31 +589,63 @@ def main():
         print("No tokenized episodes found.")
         return
 
-    # CNN actor-critic: z_t spatial (8x8 token grid) + compressed h_t temporal
+    # CNN actor-critic. Two architectures (selected via config policy_class):
+    #   "cnn"     -- E6.10-era CNNPolicy with h_proj/h_norm to temporal_dim.
+    #   "v3_cnn"  -- V3-deploy faithful: direct h_t concat, ReLU+MaxPool,
+    #               MTP head. Use mtp_coeff>0 to activate the MTP loss.
     grid_size = int(args.tokens_per_frame ** 0.5)
-    controller = CNNPolicy(
-        vocab_size=args.vocab_size,
-        grid_size=grid_size,
-        token_embed_dim=getattr(args, 'token_embed_dim', 16),
-        h_dim=args.embed_dim,
-        temporal_dim=getattr(args, 'temporal_dim', 32),
-    ).to(device)
+    policy_class = (getattr(args, "policy_class", None) or "cnn").lower()
+    if policy_class == "v3_cnn":
+        from deepdash.controller import V3CNNPolicy
+        controller = V3CNNPolicy(
+            vocab_size=args.vocab_size,
+            grid_size=grid_size,
+            token_embed_dim=getattr(args, 'token_embed_dim', 16),
+            h_dim=args.embed_dim,
+            mtp_steps=int(getattr(args, "mtp_steps", None) or 8),
+        ).to(device)
+        policy_label = "V3CNNPolicy"
+        policy_extra = (f" mtp_steps={controller.mtp_steps}")
+    else:
+        controller = CNNPolicy(
+            vocab_size=args.vocab_size,
+            grid_size=grid_size,
+            token_embed_dim=getattr(args, 'token_embed_dim', 16),
+            h_dim=args.embed_dim,
+            temporal_dim=getattr(args, 'temporal_dim', 32),
+        ).to(device)
+        policy_label = "CNNPolicy"
+        policy_extra = f" temporal_dim={getattr(args, 'temporal_dim', 32)}"
     if args.pretrained:
         state = torch.load(args.pretrained, map_location=device,
                            weights_only=True)
+        # BC may have saved with the _orig_mod. prefix from torch.compile;
+        # strip just in case (no-op when already clean).
+        state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
         controller.load_state_dict(state)
         print(f"Loaded pretrained controller from {args.pretrained}")
     n_params = sum(p.numel() for p in controller.parameters())
-    print(f"Controller: CNNPolicy vocab={args.vocab_size} "
+    print(f"Controller: {policy_label} vocab={args.vocab_size} "
           f"embed={getattr(args, 'token_embed_dim', 16)} "
-          f"h_dim={args.embed_dim} temporal_dim={getattr(args, 'temporal_dim', 32)} "
+          f"h_dim={args.embed_dim}{policy_extra} "
           f"({n_params:,} params, actor-critic)")
 
+    # Deepcopy the EMA *before* compile (deepcopy of OptimizedModule is
+    # not always reliable). EMA stays uncompiled — it's only used for
+    # weight blending and rollouts where compile of the controller
+    # is unnecessary anyway.
     import copy
     ema_controller = copy.deepcopy(controller)
     ema_controller.eval()
     for p in ema_controller.parameters():
         p.requires_grad_(False)
+
+    if compile_mode != "none":
+        try:
+            controller = torch.compile(controller, mode=compile_mode)
+            print(f"torch.compile enabled on controller (mode={compile_mode})")
+        except Exception as e:
+            print(f"controller torch.compile failed: {e}")
 
     pct_normalizer = PercentileNormalizer(momentum=0.99)
 
@@ -710,7 +792,9 @@ def main():
             n_epochs=args.ppo_epochs,
             minibatch_size=args.minibatch_size,
             pct_normalizer=pct_normalizer,
-            ema_controller=ema_controller)
+            ema_controller=ema_controller,
+            mtp_coeff=float(getattr(args, "mtp_coeff", 0.0) or 0.0),
+            amp_dtype=amp_dtype)
 
         if scheduler is not None:
             scheduler.step()
@@ -736,8 +820,11 @@ def main():
 
             if es > best_eval:
                 best_eval = es
-                torch.save(controller.state_dict(),
-                           ckpt_dir / "controller_ppo_best.pt")
+                # Strip _orig_mod. (torch.compile prefix) so deploy and other
+                # consumers can load into an uncompiled controller.
+                _clean = {k.removeprefix("_orig_mod."): v
+                          for k, v in controller.state_dict().items()}
+                torch.save(_clean, ckpt_dir / "controller_ppo_best.pt")
 
         writer.writerow([
             iteration, f"{mean_surv:.2f}", f"{mean_return:.4f}",
@@ -760,11 +847,14 @@ def main():
             log_data["ppo/eval/jump_ratio"] = float(jump_ratio_str)
         wandb_log(log_data)
 
-        # Save latest checkpoint for resume
+        # Save latest checkpoint for resume. Strip _orig_mod. so an
+        # uncompiled-controller resume path still loads cleanly.
         if iteration % args.eval_interval == 0:
+            ctrl_clean = {k.removeprefix("_orig_mod."): v
+                          for k, v in controller.state_dict().items()}
             ckpt_payload = {
                 "iteration": iteration,
-                "controller": controller.state_dict(),
+                "controller": ctrl_clean,
                 "optimizer": optimizer.state_dict(),
                 "best_eval": best_eval,
                 "rng_state": rng.bit_generator.state,
@@ -791,8 +881,9 @@ def main():
     log_file.close()
     wandb_finish()
     print(f"\nDone. Best eval survival: {best_eval:.1f}")
-    torch.save(controller.state_dict(),
-               ckpt_dir / "controller_ppo_final.pt")
+    _final = {k.removeprefix("_orig_mod."): v
+              for k, v in controller.state_dict().items()}
+    torch.save(_final, ckpt_dir / "controller_ppo_final.pt")
 
 
 if __name__ == "__main__":

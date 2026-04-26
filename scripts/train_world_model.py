@@ -371,16 +371,18 @@ def train_epoch(model, loader, optimizer, scaler, device,
                 token_noise=0.0, fsq_noise=0.0, neighbor_table=None,
                 neighbor_counts=None, label_smoothing=0.0, focal_gamma=2.0,
                 soft_target_matrix=None, amp_dtype=torch.bfloat16,
-                grad_clip=1.0):
+                grad_clip=1.0, cpc_weight=0.0, max_steps=0):
     model.train()
     m = _unwrap(model)
     tpf = m.tokens_per_frame
     vocab = m.full_vocab_size
     vs = m.vocab_size
-    total_loss, total_correct, total_tokens = 0, 0, 0
+    use_cpc = bool(getattr(m, "use_cpc", False)) and cpc_weight > 0
+    total_loss, total_cpc, total_correct, total_tokens = 0, 0.0, 0, 0
     death_tp, death_fp, death_fn = 0, 0, 0
 
     use_amp = device.type == "cuda"
+    step = 0
 
     for frame_tokens, actions in loader:
         frame_tokens = frame_tokens.to(device, non_blocking=True)
@@ -405,7 +407,12 @@ def train_epoch(model, loader, optimizer, scaler, device,
             frame_tokens = torch.cat([ctx, frame_tokens[:, -1:]], dim=1)
 
         with torch.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
-            logits = model(frame_tokens, actions)
+            out = model(frame_tokens, actions)
+            if use_cpc:
+                logits, cpc_loss = out
+            else:
+                logits = out
+                cpc_loss = None
             token_loss = focal_cross_entropy(
                 logits.reshape(-1, logits.size(-1)),  # (B*65, vocab)
                 target.reshape(-1),                    # (B*65,)
@@ -414,6 +421,8 @@ def train_epoch(model, loader, optimizer, scaler, device,
                 label_smoothing=label_smoothing,
             )
             loss = token_loss
+            if cpc_loss is not None:
+                loss = loss + cpc_weight * cpc_loss
 
         optimizer.zero_grad()
         scaler.scale(loss).backward()
@@ -429,6 +438,8 @@ def train_epoch(model, loader, optimizer, scaler, device,
             total_correct += (visual_preds == visual_target).sum().item()
             total_tokens += bs * tpf
             total_loss += token_loss.item() * bs
+            if cpc_loss is not None:
+                total_cpc += cpc_loss.item() * bs
 
             status_target = target[:, tpf]
             status_pred = logits[:, tpf].argmax(dim=-1)
@@ -438,13 +449,17 @@ def train_epoch(model, loader, optimizer, scaler, device,
             death_fp += (pred_death & ~is_death).sum().item()
             death_fn += (~pred_death & is_death).sum().item()
 
-    n_train = death_tp + death_fp + death_fn + 1e-8
+        step += 1
+        if max_steps and step >= max_steps:
+            break
+
     death_prec = death_tp / (death_tp + death_fp + 1e-8)
     death_rec = death_tp / (death_tp + death_fn + 1e-8)
     death_f1 = 2 * death_prec * death_rec / (death_prec + death_rec + 1e-8)
     n_samples = total_tokens // tpf
     return (total_loss / n_samples, total_correct / total_tokens,
-            death_prec, death_rec, death_f1)
+            death_prec, death_rec, death_f1,
+            total_cpc / n_samples if use_cpc else 0.0)
 
 
 @torch.no_grad()
@@ -453,7 +468,8 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
     model.eval()
     m = _unwrap(model)
     tpf = m.tokens_per_frame
-    total_loss, total_correct, total_tokens = 0, 0, 0
+    use_cpc = bool(getattr(m, "use_cpc", False))
+    total_loss, total_cpc, total_correct, total_tokens = 0, 0.0, 0, 0
     death_tp, death_fp, death_fn = 0, 0, 0
 
     use_amp = device.type == "cuda"
@@ -465,7 +481,12 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
         target = frame_tokens[:, -1]
 
         with torch.autocast(device.type, dtype=amp_dtype, enabled=use_amp):
-            logits = model(frame_tokens, actions)
+            out = model(frame_tokens, actions)
+            if use_cpc:
+                logits, cpc_loss = out
+            else:
+                logits = out
+                cpc_loss = None
 
             token_loss = focal_cross_entropy(
                 logits.reshape(-1, logits.size(-1)),
@@ -477,6 +498,8 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
 
         bs = frame_tokens.size(0)
         total_loss += token_loss.item() * bs
+        if cpc_loss is not None:
+            total_cpc += cpc_loss.item() * bs
 
         visual_preds = logits[:, :tpf].argmax(dim=-1)
         visual_target = target[:, :tpf]
@@ -496,7 +519,8 @@ def val_epoch(model, loader, device, label_smoothing=0.0, focal_gamma=2.0,
     death_f1 = 2 * death_prec * death_rec / (death_prec + death_rec + 1e-8)
     n_samples = total_tokens // tpf
     return (total_loss / n_samples, total_correct / total_tokens,
-            death_prec, death_rec, death_f1)
+            death_prec, death_rec, death_f1,
+            total_cpc / n_samples if use_cpc else 0.0)
 
 
 # -------------------------------------------------------------------------
@@ -1185,6 +1209,21 @@ def main():
     parser.add_argument("--grad-clip", type=float, default=None,
                         help="Gradient clip max_norm. Global (single-group) or "
                              "per-group (two-group). Default 1.0.")
+    parser.add_argument("--use-cpc", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Enable AC-CPC contrastive auxiliary on context "
+                             "hidden states. V3 had this on (cpc_weight=1.0). "
+                             "Mutually exclusive with adaln=True.")
+    parser.add_argument("--cpc-weight", type=float, default=None,
+                        help="Weight on AC-CPC loss when --use-cpc is set. "
+                             "V3 default: 1.0.")
+    parser.add_argument("--cpc-dim", type=int, default=None,
+                        help="Hidden dim for AC-CPC predictor MLPs. Default 64.")
+    parser.add_argument("--steps-per-epoch", type=int, default=None,
+                        help="Cap gradient steps per epoch (0 = full loader). "
+                             "V3-deploy used 500 to insulate transformer from "
+                             "the 5x aug-dir dataset multiplier. Set to a "
+                             "non-zero value to control compute budget.")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
@@ -1311,6 +1350,8 @@ def main():
 
     # Create model (joint mode wires fsq_dim so fsq_grad_proj is instantiated)
     fsq_dim = len(args.fsq_levels) if joint else None
+    use_cpc = bool(getattr(args, "use_cpc", False) or False)
+    cpc_dim = int(getattr(args, "cpc_dim", None) or 64)
     model = WorldModel(
         vocab_size=args.vocab_size,
         n_actions=2,
@@ -1323,6 +1364,8 @@ def main():
         adaln=getattr(args, 'adaln', False),
         fsq_dim=fsq_dim,
         sls_gamma_init=sls_gamma_init,
+        use_cpc=use_cpc,
+        cpc_dim=cpc_dim,
     ).to(device)
 
     # Pre-stack into contiguous tensors (avoids per-item numpy->torch overhead)
@@ -1712,7 +1755,10 @@ def main():
                 val_d_rec = val_metrics["death_rec"]
                 val_d_f1 = val_metrics["death_f1"]
             else:
-                train_loss, train_acc, train_d_prec, train_d_rec, train_d_f1 = train_epoch(
+                cpc_w = float(getattr(args, "cpc_weight", 0.0) or 0.0)
+                max_steps = int(getattr(args, "steps_per_epoch", 0) or 0)
+                (train_loss, train_acc, train_d_prec, train_d_rec, train_d_f1,
+                 train_cpc) = train_epoch(
                     model, train_loader, optimizer, scaler,
                     device, token_noise=args.token_noise,
                     fsq_noise=args.fsq_noise,
@@ -1720,8 +1766,10 @@ def main():
                     label_smoothing=args.label_smoothing,
                     focal_gamma=args.focal_gamma,
                     soft_target_matrix=soft_target_matrix,
-                    amp_dtype=amp_dtype, grad_clip=grad_clip)
-                val_loss, val_acc, val_d_prec, val_d_rec, val_d_f1 = val_epoch(
+                    amp_dtype=amp_dtype, grad_clip=grad_clip,
+                    cpc_weight=cpc_w, max_steps=max_steps)
+                (val_loss, val_acc, val_d_prec, val_d_rec, val_d_f1,
+                 val_cpc) = val_epoch(
                     model, val_loader, device,
                     label_smoothing=args.label_smoothing,
                     focal_gamma=args.focal_gamma,

@@ -71,6 +71,8 @@ class WorldModel(nn.Module):
         adaln: bool = False,
         fsq_dim: int | None = None,
         sls_gamma_init: torch.Tensor | None = None,
+        use_cpc: bool = False,
+        cpc_dim: int = 64,
     ):
         super().__init__()
         # Learnable per-dim SLS precision γ. Stored on WorldModel so
@@ -88,6 +90,15 @@ class WorldModel(nn.Module):
         self.context_frames = context_frames
         self.tokens_per_frame = tokens_per_frame
         self.adaln = adaln
+        self.use_cpc = use_cpc
+        self.cpc_dim = cpc_dim
+        if use_cpc and adaln:
+            raise ValueError(
+                "use_cpc=True and adaln=True are mutually exclusive: AC-CPC "
+                "reads hidden states at action positions, which AdaLN removes "
+                "from the sequence. V3-style sequential training uses "
+                "use_cpc=True, adaln=False."
+            )
 
         # Death token indices (appended as 65th position per frame)
         self.ALIVE_TOKEN = vocab_size      # index for alive status
@@ -149,6 +160,23 @@ class WorldModel(nn.Module):
 
         # Learnable [MASK] embedding (not in vocab -- head never predicts it)
         self.mask_embed = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
+
+        # AC-CPC: contrastive prediction of future hidden states (TWISTER).
+        # Reads hidden states at action positions in the non-AdaLN sequence
+        # and predicts future targets via action-conditioned MLPs.
+        if use_cpc:
+            self.cpc_target_proj = nn.Linear(embed_dim, cpc_dim)
+            self.cpc_predictors = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(embed_dim + (k + 1) * n_actions, cpc_dim),
+                    nn.GELU(),
+                    nn.Linear(cpc_dim, cpc_dim),
+                )
+                for k in range(context_frames)
+            ])
+        else:
+            self.cpc_target_proj = None
+            self.cpc_predictors = None
 
         # Block-causal attention mask
         self.register_buffer("attn_mask", self._build_mask())
@@ -304,6 +332,49 @@ class WorldModel(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.normal_(module.weight, std=0.02)
 
+    def _compute_cpc_loss(self, x, actions, temperature=0.1):
+        """AC-CPC contrastive loss over context-frame action-position hidden states.
+
+        Reads hidden states at action positions in the non-AdaLN sequence
+        plus the final target summary. Predicts each future target from
+        each past source via action-conditioned MLPs, contrasting against
+        in-batch negatives via InfoNCE.
+        """
+        K = self.context_frames
+        BS = self.block_size
+        B = x.size(0)
+        if B < 2:
+            return torch.zeros((), device=x.device)
+
+        # Action token positions in the non-AdaLN interleaved sequence:
+        # [f0(BS) a0 f1(BS) a1 ... fK-1(BS) aK-1 target(BS)]
+        action_positions = [i * (BS + 1) + BS for i in range(K)]
+        h_steps = [x[:, pos] for pos in action_positions]
+        h_steps.append(x[:, -1])  # target summary
+
+        z_targets = [F.normalize(self.cpc_target_proj(h.detach()), dim=-1)
+                     for h in h_steps]
+
+        act_onehot = F.one_hot(actions, self.n_actions).float()  # (B, K, A)
+
+        total_loss = x.new_zeros(())
+        n_pairs = 0
+        for step_idx, k in enumerate(range(1, K + 1)):
+            predictor = self.cpc_predictors[step_idx]
+            for t in range(K + 1 - k):
+                end = min(t + k, K)
+                if end <= t:
+                    continue
+                act_ctx = act_onehot[:, t:end].reshape(B, -1)
+                z_pred = predictor(torch.cat([h_steps[t], act_ctx], dim=-1))
+                z_pred = F.normalize(z_pred, dim=-1)
+                z_pos = z_targets[t + k]
+                sim = torch.mm(z_pred, z_pos.t()) / temperature
+                labels = torch.arange(B, device=sim.device)
+                total_loss = total_loss + F.cross_entropy(sim, labels)
+                n_pairs += 1
+        return total_loss / max(n_pairs, 1)
+
     def forward(self, frame_tokens, actions, z_q_ste_context=None,
                 return_dense_logits=False):
         """Forward pass: predict all target tokens from context.
@@ -407,6 +478,9 @@ class WorldModel(nn.Module):
 
         if return_dense_logits:
             return logits, dense_logits
+        if self.use_cpc:
+            cpc_loss = self._compute_cpc_loss(x, actions)
+            return logits, cpc_loss
         return logits
 
     @staticmethod

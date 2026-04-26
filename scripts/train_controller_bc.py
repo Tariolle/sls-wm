@@ -145,6 +145,20 @@ def main():
                         help="(Unused for CNNPolicy; kept for config compat.)")
     parser.add_argument("--token-embed-dim", type=int, default=None,
                         help="CNNPolicy token embedding dim.")
+    parser.add_argument("--policy-class", type=str, default=None,
+                        choices=["cnn", "v3_cnn"],
+                        help="Controller architecture. 'cnn' (default) is "
+                             "the E6.10-era CNNPolicy with h_proj/h_norm. "
+                             "'v3_cnn' is the V3-deploy faithful policy "
+                             "(direct h_t concat, ReLU+MaxPool, MTP head).")
+    parser.add_argument("--amp-dtype", type=str, default=None,
+                        choices=["bfloat16", "float16", "none"],
+                        help="AMP dtype for controller forward/backward. "
+                             "Default bfloat16 (A100/H200).")
+    parser.add_argument("--compile-mode", type=str, default=None,
+                        choices=["reduce-overhead", "default", "none"],
+                        help="torch.compile mode for the controller. "
+                             "Default reduce-overhead.")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
@@ -255,22 +269,53 @@ def main():
     print(f"Jump class weight: {pos_weight.item():.2f}x "
           f"(train data ratio: {(1-train_jump_ratio)/train_jump_ratio:.2f}x)")
 
-    # Initialize controller (CNNPolicy: z_t spatial + h_t temporal)
+    # Initialize controller. Two architectures:
+    #   "cnn"     -- E6.10-era CNNPolicy (h_proj + h_norm + SiLU + spatial_norm)
+    #   "v3_cnn"  -- V3-deploy faithful (direct h_t concat, ReLU+MaxPool, MTP head)
     grid_size = int(args.tokens_per_frame ** 0.5)
-    controller = CNNPolicy(
-        vocab_size=args.vocab_size,
-        grid_size=grid_size,
-        token_embed_dim=getattr(args, 'token_embed_dim', 16),
-        h_dim=args.embed_dim,
-    ).to(device)
+    policy_class = (getattr(args, "policy_class", None) or "cnn").lower()
+    if policy_class == "v3_cnn":
+        from deepdash.controller import V3CNNPolicy
+        controller = V3CNNPolicy(
+            vocab_size=args.vocab_size,
+            grid_size=grid_size,
+            token_embed_dim=getattr(args, 'token_embed_dim', 16),
+            h_dim=args.embed_dim,
+        ).to(device)
+        policy_label = "V3CNNPolicy"
+    else:
+        controller = CNNPolicy(
+            vocab_size=args.vocab_size,
+            grid_size=grid_size,
+            token_embed_dim=getattr(args, 'token_embed_dim', 16),
+            h_dim=args.embed_dim,
+        ).to(device)
+        policy_label = "CNNPolicy"
     optimizer = torch.optim.AdamW(controller.parameters(),
                                   lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=args.lr * 0.01)
 
     n_params = sum(p.numel() for p in controller.parameters())
-    print(f"CNNPolicy: {n_params:,} parameters "
+    print(f"{policy_label}: {n_params:,} parameters "
           f"(vocab={args.vocab_size}, embed={getattr(args, 'token_embed_dim', 16)}, h_dim={args.embed_dim})")
+
+    # AMP dtype + compile (defaults: bfloat16 + reduce-overhead).
+    amp_dtype_name = getattr(args, "amp_dtype", None) or "bfloat16"
+    if amp_dtype_name == "none":
+        amp_dtype = None
+    else:
+        amp_dtype = {"bfloat16": torch.bfloat16,
+                     "float16": torch.float16}[amp_dtype_name]
+    use_amp = amp_dtype is not None and device.type == "cuda"
+    compile_mode = getattr(args, "compile_mode", None) or "reduce-overhead"
+    if compile_mode != "none":
+        try:
+            controller = torch.compile(controller, mode=compile_mode)
+            print(f"torch.compile enabled (mode={compile_mode})")
+        except Exception as e:
+            print(f"torch.compile failed: {e}")
+    print(f"AMP: {amp_dtype_name}")
 
     # Precompute z_t (current frame = last ctx frame) for each sample
     all_z_t = torch.from_numpy(ctx_tokens[:, -1].astype(np.int64))  # (N, 64)
@@ -303,10 +348,11 @@ def main():
             h_t = all_h_t[idx].to(device)
             actions = all_target_actions[idx].to(device)
 
-            features = controller._encode(z_t, h_t)
-            logits = controller.actor(features).squeeze(-1)
-            loss = F.binary_cross_entropy_with_logits(
-                logits, actions, pos_weight=pos_weight)
+            with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                features = controller._encode(z_t, h_t)
+                logits = controller.actor(features).squeeze(-1)
+                loss = F.binary_cross_entropy_with_logits(
+                    logits, actions, pos_weight=pos_weight)
 
             optimizer.zero_grad()
             loss.backward()
@@ -335,10 +381,11 @@ def main():
                 h_t = all_h_t[idx].to(device)
                 actions = all_target_actions[idx].to(device)
 
-                features = controller._encode(z_t, h_t)
-                logits = controller.actor(features).squeeze(-1)
-                loss = F.binary_cross_entropy_with_logits(
-                    logits, actions, pos_weight=pos_weight)
+                with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                    features = controller._encode(z_t, h_t)
+                    logits = controller.actor(features).squeeze(-1)
+                    loss = F.binary_cross_entropy_with_logits(
+                        logits, actions, pos_weight=pos_weight)
 
                 bs = len(idx)
                 val_loss_sum += loss.item() * bs
@@ -371,12 +418,17 @@ def main():
             "bc/lr": lr,
         })
 
-        # Save best + early stopping
+        # Save best + early stopping. Strip _orig_mod. prefix from
+        # torch.compile-wrapped state so downstream loaders (PPO) can
+        # load directly into an uncompiled controller.
+        def _clean_state():
+            return {k.removeprefix("_orig_mod."): v
+                    for k, v in controller.state_dict().items()}
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
-            torch.save(controller.state_dict(),
-                       ckpt_dir / "controller_bc_best.pt")
+            torch.save(_clean_state(), ckpt_dir / "controller_bc_best.pt")
         else:
             patience_counter += 1
             if patience_counter >= 10:
@@ -385,7 +437,7 @@ def main():
 
     log_file.close()
     wandb_finish()
-    torch.save(controller.state_dict(), ckpt_dir / "controller_bc_final.pt")
+    torch.save(_clean_state(), ckpt_dir / "controller_bc_final.pt")
     print(f"\nDone. Best val loss: {best_val_loss:.4f}")
     print(f"Checkpoints: {ckpt_dir}/controller_bc_best.pt")
 

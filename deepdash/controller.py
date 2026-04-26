@@ -378,3 +378,70 @@ class CNNPolicy(nn.Module):
     def act_deterministic(self, token_ids, h_t):
         prob, _ = self.forward(token_ids, h_t)
         return (prob > 0.5).long()
+
+
+class V3CNNPolicy(nn.Module):
+    """V3-deploy faithful CNN actor-critic. NOT the same as CNNPolicy.
+
+    Verbatim port of V3-deploy's controller (commit 75fe40a). Differences
+    from CNNPolicy:
+      - stride=1 convs + MaxPool(2x2) instead of stride=2 convs.
+      - ReLU activation instead of SiLU.
+      - h_t is concatenated DIRECTLY (no LayerNorm, no projection, no
+        compression). head_input = 256 + h_dim.
+      - Heads zero-init (IRIS/DIAMOND), no orthogonal scaling.
+      - MTP head: predicts mtp_steps=8 future action probabilities for the
+        auxiliary loss in PPO.
+    Use only with the V3-style training pipeline (frozen FSQ + transformer
+    with embed_dim=h_dim=384, vocab_size=1000).
+    """
+
+    def __init__(self, vocab_size=1000, grid_size=8, token_embed_dim=16,
+                 h_dim=384, mtp_steps=8):
+        super().__init__()
+        self.grid_size = grid_size
+        self.mtp_steps = mtp_steps
+
+        self.token_embed = nn.Embedding(vocab_size, token_embed_dim)
+        self.conv1 = nn.Conv2d(token_embed_dim, 32, 3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, 3, stride=1, padding=1)
+
+        cnn_out = 64 * (grid_size // 4) ** 2  # 256 for 8x8 with two 2x2 pools
+        head_input = cnn_out + h_dim
+
+        self.actor = nn.Linear(head_input, 1)
+        self.critic = nn.Linear(head_input, 1)
+        self.mtp_head = nn.Linear(head_input, mtp_steps)
+        for layer in (self.actor, self.critic, self.mtp_head):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+
+    def _encode(self, token_ids, h_t):
+        B = token_ids.shape[0]
+        G = self.grid_size
+        x = self.token_embed(token_ids)              # (B, 64, E)
+        x = x.permute(0, 2, 1).reshape(B, -1, G, G)  # (B, E, 8, 8)
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))   # (B, 32, 4, 4)
+        x = F.relu(F.max_pool2d(self.conv2(x), 2))   # (B, 64, 2, 2)
+        x = x.flatten(1)                              # (B, 256)
+        return torch.cat([x, h_t], dim=1)             # (B, 256 + h_dim)
+
+    def forward(self, token_ids, h_t):
+        features = self._encode(token_ids, h_t)
+        prob = self.actor(features).squeeze(-1).sigmoid()
+        value = self.critic(features).squeeze(-1)
+        return prob, value
+
+    def predict_future_actions(self, token_ids, h_t):
+        features = self._encode(token_ids, h_t)
+        return self.mtp_head(features).sigmoid()
+
+    def act(self, token_ids, h_t):
+        prob, value = self.forward(token_ids, h_t)
+        dist = torch.distributions.Bernoulli(probs=prob)
+        action = dist.sample()
+        return action.long(), dist.log_prob(action), dist.entropy(), value
+
+    def act_deterministic(self, token_ids, h_t):
+        prob, _ = self.forward(token_ids, h_t)
+        return (prob > 0.5).long()
