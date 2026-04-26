@@ -18,6 +18,7 @@ as ``train_world_model.py``.
 
 import argparse
 import csv
+import math
 import re
 import signal
 import sys
@@ -35,6 +36,28 @@ from deepdash.wandb_utils import wandb_init, wandb_log, wandb_finish
 
 
 SHIFT_AUG_RE = re.compile(r"_s[+-]\d+_[+-]\d+$")
+
+
+def codebook_stats(code_counts):
+    """Usage % and normalized perplexity from a (codebook_size,) histogram.
+
+    Mirrors scripts/train_world_model.py::_codebook_stats so panels stay
+    comparable across joint and sequential FSQ runs.
+        usage_pct: fraction of codes observed at least once, in percent.
+        ppl_pct: exp(H) / codebook_size, in percent. 100% = uniform usage,
+                 ~0% = fully collapsed. Cross-codebook-size comparable.
+    """
+    vocab_size = int(code_counts.numel())
+    total = int(code_counts.sum().item())
+    if total == 0:
+        return 0.0, 0.0
+    n_used = int((code_counts > 0).sum().item())
+    usage_pct = 100.0 * n_used / vocab_size
+    p = code_counts.to(torch.float64) / float(total)
+    p_nz = p[p > 0]
+    entropy = float(-(p_nz * p_nz.log()).sum().item())
+    ppl_pct = 100.0 * math.exp(entropy) / vocab_size
+    return usage_pct, ppl_pct
 
 
 class FramePairDataset(Dataset):
@@ -114,17 +137,23 @@ def train_epoch(model, loader, optimizer, alpha_slow, alpha_uniform,
 
 
 @torch.no_grad()
-def val_epoch(model, loader, amp_dtype=None):
+def val_epoch(model, loader, codebook_size, amp_dtype=None, device=None):
+    """Returns (val_recon, usage_pct, ppl_pct) over the val set."""
     model.eval()
     total_recon, n = 0.0, 0
+    code_counts = torch.zeros(codebook_size, device=device, dtype=torch.long)
     for ft, _ in loader:
         with torch.amp.autocast("cuda", enabled=amp_dtype is not None, dtype=amp_dtype):
-            recon_t, _, _ = model(ft)
+            recon_t, _, indices = model(ft)
             recon_loss = fsqvae_loss(recon_t, ft)
+        code_counts.scatter_add_(
+            0, indices.reshape(-1).long(),
+            torch.ones_like(indices.reshape(-1), dtype=torch.long))
         bs = ft.size(0)
         total_recon += recon_loss.item() * bs
         n += bs
-    return total_recon / n
+    usage_pct, ppl_pct = codebook_stats(code_counts)
+    return total_recon / n, usage_pct, ppl_pct
 
 
 def main():
@@ -259,7 +288,12 @@ def main():
     log_file = open(log_path, "w", newline="")
     log_writer = csv.writer(log_file)
     log_writer.writerow(["epoch", "train_recon", "train_slow", "train_uniform",
-                         "val_recon", "lr", "time_s"])
+                         "val_recon", "val_usage_pct", "val_ppl_pct",
+                         "lr", "time_s"])
+
+    # Codebook size (for histogram pre-allocation in val_epoch).
+    underlying = model._orig_mod if hasattr(model, "_orig_mod") else model
+    codebook_size = underlying.codebook_size
 
     max_steps = args.steps_per_epoch or 0
     val_interval = max(1, int(args.val_interval))
@@ -274,11 +308,17 @@ def main():
 
             # Val every val_interval epochs, plus the final epoch.
             do_val = (epoch % val_interval == 0) or (epoch == args.epochs)
-            val_recon = val_epoch(model, val_loader, amp_dtype=amp_dtype) if do_val else None
+            if do_val:
+                val_recon, val_usage, val_ppl = val_epoch(
+                    model, val_loader, codebook_size,
+                    amp_dtype=amp_dtype, device=device)
+            else:
+                val_recon = val_usage = val_ppl = None
             dt = time.time() - t0
             lr = optimizer.param_groups[0]["lr"]
 
-            val_str = f"recon={val_recon:.4f}" if do_val else "skipped"
+            val_str = (f"recon={val_recon:.4f} usage={val_usage:.1f}% ppl={val_ppl:.1f}%"
+                       if do_val else "skipped")
             print(
                 f"Epoch {epoch:4d}/{args.epochs} ({dt:.1f}s) | "
                 f"Train: recon={train_recon:.4f} slow={train_slow:.4f} unif={train_uniform:.4f} | "
@@ -287,6 +327,8 @@ def main():
             log_writer.writerow([
                 epoch, f"{train_recon:.6f}", f"{train_slow:.6f}", f"{train_uniform:.6f}",
                 f"{val_recon:.6f}" if do_val else "",
+                f"{val_usage:.4f}" if do_val else "",
+                f"{val_ppl:.4f}" if do_val else "",
                 f"{lr:.1e}", f"{dt:.1f}"
             ])
             log_file.flush()
@@ -301,6 +343,8 @@ def main():
             }
             if do_val:
                 wandb_payload["fsq/val/recon"] = val_recon
+                wandb_payload["fsq/val/usage_pct"] = val_usage
+                wandb_payload["fsq/val/ppl_pct"] = val_ppl
             wandb_log(wandb_payload)
 
             if do_val and val_recon < best_val_recon:
