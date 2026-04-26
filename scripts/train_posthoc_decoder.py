@@ -82,6 +82,13 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--val-ratio", type=float, default=0.05)
+    parser.add_argument("--amp-dtype", type=str, default=None,
+                        choices=["bfloat16", "float16", "none"],
+                        help="AMP dtype. Default bfloat16 (A100/H200).")
+    parser.add_argument("--compile-mode", type=str, default=None,
+                        choices=["reduce-overhead", "default", "none"],
+                        help="torch.compile mode for the decoder. "
+                             "Default reduce-overhead.")
     args = parser.parse_args()
 
     apply_config(args, section="posthoc_decoder")
@@ -143,6 +150,23 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs, eta_min=args.lr * 0.1)
 
+    # AMP + compile (defaults: bfloat16 + reduce-overhead).
+    amp_name = getattr(args, "amp_dtype", None) or "bfloat16"
+    if amp_name == "none":
+        amp_dtype = None
+    else:
+        amp_dtype = {"bfloat16": torch.bfloat16,
+                     "float16": torch.float16}[amp_name]
+    use_amp = amp_dtype is not None and device.type == "cuda"
+    compile_mode = getattr(args, "compile_mode", None) or "reduce-overhead"
+    if compile_mode != "none":
+        try:
+            fsq.decoder = torch.compile(fsq.decoder, mode=compile_mode)
+            print(f"torch.compile enabled on decoder (mode={compile_mode})")
+        except Exception as e:
+            print(f"torch.compile failed: {e}")
+    print(f"AMP: {amp_name}")
+
     best_val = float("inf")
     print(f"Training {args.epochs} epochs, batch {args.batch_size}, lr {args.lr}")
 
@@ -151,8 +175,9 @@ def main():
         total_train_loss, n_train = 0.0, 0
         for frames in train_loader:
             z_q, x = encode_batch(fsq, frames, device)
-            recon = fsq.decoder(z_q)
-            loss = fsqvae_loss(recon, x)
+            with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                recon = fsq.decoder(z_q)
+                loss = fsqvae_loss(recon, x)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -165,8 +190,9 @@ def main():
         with torch.no_grad():
             for frames in val_loader:
                 z_q, x = encode_batch(fsq, frames, device)
-                recon = fsq.decoder(z_q)
-                loss = fsqvae_loss(recon, x)
+                with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                    recon = fsq.decoder(z_q)
+                    loss = fsqvae_loss(recon, x)
                 total_val_loss += loss.item() * x.size(0)
                 n_val_seen += x.size(0)
         val_loss = total_val_loss / max(1, n_val_seen)
@@ -182,7 +208,10 @@ def main():
             # decoder). This is a drop-in replacement for fsq_best.pt at
             # inference time — play_dream etc. will load this path and
             # get the frozen encoder with the new post-hoc decoder.
-            torch.save(fsq.state_dict(), ckpt_dir / "fsq_posthoc.pt")
+            # Strip _orig_mod. left by torch.compile on the decoder.
+            clean = {k.replace("decoder._orig_mod.", "decoder."): v
+                     for k, v in fsq.state_dict().items()}
+            torch.save(clean, ckpt_dir / "fsq_posthoc.pt")
 
     print(f"Training complete. Best val loss: {best_val:.4f}")
     print(f"Post-hoc decoder saved to {ckpt_dir}/fsq_posthoc.pt")
