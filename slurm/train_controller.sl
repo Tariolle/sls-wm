@@ -11,9 +11,10 @@
 #SBATCH --signal=B:USR1@300
 
 # BC pretraining then PPO fine-tuning, USR1 auto-resume.
-# Submit: sbatch slurm/train_controller.sl [config]
+# Submit:  sbatch slurm/train_controller.sl [config]
+# Default: configs/v7-phase0.yaml
 
-CONFIG=${1:-configs/e6.10-gaussian-single-group.yaml}
+CONFIG=${1:-configs/v7-phase0.yaml}
 
 # Extract checkpoint_dir from the transformer section of the config.
 CKPT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG')).get('transformer',{}).get('checkpoint_dir','checkpoints'))")

@@ -13,9 +13,9 @@
 # Should be fast (~33K samples, 50 epochs).
 #
 # Submit:  sbatch slurm/train_controller_bc.sl [config]
-# Example: sbatch slurm/train_controller_bc.sl configs/e6.8-recon-laplacesls.yaml
+# Default: configs/v7-phase0.yaml
 
-CONFIG=${1:-configs/e6.10-gaussian-single-group.yaml}
+CONFIG=${1:-configs/v7-phase0.yaml}
 CKPT_DIR=$(python -c "import yaml; print(yaml.safe_load(open('$CONFIG')).get('transformer',{}).get('checkpoint_dir','checkpoints'))")
 
 module purge
