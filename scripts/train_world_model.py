@@ -1418,8 +1418,16 @@ def main():
         train_weights, num_samples=num_samples, replacement=True)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
                               sampler=train_sampler, num_workers=0, pin_memory=True)
+    # Shuffle val with a fixed seed: keeps the val pass deterministic across
+    # epochs while breaking the temporal correlation that wrecks the AC-CPC
+    # metric (consecutive frames make in-batch negatives indistinguishable
+    # from the positive, inflating val cpc to ~log(B) regardless of model
+    # quality). CE / death_f1 are unaffected by negative composition.
+    val_gen = torch.Generator()
+    val_gen.manual_seed(args.seed)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
-                            shuffle=False, num_workers=0, pin_memory=True)
+                            shuffle=True, num_workers=0, pin_memory=True,
+                            generator=val_gen)
 
     single_group = bool(getattr(args, "single_group", False) or False)
     _gc = getattr(args, "grad_clip", None)
