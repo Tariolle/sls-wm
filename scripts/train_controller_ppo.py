@@ -350,13 +350,15 @@ def ppo_update(controller, optimizer, rollout, advantages, returns,
 
                 loss = actor_loss + critic_coeff * critic_loss + entropy_loss
 
-                # MTP auxiliary loss (V3): BCE on next L action probabilities
-                # predicted from the same features as the actor.
+                # MTP auxiliary loss (V3): BCE on next L action logits
+                # predicted from the same features as the actor. Use the
+                # _with_logits variant: F.binary_cross_entropy is unsafe
+                # under autocast (see torch warning).
                 if use_mtp:
-                    mtp_probs = controller.predict_future_actions(mb_z_t, mb_h_t)
-                    mtp_probs = mtp_probs.clamp(1e-6, 1 - 1e-6)
-                    mtp_loss = F.binary_cross_entropy(
-                        mtp_probs, mtp_targets_flat[idx], reduction='mean')
+                    mtp_logits = controller.predict_future_action_logits(
+                        mb_z_t, mb_h_t)
+                    mtp_loss = F.binary_cross_entropy_with_logits(
+                        mtp_logits, mtp_targets_flat[idx], reduction='mean')
                     loss = loss + mtp_coeff * mtp_loss
 
             # Skip NaN updates

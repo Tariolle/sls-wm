@@ -432,9 +432,12 @@ class V3CNNPolicy(nn.Module):
         value = self.critic(features).squeeze(-1)
         return prob, value
 
-    def predict_future_actions(self, token_ids, h_t):
+    def predict_future_action_logits(self, token_ids, h_t):
         features = self._encode(token_ids, h_t)
-        return self.mtp_head(features).sigmoid()
+        return self.mtp_head(features)
+
+    def predict_future_actions(self, token_ids, h_t):
+        return self.predict_future_action_logits(token_ids, h_t).sigmoid()
 
     def act(self, token_ids, h_t):
         prob, value = self.forward(token_ids, h_t)
