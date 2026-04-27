@@ -507,6 +507,13 @@ def main():
     if args.no_pretrained:
         args.pretrained = None
 
+    # Optional knobs that older configs (e.g. v7-phase0) omit. Default
+    # them here so downstream None comparisons can't crash.
+    if args.lr_warmup_iters is None:
+        args.lr_warmup_iters = 0
+    if args.jump_penalty is None:
+        args.jump_penalty = 0.0
+
     # Hard-block controller dropout under PPO. The eval-rollout vs
     # train-update asymmetry turns the importance ratio into a measure
     # of dropout-mask noise (see feedback_ppo_no_dropout.md). CNNPolicy
