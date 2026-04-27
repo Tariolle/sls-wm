@@ -25,6 +25,29 @@
 
   <link rel="stylesheet" href="static/css/style.css" />
 
+  <style>
+    html.loading body { visibility: hidden; }
+    #page-loader {
+      position: fixed; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: #fff;
+      z-index: 9999;
+      transition: opacity 0.3s ease;
+    }
+    #page-loader.hidden { opacity: 0; pointer-events: none; }
+    #page-loader .spinner {
+      width: 42px; height: 42px;
+      border: 3px solid #e5e5e5;
+      border-top-color: #333;
+      border-radius: 50%;
+      animation: pl-spin 0.9s linear infinite;
+    }
+    @keyframes pl-spin { to { transform: rotate(360deg); } }
+  </style>
+  <script>
+    document.documentElement.classList.add('loading');
+  </script>
+
   <script>
     window.MathJax = {
       tex: {
@@ -38,6 +61,8 @@
 </head>
 
 <body>
+
+<div id="page-loader" aria-hidden="true"><div class="spinner"></div></div>
 
 <!-- Hero: title, authors, buttons -->
 <section class="hero">
@@ -199,6 +224,27 @@
 <footer>
   <div>&copy; 2026 Florent Tariolle. Source on <a href="https://github.com/Tariolle/sls-wm" target="_blank" rel="noopener">GitHub</a>.</div>
 </footer>
+
+<script>
+  (function () {
+    var loader = document.getElementById('page-loader');
+    var video = document.querySelector('#demo video');
+    var revealed = false;
+    function reveal() {
+      if (revealed) return;
+      revealed = true;
+      document.documentElement.classList.remove('loading');
+      loader.classList.add('hidden');
+      setTimeout(function () { loader.remove(); }, 350);
+    }
+    if (!video) { reveal(); return; }
+    if (video.readyState >= 3) { reveal(); return; }
+    video.addEventListener('canplay', reveal, { once: true });
+    video.addEventListener('loadeddata', reveal, { once: true });
+    video.addEventListener('error', reveal, { once: true });
+    setTimeout(reveal, 8000);
+  })();
+</script>
 
 </body>
 </html>
