@@ -31,7 +31,7 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from deepdash.fsq import FSQVAE
 from deepdash.world_model import WorldModel
-from deepdash.controller import CNNPolicy
+from deepdash.controller import CNNPolicy, V3CNNPolicy
 
 
 # Win32 helpers for topmost window
@@ -118,6 +118,11 @@ def main():
     parser.add_argument("--tokens-per-frame", type=int, default=None)
     parser.add_argument("--context-frames", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
+    parser.add_argument("--policy-class", type=str, default=None,
+                        choices=["cnn", "v3_cnn"],
+                        help="Controller architecture. 'cnn' = E6.10-era "
+                             "CNNPolicy. 'v3_cnn' = V3-deploy/V7 faithful "
+                             "(direct h_t concat, ReLU+MaxPool, MTP head).")
     args = parser.parse_args()
 
     from deepdash.config import apply_config
@@ -154,13 +159,25 @@ def main():
 
     print("Loading Controller...")
     grid_size = int(args.tokens_per_frame ** 0.5)
-    controller = CNNPolicy(
-        vocab_size=args.vocab_size,
-        grid_size=grid_size,
-        token_embed_dim=getattr(args, 'token_embed_dim', 16),
-        h_dim=args.embed_dim,
-        temporal_dim=getattr(args, 'temporal_dim', 32),
-    ).to(device)
+    policy_class = (getattr(args, "policy_class", None) or "cnn").lower()
+    if policy_class == "v3_cnn":
+        controller = V3CNNPolicy(
+            vocab_size=args.vocab_size,
+            grid_size=grid_size,
+            token_embed_dim=getattr(args, 'token_embed_dim', 16),
+            h_dim=args.embed_dim,
+            mtp_steps=int(getattr(args, "mtp_steps", None) or 8),
+        ).to(device)
+        print(f"  V3CNNPolicy (mtp_steps={controller.mtp_steps})")
+    else:
+        controller = CNNPolicy(
+            vocab_size=args.vocab_size,
+            grid_size=grid_size,
+            token_embed_dim=getattr(args, 'token_embed_dim', 16),
+            h_dim=args.embed_dim,
+            temporal_dim=getattr(args, 'temporal_dim', 32),
+        ).to(device)
+        print(f"  CNNPolicy (temporal_dim={getattr(args, 'temporal_dim', 32)})")
     state = torch.load(args.controller_checkpoint, map_location=device,
                        weights_only=True)
     # controller_ppo_best.pt is a raw state_dict; controller_ppo_latest.pt is
