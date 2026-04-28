@@ -533,48 +533,6 @@
 \section{Phase 3: Controller}
 % ==========================================================
 
-\begin{frame}{Controller: Architecture}
-  \textbf{CNNPolicy} ($\sim$45K params): IRIS/DIAMOND-style CNN on the 8$\times$8 token grid, fused with $\mathbf{h}_t$.
-
-  \vspace{0.5em}
-  \begin{center}
-  \resizebox{\textwidth}{!}{%
-  \begin{tikzpicture}[
-    block/.style={rectangle, draw=ccolor, fill=ccolor!10, rounded corners, minimum height=0.8cm, align=center, font=\scriptsize, line width=0.6pt},
-    head/.style={rectangle, draw=ccolor, fill=ccolor!25, rounded corners, minimum height=0.8cm, align=center, font=\scriptsize, line width=0.6pt},
-    arr/.style={-{Stealth[length=2.5mm]}, thick},
-    lbl/.style={font=\tiny, align=center},
-  ]
-    \node[lbl] (zt) {$\mathbf{z}_t$\\{\tiny 8$\times$8 IDs}};
-    \node[block, right=0.4cm of zt] (emb) {Embed\\{\tiny 16d}};
-    \node[block, right=0.3cm of emb] (c1) {Conv 3$\times$3\\+ MaxPool};
-    \node[block, right=0.3cm of c1] (c2) {Conv 3$\times$3\\+ MaxPool};
-    \node[block, right=0.3cm of c2] (flat) {Flatten\\{\tiny $\to$256d}};
-    \node[block, right=0.3cm of flat] (cat) {$\oplus\;\mathbf{h}_t$\\{\tiny 256+\hdim}};
-    \node[head, right=0.3cm of cat] (heads) {Actor + Critic\\{\tiny zero-init}};
-    \node[lbl, right=0.4cm of heads] (at) {$a_t$};
-
-    \draw[arr] (zt) -- (emb);
-    \draw[arr] (emb) -- (c1);
-    \draw[arr] (c1) -- (c2);
-    \draw[arr] (c2) -- (flat);
-    \draw[arr] (flat) -- (cat);
-    \draw[arr] (cat) -- (heads);
-    \draw[arr] (heads) -- (at);
-
-    \node[lbl, below=0.6cm of cat] (ht) {$\mathbf{h}_t \in \mathbb{R}^{\hdim}$};
-    \draw[arr] (ht) -- (cat);
-  \end{tikzpicture}%
-  }
-  \end{center}
-
-  \vspace{0.4em}
-  \begin{center}
-    \small
-    Auxiliary head: \textbf{multi-token prediction} -- predict next 8 actions (timing prior).
-  \end{center}
-\end{frame}
-
 \begin{frame}{Controller: Training}
   \vspace{1em}
   \begin{center}
@@ -787,6 +745,48 @@
 
   \vspace{0.5em}
   Combined loss: $\mathcal{L} = \mathcal{L}_{\text{CE+SLS}} + 0.1 \cdot \mathcal{L}_{\text{AC-CPC}}$.
+\end{frame}
+
+\begin{frame}{Controller: Architecture}
+  \textbf{CNNPolicy} ($\sim$45K params): IRIS/DIAMOND-style CNN on the 8$\times$8 token grid, fused with $\mathbf{h}_t$.
+
+  \vspace{0.5em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw=ccolor, fill=ccolor!10, rounded corners, minimum height=0.8cm, align=center, font=\scriptsize, line width=0.6pt},
+    head/.style={rectangle, draw=ccolor, fill=ccolor!25, rounded corners, minimum height=0.8cm, align=center, font=\scriptsize, line width=0.6pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    lbl/.style={font=\tiny, align=center},
+  ]
+    \node[lbl] (zt) {$\mathbf{z}_t$\\{\tiny 8$\times$8 IDs}};
+    \node[block, right=0.4cm of zt] (emb) {Embed\\{\tiny 16d}};
+    \node[block, right=0.3cm of emb] (c1) {Conv 3$\times$3\\+ MaxPool};
+    \node[block, right=0.3cm of c1] (c2) {Conv 3$\times$3\\+ MaxPool};
+    \node[block, right=0.3cm of c2] (flat) {Flatten\\{\tiny $\to$256d}};
+    \node[block, right=0.3cm of flat] (cat) {$\oplus\;\mathbf{h}_t$\\{\tiny 256+\hdim}};
+    \node[head, right=0.3cm of cat] (heads) {Actor + Critic\\{\tiny zero-init}};
+    \node[lbl, right=0.4cm of heads] (at) {$a_t$};
+
+    \draw[arr] (zt) -- (emb);
+    \draw[arr] (emb) -- (c1);
+    \draw[arr] (c1) -- (c2);
+    \draw[arr] (c2) -- (flat);
+    \draw[arr] (flat) -- (cat);
+    \draw[arr] (cat) -- (heads);
+    \draw[arr] (heads) -- (at);
+
+    \node[lbl, below=0.6cm of cat] (ht) {$\mathbf{h}_t \in \mathbb{R}^{\hdim}$};
+    \draw[arr] (ht) -- (cat);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.4em}
+  \begin{center}
+    \small
+    Auxiliary head: \textbf{multi-token prediction} -- predict next 8 actions (timing prior).
+  \end{center}
 \end{frame}
 
 \begin{frame}{JEPA Way -- Two Training Phases}
