@@ -23,14 +23,14 @@
 \addtobeamertemplate{frametitle}{}{\vspace*{-0.3em}}
 
 % ---- Architecture constants: change here, propagates everywhere ----
-\newcommand{\hdim}{512}              % transformer embed dim / h_t dim
+\newcommand{\hdim}{384}              % transformer embed dim / h_t dim
 \newcommand{\nheads}{8}              % attention heads
 \newcommand{\nlayers}{8}             % transformer layers
 \newcommand{\framesize}{64}          % input frame resolution (pixels)
 \newcommand{\spatialres}{8}          % token grid side length
 \newcommand{\ntokens}{64}            % tokens per frame (\spatialres^2)
-\newcommand{\fsqcodes}{625}          % FSQ codebook size
-\newcommand{\vocabsize}{627}         % full vocab (\fsqcodes + ALIVE + DEATH)
+\newcommand{\fsqcodes}{1{,}000}      % FSQ codebook size
+\newcommand{\vocabsize}{1{,}002}     % full vocab (\fsqcodes + ALIVE + DEATH)
 \newcommand{\contextK}{4}            % context frames K
 \newcommand{\seqlen}{329}            % input sequence length (\contextK*65 + \contextK + 65)
 \newcommand{\nshifts}{9}             % number of vertical augmentation shifts
@@ -90,14 +90,14 @@
   ]
     \node[block, fill=vcolor!20, draw=vcolor] (V) {\textbf{V}\\\scriptsize FSQ-VAE};
     \node[block, fill=mcolor!20, draw=mcolor, right=1.5cm of V] (M) {\textbf{M}\\\scriptsize Transformer};
-    \node[block, fill=ccolor!20, draw=ccolor, right=1.5cm of M] (C) {\textbf{C}\\\scriptsize MLP};
+    \node[block, fill=ccolor!20, draw=ccolor, right=1.5cm of M] (C) {\textbf{C}\\\scriptsize CNN};
 
     \node[left=1.2cm of V, lbl] (input) {$\mathbf{x}_t$\\{\tiny 64$\times$64$\times$1}};
     \node[right=1.2cm of C, lbl] (output) {$a_t$};
 
     \draw[arr] (input) -- (V);
     \draw[arr] (V) -- node[above, lbl] {$\mathbf{z}_t$} node[below, lbl] {\tiny 8$\times$8} (M);
-    \draw[arr] (M) -- node[above, lbl] {$\mathbf{h}_t$} node[below, lbl] {\tiny \hdim} (C);
+    \draw[arr] (M) -- node[above, lbl] {$\mathbf{z}_t,\,\mathbf{h}_t$} node[below, lbl] {\tiny 8$\times$8,\;\hdim} (C);
     \draw[arr] (C) -- (output);
 
     \draw[arr] (C.south) -- ++(0,-0.6) -| node[below, lbl, pos=0.25] {$a_t$} (M.south);
@@ -110,36 +110,40 @@
     \small
     \begin{tabular}{c@{\hspace{3em}}c}
       $\mathbf{x}_t \in \mathbb{R}^{\framesize \times \framesize}$: grayscale Sobel frame &
-      $\mathbf{z}_t \in \{0,\ldots,624\}^{\ntokens}$: discrete tokens \\[0.3em]
+      $\mathbf{z}_t \in \{0,\ldots,999\}^{\ntokens}$: discrete tokens \\[0.3em]
       $\mathbf{h}_t \in \mathbb{R}^{\hdim}$: hidden state &
       $a_t \in \{0, 1\}$: jump/idle
     \end{tabular}
   \end{center}
 \end{frame}
 
-\begin{frame}{Training: Two Phases}
+\begin{frame}{Training: Three Sequential Stages}
   \vspace{1em}
   \begin{center}
   \resizebox{\textwidth}{!}{%
   \begin{tikzpicture}[
-    phase/.style={rectangle, draw, rounded corners, minimum height=2.2cm, minimum width=4.5cm, align=center, font=\small, line width=1.2pt},
-    sub/.style={font=\scriptsize, text=gray!70, align=center},
+    phase/.style={rectangle, draw, rounded corners, minimum height=2.2cm, minimum width=3.6cm, align=center, font=\small, line width=1.2pt},
     arr/.style={-{Stealth[length=4mm]}, thick},
     lbl/.style={font=\scriptsize, align=center},
   ]
-    \node[phase, fill=vcolor!10, draw=vcolor!60] (wm) {
-      \textbf{Phase 1 -- World Model}\\[0.4em]
-      \scriptsize FSQ-VAE + Transformer\\
-      \scriptsize jointly trained end-to-end
+    \node[phase, fill=vcolor!15, draw=vcolor!60] (v) {
+      \textbf{Stage 1 -- V}\\[0.3em]
+      \scriptsize FSQ-VAE\\
+      \scriptsize MSE + GRWM regularizers
     };
-    \node[phase, fill=ccolor!10, draw=ccolor!60, right=2.5cm of wm] (ctrl) {
-      \textbf{Phase 2 -- Controller}\\[0.4em]
+    \node[phase, fill=mcolor!15, draw=mcolor!60, right=1.3cm of v] (m) {
+      \textbf{Stage 2 -- M}\\[0.3em]
+      \scriptsize Transformer on tokens\\
+      \scriptsize CE + SLS + AC-CPC
+    };
+    \node[phase, fill=ccolor!15, draw=ccolor!60, right=1.3cm of m] (c) {
+      \textbf{Stage 3 -- C}\\[0.3em]
       \scriptsize BC pretraining\\
-      \scriptsize $\downarrow$\\
-      \scriptsize PPO in dreams
+      \scriptsize $\to$ PPO in dreams
     };
 
-    \draw[arr] (wm) -- node[above, lbl] { } node[below, lbl] {$\mathbf{h}_t$} (ctrl);
+    \draw[arr] (v) -- node[above, lbl] {$\mathbf{z}_t$} (m);
+    \draw[arr] (m) -- node[above, lbl] {$\mathbf{z}_t,\,\mathbf{h}_t$} (c);
   \end{tikzpicture}%
   }
   \end{center}
@@ -147,8 +151,8 @@
   \vspace{0.5em}
   \begin{center}
     \small
-    V and M are inseparable: prediction gradients flow back into the encoder.\\
-    C is trained entirely in imagination on frozen WM rollouts.
+    Each stage is trained in isolation on the frozen output of the previous one.\\
+    C is trained entirely in imagination on WM rollouts.
   \end{center}
 \end{frame}
 
@@ -234,7 +238,7 @@
 
     \draw[arr] (pre) -- node[above, lbl] {$\mathbf{x}_t$} (enc);
     \draw[arr] (enc) -- node[above, lbl] {$\mathbf{z}_t$} (tfm);
-    \draw[arr] (tfm) -- node[above, lbl] {$\mathbf{h}_t$} (ctrl);
+    \draw[arr] (tfm) -- node[above, lbl] {$\mathbf{z}_t,\,\mathbf{h}_t$} (ctrl);
     \draw[arr] (ctrl) -- (act);
 
     % a_t feedback loop: routed below to re-enter M for next step
@@ -245,7 +249,6 @@
 
   \begin{center}
     \small
-    Screen capture at 30 FPS $\to$ Sobel $\to$ V $\to$ M $\to$ C $\to$ game input \\[0.3em]
     Full pipeline must complete in $<$33ms to maintain 30 FPS real-time play
   \end{center}
 \end{frame}
@@ -275,15 +278,15 @@
 \end{frame}
 
 \begin{frame}{Data Augmentation: Spatial Shifts}
-
+  \vspace{-0.4em}
   \begin{center}
-    \includegraphics[height=1.0\textheight]{vertical_shifts.png}
+    \includegraphics[height=0.99\textheight]{vertical_shifts.png}
   \end{center}
 
 \end{frame}
 
 % ==========================================================
-\section{Phase 1: World Model}
+\section{Phase 1: Vision}
 % ==========================================================
 
 \begin{frame}{Vision Model: $\beta$-VAE $\to$ VQ-VAE $\to$ FSQ-VAE}
@@ -295,7 +298,7 @@
 
   \vspace{0.3em}
   \begin{center}
-    Levels $[5,5,5,5]$ $\Rightarrow$ \fsqcodes{} codes\\
+    Levels $[8,5,5,5]$ $\Rightarrow$ \fsqcodes{} codes\\
     $\spatialres\times\spatialres$ grid $=$ \textbf{\ntokens{} tokens/frame}
   \end{center}
   % TODO: add before/after reconstruction comparison
@@ -320,7 +323,7 @@
     \node[layer, minimum width=0.8cm, minimum height=0.5cm, right=0.25cm of c3] (proj) {1$\times$1};
 
     % FSQ bottleneck
-    \node[fsqbox, minimum width=0.8cm, minimum height=0.5cm, right=0.35cm of proj] (fsq) {\textbf{FSQ}\\{[5,5,5,5]}};
+    \node[fsqbox, minimum width=0.8cm, minimum height=0.5cm, right=0.35cm of proj] (fsq) {\textbf{FSQ}\\{[8,5,5,5]}};
 
     % Decoder
     \node[layer, minimum width=0.8cm, minimum height=0.5cm, right=0.35cm of fsq] (dproj) {1$\times$1};
@@ -347,7 +350,7 @@
     \node[dims, below=0.15cm of c2] {16$\times$16\\64ch};
     \node[dims, below=0.15cm of c3] {8$\times$8\\128ch};
     \node[dims, below=0.15cm of proj] {8$\times$8\\4ch};
-    \node[dims, below=0.15cm of fsq, align=center] {8$\times$8\\625 codes};
+    \node[dims, below=0.15cm of fsq, align=center] {8$\times$8\\1000 codes};
     \node[dims, below=0.15cm of dproj] {8$\times$8\\128ch};
     \node[dims, below=0.15cm of dc1] {16$\times$16\\64ch};
     \node[dims, below=0.15cm of dc2] {32$\times$32\\32ch};
@@ -425,7 +428,7 @@
   \textbf{Problem}: standard CE assigns zero mass to every non-target token: a near-miss neighbour is penalised as harshly as a random code.
 
   \vspace{0.5em}
-  \textbf{SLS}: replace the one-hot target with a narrow Gaussian centered on the correct code in FSQ coordinate space ($\sigma = 0.7$). Near neighbours get small positive mass; distant codes get none.
+  \textbf{SLS}: replace the one-hot target with a narrow Gaussian centered on the correct code in FSQ coordinate space ($\sigma = 1.0$). Near neighbours get small positive mass; distant codes get none.
 
   \vspace{0.5em}
   Rewards near-misses without diluting confidence in the correct code.
@@ -446,14 +449,382 @@
     \end{itemize}
 
     \column{0.45\textwidth}
-    \vspace{-1.2em}
+    \vspace{-1.7em}
     \begin{center}
       \includegraphics[width=0.80\textwidth]{fsq_neighbors.png}
     \end{center}
   \end{columns}
 \end{frame}
 
-\begin{frame}{V + M: Joint Training}
+\begin{frame}{FSQ-VAE: Training Losses}
+  \vspace{0.5em}
+  \begin{center}
+  \resizebox{0.95\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw, rounded corners, minimum height=1.0cm, minimum width=1.8cm, align=center, font=\scriptsize, line width=0.7pt},
+    loss/.style={rectangle, draw=insared, fill=insared!10, rounded corners, minimum height=0.8cm, minimum width=1.8cm, align=center, font=\scriptsize, line width=0.7pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    darr/.style={-{Stealth[length=2.5mm]}, thick, dashed, insared},
+    lbl/.style={font=\tiny, align=center},
+  ]
+    \node[lbl] (in) {$\mathbf{x}_t,\,\mathbf{x}_{t+1}$};
+    \node[block, fill=vcolor!20, draw=vcolor, right=0.6cm of in] (enc) {Encoder};
+    \node[block, fill=vcolor!35, draw=vcolor, right=0.5cm of enc] (fsq) {FSQ};
+    \node[block, fill=vcolor!15, draw=vcolor, right=0.5cm of fsq] (dec) {Decoder};
+    \node[loss, above right=0.1cm and 0.5cm of dec] (mse) {MSE recon};
+    \node[loss, right=0.5cm of dec] (slow) {GRWM slow};
+    \node[loss, below right=0.1cm and 0.5cm of dec] (uni) {GRWM uniform};
+
+    \draw[arr] (in) -- (enc);
+    \draw[arr] (enc) -- (fsq);
+    \draw[arr] (fsq) -- (dec);
+    \draw[arr] (dec.east) -- (mse.west);
+    \draw[arr] (dec.east) -- (slow.west);
+    \draw[arr] (dec.east) -- (uni.west);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.3em}
+  \begin{itemize}
+    \item \textbf{MSE} reconstruction on $(\mathbf{x}_t, \mathbf{x}_{t+1})$ pairs (STE through quantizer)
+    \item \textbf{GRWM slowness}: penalizes large $\|\mathbf{z}_e^{t+1}-\mathbf{z}_e^t\|^2$ -- temporally smooth latents
+    \item \textbf{GRWM uniformity}: spreads $\mathbf{z}_e$ across the FSQ hypercube -- avoids dead codes
+    \item Trained \emph{independently} of M -- frozen tokens fed to the transformer afterwards
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{FSQ-VAE: Training}
+  \begin{itemize}
+    \item $\sim$252K frame pairs ($\sim$\naugeps{} episodes), batch 32
+    \item AdamW, LR $4\cdot 10^{-3}$, 200 epochs
+    \item GRWM weights: $\alpha_{\text{slow}}=0.1$, $\alpha_{\text{uniform}}=0.01$
+    \item Vertical-shift augmentation applied per pair
+    \item TODO: here put the training curves
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{FSQ-VAE: Reconstructions}
+  \begin{center}
+    \includegraphics[width=\textwidth]{fsq_reconstructions.png}
+  \end{center}
+  \vspace{-0.1em}
+  \begin{center}
+    \small{\textbf{51$\times$} compression}: $32{,}768 \to 638$ bits/frame
+  \end{center}
+\end{frame}
+
+% ==========================================================
+\section{Phase 2: World Model}
+% ==========================================================
+
+\begin{frame}{Transformer: Training}
+  \begin{itemize}
+    \item AdamW, LR $10^{-3}$, weight decay $0.05$, dropout $0.1$, batch 256, 200 epochs
+    \item Cosine LR + linear warmup, early stopping on val loss
+    \item Death oversampling $15\times$
+    \item Token noise: 5\% random + 5\% FSQ-neighbour substitution
+    \item Weight tying between input embedding and output head
+    \item Best epoch 146, val acc 35.6\%, death F1 0.78
+  \end{itemize}
+\end{frame}
+
+% ==========================================================
+\section{Phase 3: Controller}
+% ==========================================================
+
+\begin{frame}{Controller: Architecture}
+  \textbf{CNNPolicy} ($\sim$45K params): IRIS/DIAMOND-style CNN on the 8$\times$8 token grid, fused with $\mathbf{h}_t$.
+
+  \vspace{0.5em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw=ccolor, fill=ccolor!10, rounded corners, minimum height=0.8cm, align=center, font=\scriptsize, line width=0.6pt},
+    head/.style={rectangle, draw=ccolor, fill=ccolor!25, rounded corners, minimum height=0.8cm, align=center, font=\scriptsize, line width=0.6pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    lbl/.style={font=\tiny, align=center},
+  ]
+    \node[lbl] (zt) {$\mathbf{z}_t$\\{\tiny 8$\times$8 IDs}};
+    \node[block, right=0.4cm of zt] (emb) {Embed\\{\tiny 16d}};
+    \node[block, right=0.3cm of emb] (c1) {Conv 3$\times$3\\+ MaxPool};
+    \node[block, right=0.3cm of c1] (c2) {Conv 3$\times$3\\+ MaxPool};
+    \node[block, right=0.3cm of c2] (flat) {Flatten\\{\tiny $\to$256d}};
+    \node[block, right=0.3cm of flat] (cat) {$\oplus\;\mathbf{h}_t$\\{\tiny 256+\hdim}};
+    \node[head, right=0.3cm of cat] (heads) {Actor + Critic\\{\tiny zero-init}};
+    \node[lbl, right=0.4cm of heads] (at) {$a_t$};
+
+    \draw[arr] (zt) -- (emb);
+    \draw[arr] (emb) -- (c1);
+    \draw[arr] (c1) -- (c2);
+    \draw[arr] (c2) -- (flat);
+    \draw[arr] (flat) -- (cat);
+    \draw[arr] (cat) -- (heads);
+    \draw[arr] (heads) -- (at);
+
+    \node[lbl, below=0.6cm of cat] (ht) {$\mathbf{h}_t \in \mathbb{R}^{\hdim}$};
+    \draw[arr] (ht) -- (cat);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.4em}
+  \begin{center}
+    \small
+    Auxiliary head: \textbf{multi-token prediction} -- predict next 8 actions (timing prior).
+  \end{center}
+\end{frame}
+
+\begin{frame}{Controller: Training}
+  \vspace{1em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    phase/.style={rectangle, draw, rounded corners, minimum height=2.2cm, minimum width=4.5cm, align=center, font=\small, line width=1.2pt},
+    arr/.style={-{Stealth[length=4mm]}, thick},
+    lbl/.style={font=\scriptsize, align=center},
+  ]
+    \node[phase, fill=ccolor!10, draw=ccolor!60] (bc) {
+      \textbf{Stage 1 -- BC}\\[0.4em]
+      \scriptsize Imitate expert on\\
+      \scriptsize $(\mathbf{z}_t,\mathbf{h}_t)$ from frozen WM
+    };
+    \node[phase, fill=mcolor!10, draw=mcolor!60, right=2.5cm of bc] (ppo) {
+      \textbf{Stage 2 -- PPO}\\[0.4em]
+      \scriptsize Train in imagination\\
+      \scriptsize 45-step dream rollouts\\
+      \scriptsize jump penalty $-0.2$/jump
+    };
+
+    \draw[arr] (bc) -- node[above, lbl] {warm init} (ppo);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.4em}
+  \begin{center}
+    \small
+    PPO clip $0.2$, GAE $\lambda=0.95$, $\gamma=0.995$, $\sim$5K--15K iterations.\\
+    Zero-shot deployment on the real game after PPO.
+  \end{center}
+\end{frame}
+
+% ==========================================================
+\section{Analysis}
+% ==========================================================
+
+\begin{frame}{What Worked}
+  \vspace{0.5em}
+  \begin{itemize}
+    \item \textbf{FSQ-VAE}: sharp, 100\% utilization, no tuning
+    \item \textbf{Sobel}: filters visual noise $\to$ structural perception
+    \item \textbf{Vertical shifts}: massively reduced overfitting, physically valid
+    \item \textbf{Structured label smoothing}: narrow Gaussian on FSQ lattice distance
+    \item \textbf{Action tokens in the sequence}: simple, stable, no special init tricks
+    \item \textbf{Scaling to 384d}: visible jump on every metric (acc, death F1, BC, real-game)
+    \item \textbf{AC-CPC} ($w=0.1$): better dream quality at no cost
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{What Didn't Work (or Didn't Help)}
+  \vspace{0.5em}
+  \begin{itemize}
+    \item \textbf{$\beta$-VAE}: blurry, large grid search $\to$ abandoned
+    \item \textbf{Pure RL (CMA-ES)}: $\sim$12 steps (local optimum) $\to$ BC required
+    \item \textbf{MaskGIT}: degraded on 64 tokens, parallel single-step better
+    \item \textbf{Mask scheduling during training}: train/inference mismatch, fixed in V2
+    \item \textbf{Soft continuation gating}: agent gamed airtime
+    \item \textbf{PMPO}: oscillated with binary action space
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Tried After V3 -- Did Not Outperform Yet}
+  \vspace{0.3em}
+  More elegant, faster to train, but less stable / less precise on the real game:
+
+  \vspace{0.5em}
+  \begin{itemize}
+    \item \textbf{End-to-end V+M training} (JEPA way) -- V and M trained jointly with only \emph{two} losses (MSE on pixels + CE on tokens). Stable, but the resulting FSQ is harder to act on than V3's separately-trained FSQ.
+    \item \textbf{AdaLN-Zero action conditioning}: actions removed from the sequence, injected via AdaLN. Best CPC ever, but 5 runs diverged before QK-norm and gate-bias-1 init unblocked it.
+    \item \textbf{Scaling to 512d}: bigger, slower, no real-game gain on the new latents.
+    \item \textbf{MLPPolicy on $\mathbf{h}_t$ only}: 2$\times$ faster convergence, smallest train/eval gap, but the V3 CNN still wins on real-game with the V3 FSQ.
+    \item \textbf{Multi-token prediction}: had a silent off-by-one bug, dropped in V4.
+  \end{itemize}
+
+  \vspace{0.3em}
+  \begin{center}
+    \small
+    Net: V3 stays the best deployment despite V4--V6 being more elegant on paper.
+  \end{center}
+\end{frame}
+
+% ==========================================================
+\section{Limitations}
+% ==========================================================
+
+\begin{frame}{Limitations \& Future Work}
+  \begin{itemize}
+    \item \textbf{Sample efficiency}: trained on only 2h20 of gameplay -- world models make this tractable
+    \item \textbf{Dream horizon}: dreams stay coherent for tens to hundreds of frames, then hallucinate -- repeated obstacles, impassable sections, or empty levels
+    \item \textbf{Scope}: trained on simple mechanics (portals, jump pads, orbs, standard gravity). Complex levels with noisy backgrounds and harder dynamics are the natural next step.
+  \end{itemize}
+\end{frame}
+
+% ==========================================================
+\section{References}
+% ==========================================================
+
+\begin{frame}[allowframebreaks]{References}
+  \small
+  \begin{itemize}
+    \item Micheli, V. et al. (2023). \href{https://arxiv.org/abs/2209.00588}{\textit{Transformers are Sample-Efficient World Models}} (IRIS). ICLR
+    \item Mentzer, F. et al. (2024). \href{https://arxiv.org/abs/2309.15505}{\textit{Finite Scalar Quantization: VQ-VAE Made Simple}}. ICLR
+    \item Burchi, M. \& Timofte, R. (2025). \href{https://arxiv.org/abs/2503.04416}{\textit{TWISTER: Transformer-based World Models with AC-CPC}}. ICLR
+    \item Su, J. et al. (2024). \href{https://arxiv.org/abs/2104.09864}{\textit{RoFormer: Enhanced Transformer with Rotary Position Embedding}}. Neurocomputing
+    \item Schulman, J. et al. (2017). \href{https://arxiv.org/abs/1707.06347}{\textit{Proximal Policy Optimization Algorithms}}. Preprint
+    \item Ha, D. \& Schmidhuber, J. (2018). \href{https://arxiv.org/abs/1803.10122}{\textit{World Models}}. NeurIPS
+    \item Hafner, D. et al. (2025). \href{https://arxiv.org/abs/2301.04104}{\textit{Mastering Diverse Control Tasks through World Models}} (DreamerV3). Nature
+    \item Vali, M. et al. (2026). \href{https://arxiv.org/abs/2601.17124}{\textit{iFSQ: Improving FSQ for Image Generation}}. ICLR
+    \item Szegedy, C. et al. (2016). \href{https://arxiv.org/abs/1512.00567}{\textit{Rethinking the Inception Architecture}}. CVPR
+    \item Lin, T.-Y. et al. (2017). \href{https://arxiv.org/abs/1708.02002}{\textit{Focal Loss for Dense Object Detection}}. ICCV
+    \item Peebles, W. \& Xie, S. (2023). \href{https://arxiv.org/abs/2212.09748}{\textit{Scalable Diffusion Models with Transformers}} (DiT). ICCV
+    \item Esser, P. et al. (2024). \href{https://arxiv.org/abs/2403.03206}{\textit{Scaling Rectified Flow Transformers}} (SD3). ICML
+    \item Maes, L. et al. (2026). \href{https://arxiv.org/abs/2603.19312}{\textit{LeWorldModel: Stable End-to-End JEPA from Pixels}}. Preprint
+  \end{itemize}
+\end{frame}
+
+% ==========================================================
+\appendix
+\section{Appendix}
+% ==========================================================
+
+\begin{frame}{Transformer: Architecture}
+  \vspace{0.4em}
+  \begin{center}
+  \hspace*{-0.05\textwidth}%
+  \resizebox{1.1\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw=mcolor, fill=mcolor!10, rounded corners, minimum height=0.9cm, align=center, font=\scriptsize, line width=0.6pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    lbl/.style={font=\tiny, align=center},
+  ]
+    \node[lbl] (in) {$\mathbf{z}_{t-K:t},\,a_{t-K:t-1}$\\{\tiny \seqlen{} positions}};
+    \node[block, minimum width=2cm, right=0.6cm of in] (emb) {Token + Action\\Embedding};
+    \node[block, minimum width=2cm, right=0.5cm of emb] (rope) {3D-RoPE\\{\tiny row, col, frame}\\{\tiny block-causal}};
+    \node[block, minimum width=2.5cm, right=0.5cm of rope, fill=mcolor!25] (blocks) {\nlayers$\times$ Transformer\\Block (\hdim d, \nheads H)\\{\tiny pre-norm + GELU}};
+    \node[block, minimum width=2cm, right=0.5cm of blocks] (head) {Prediction\\Head (tied)};
+    \node[lbl, right=0.5cm of head] (out1) {$\hat{\mathbf{z}}_{t+1},\,\hat{d}_{t+1}$\\{\tiny 64 tokens + status}};
+
+    \draw[arr] (in) -- (emb);
+    \draw[arr] (emb) -- (rope);
+    \draw[arr] (rope) -- (blocks);
+    \draw[arr] (blocks) -- (head);
+    \draw[arr] (head) -- (out1);
+
+    \node[below=0.4cm of blocks, lbl, font=\scriptsize] (ht) {$\mathbf{h}_t \in \mathbb{R}^{\hdim}$};
+    \draw[arr] (blocks.south) -- (ht);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.2em}
+  \begin{center}
+    \small
+    Sequence: $[f_0\,a_0\,f_1\,a_1\,\ldots\,f_{K-1}\,a_{K-1}\,f^{\text{tgt}}]$, target = learnable mask embed\\[0.2em]
+    Vocab: $|\mathcal{V}| = \vocabsize$ (1000 visual + ALIVE + DEATH) \quad 14.7M params
+  \end{center}
+\end{frame}
+
+\begin{frame}{Transformer: Sequence Layout}
+  \vspace{0.5em}
+  Each frame block has \textbf{65 positions}: 64 visual tokens + 1 status token (ALIVE / DEATH).
+  Action tokens are interleaved between frame blocks. The target frame is replaced by a learnable mask embedding -- no ground-truth leakage.
+
+  \vspace{0.7em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    fblk/.style={rectangle, draw=mcolor!70, fill=mcolor!10, minimum height=0.7cm, minimum width=1.6cm, align=center, font=\tiny},
+    ablk/.style={rectangle, draw=ccolor!70, fill=ccolor!15, minimum height=0.7cm, minimum width=0.6cm, align=center, font=\tiny},
+    tblk/.style={rectangle, draw=insared, fill=insared!10, minimum height=0.7cm, minimum width=1.6cm, align=center, font=\tiny},
+    lbl/.style={font=\tiny, align=center},
+  ]
+    \node[fblk] (f0) {$f_0$ (65)};
+    \node[ablk, right=0.1cm of f0] (a0) {$a_0$};
+    \node[fblk, right=0.1cm of a0] (f1) {$f_1$ (65)};
+    \node[ablk, right=0.1cm of f1] (a1) {$a_1$};
+    \node[fblk, right=0.1cm of a1] (f2) {$f_2$ (65)};
+    \node[ablk, right=0.1cm of f2] (a2) {$a_2$};
+    \node[fblk, right=0.1cm of a2] (f3) {$f_3$ (65)};
+    \node[ablk, right=0.1cm of f3] (a3) {$a_3$};
+    \node[tblk, right=0.1cm of a3] (tgt) {$f^{\text{tgt}}$ (65)};
+
+    \node[lbl, below=0.1cm of f0] {context};
+    \node[lbl, below=0.1cm of f3] {context};
+    \node[lbl, below=0.1cm of tgt] {target (masked)};
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.3em}
+  \begin{itemize}
+    \item \textbf{Block-causal} attention: bidirectional within each block, causal across.
+    \item \textbf{3D-RoPE}: head dim split into row / col / frame bands, lower $\theta$ for spatial axes.
+    \item \textbf{Parallel decode}: all 65 target positions predicted in one forward pass.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Transformer: Auxiliary Contrastive Loss (AC-CPC)}
+  \vspace{0.3em}
+  Beyond next-frame CE, the transformer is trained with an \textbf{action-conditional contrastive predictive coding} loss (TWISTER, Burchi \& Timofte 2025):
+
+  \vspace{0.5em}
+  \begin{itemize}
+    \item For each $k\in\{1,\ldots,K\}$, predict $\mathbf{h}_{t+k}$ from $\mathbf{h}_t$ + $a_{t:t+k-1}$ via an MLP head.
+    \item InfoNCE loss with in-batch negatives (temperature 0.1).
+    \item Forces $\mathbf{h}_t$ to encode action-conditional dynamics, not just static appearance.
+  \end{itemize}
+
+  \vspace{0.5em}
+  Combined loss: $\mathcal{L} = \mathcal{L}_{\text{CE+SLS}} + 0.1 \cdot \mathcal{L}_{\text{AC-CPC}}$.
+\end{frame}
+
+\begin{frame}{JEPA Way -- Two Training Phases}
+  \vspace{1em}
+  \begin{center}
+  \resizebox{\textwidth}{!}{%
+  \begin{tikzpicture}[
+    phase/.style={rectangle, draw, rounded corners, minimum height=2.2cm, minimum width=4.5cm, align=center, font=\small, line width=1.2pt},
+    arr/.style={-{Stealth[length=4mm]}, thick},
+    lbl/.style={font=\scriptsize, align=center},
+  ]
+    \node[phase, fill=vcolor!10, draw=vcolor!60] (wm) {
+      \textbf{Phase 1 -- World Model}\\[0.4em]
+      \scriptsize FSQ-VAE + Transformer\\
+      \scriptsize jointly trained end-to-end\\
+      \scriptsize (only two losses: MSE + CE)
+    };
+    \node[phase, fill=ccolor!10, draw=ccolor!60, right=2.5cm of wm] (ctrl) {
+      \textbf{Phase 2 -- Controller}\\[0.4em]
+      \scriptsize BC pretraining\\
+      \scriptsize $\downarrow$\\
+      \scriptsize PPO in dreams
+    };
+
+    \draw[arr] (wm) -- node[above, lbl] { } node[below, lbl] {$\mathbf{h}_t$} (ctrl);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.5em}
+  \begin{center}
+    \small
+    V and M become inseparable: prediction gradients flow back into the encoder via STE.\\
+    Elegant, faster, but the resulting FSQ is harder to act on than V3's.
+  \end{center}
+\end{frame}
+
+\begin{frame}{JEPA Way -- V + M: Joint Training}
   \vspace{1em}
   \begin{center}
   \resizebox{0.95\textwidth}{!}{%
@@ -486,32 +857,55 @@
   \end{tikzpicture}%
   }
   \end{center}
+
+  \vspace{0.3em}
+  \begin{center}
+    \small
+    Pure-JEPA (no MSE anchor) suffers codebook collapse -- pixel anchor is the regularizer.
+  \end{center}
 \end{frame}
 
-\begin{frame}{FSQ-VAE: Training}
+\begin{frame}{Transformer with AdaLN-Zero (V4--V6)}
+  \vspace{0.5em}
+  \begin{center}
+  \hspace*{-0.05\textwidth}%
+  \resizebox{1.1\textwidth}{!}{%
+  \begin{tikzpicture}[
+    block/.style={rectangle, draw=mcolor, fill=mcolor!10, rounded corners, minimum height=0.9cm, align=center, font=\scriptsize, line width=0.6pt},
+    arr/.style={-{Stealth[length=2.5mm]}, thick},
+    lbl/.style={font=\tiny, align=center},
+  ]
+    \node[lbl] (in) {$\mathbf{z}_{t-K:t}$\\{\tiny no actions in seq}};
+    \node[block, minimum width=2cm, right=0.6cm of in] (emb) {Token\\Embedding};
+    \node[block, minimum width=2cm, right=0.6cm of emb] (rope) {3D-RoPE\\{\tiny row, col, frame}};
+    \node[block, minimum width=2.5cm, right=0.6cm of rope, fill=mcolor!25] (blocks) {\nlayers$\times$ Transformer\\Block (512 d, \nheads H)\\{\tiny AdaLN + QK-Norm}};
+    \node[block, minimum width=2cm, right=0.6cm of blocks] (head) {Prediction\\Head};
+    \node[lbl, right=0.6cm of head] (out1) {$\hat{\mathbf{z}}_{t+1}$, $\hat{d}_{t+1}$};
+
+    \node[block, minimum width=1.6cm, fill=ccolor!15, above=0.5cm of blocks] (act) {$a_{t-K:t-1}$\\AdaLN MLP};
+
+    \draw[arr] (in) -- (emb);
+    \draw[arr] (emb) -- (rope);
+    \draw[arr] (rope) -- (blocks);
+    \draw[arr] (blocks) -- (head);
+    \draw[arr] (head) -- (out1);
+    \draw[arr] (act) -- (blocks);
+
+    \draw[-{Stealth[length=2.5mm]}, dashed, thick, insared] (head.south) -- ++(0,-0.6) -| node[below, lbl, pos=0.25, insared] {STE via \texttt{fsq\_grad\_proj}} (emb.south);
+  \end{tikzpicture}%
+  }
+  \end{center}
+
+  \vspace{0.3em}
   \begin{itemize}
-    \item $\sim$252K frames ($\sim$\naugeps{} episodes), batch 1024
-    \item \textbf{Single-group optimizer} (encoder + transformer share one AdamW group, LR $10^{-3}$, weight decay $10^{-3}$) + \textbf{single global grad clip at 10.0} (sized to the recon-dominated encoder gradient scale)
-    \item Cosine LR schedule + linear warmup, 200 epochs
-    \item TODO: here put the training curves
+    \item Actions leave the sequence (injected via AdaLN) and the target block is fused into the last context position. Sequence: $\seqlen \to 260$ ($-4$ actions, $-65$ target).
+    \item Required \textbf{QK-norm} and \textbf{gate-bias-1 init} -- otherwise 5/5 runs diverged.
+    \item Best CPC ever (0.13), but no real-game gain over V3.
   \end{itemize}
 \end{frame}
 
-\begin{frame}{FSQ-VAE: Reconstructions}
-  \begin{center}
-    \includegraphics[width=\textwidth]{fsq_reconstructions.png}
-  \end{center}
-  \begin{center}
-    \small{\textbf{55$\times$} compression}: $32{,}768 \to 594$ bits/frame
-  \end{center}
-\end{frame}
-
-% ==========================================================
-\section{Phase 2: Controller}
-% ==========================================================
-
-\begin{frame}{Controller: Architecture}
-  \textbf{MLPPolicy} ($\sim$265K params): MLP actor-critic on $\mathbf{h}_t$
+\begin{frame}{MLPPolicy on $\mathbf{h}_t$ (V4--V6)}
+  \textbf{MLPPolicy} ($\sim$265K params): 1-layer MLP actor-critic on $\mathbf{h}_t$ alone, no token grid.
 
   \vspace{0.5em}
   \begin{center}
@@ -522,7 +916,7 @@
     lbl/.style={font=\tiny, align=center},
   ]
     \node[lbl] (ht) {$\mathbf{h}_t$};
-    \node[block, right=0.6cm of ht] (lin) {Linear\\{\tiny $\to$ \hdim d}};
+    \node[block, right=0.6cm of ht] (lin) {Linear\\{\tiny $\to$ 512d}};
     \node[block, right=0.6cm of lin] (ln) {LayerNorm};
     \node[block, right=0.6cm of ln] (silu) {SiLU};
     \node[block, right=0.6cm of silu] (heads) {Actor + Critic\\{\tiny zero-init}};
@@ -538,148 +932,11 @@
   \end{center}
 
   \vspace{0.5em}
-  \begin{center}
-    \small
-    $\mathbf{h}_t \in \mathbb{R}^{\hdim}$: transformer hidden state
-  \end{center}
-\end{frame}
-
-\begin{frame}{Controller: Training}
-  \vspace{1em}
-  \begin{center}
-  \resizebox{\textwidth}{!}{%
-  \begin{tikzpicture}[
-    phase/.style={rectangle, draw, rounded corners, minimum height=2.2cm, minimum width=4.5cm, align=center, font=\small, line width=1.2pt},
-    arr/.style={-{Stealth[length=4mm]}, thick},
-    lbl/.style={font=\scriptsize, align=center},
-  ]
-    \node[phase, fill=ccolor!10, draw=ccolor!60] (bc) {
-      \textbf{Stage 1 -- BC}\\[0.4em]
-      \scriptsize Imitate expert on\\
-      \scriptsize frozen WM hidden states
-    };
-    \node[phase, fill=mcolor!10, draw=mcolor!60, right=2.5cm of bc] (ppo) {
-      \textbf{Stage 2 -- PPO}\\[0.4em]
-      \scriptsize Train in imagination\\
-      \scriptsize (WM frozen)
-    };
-
-    \draw[arr] (bc) -- node[above, lbl] {warm init} (ppo);
-  \end{tikzpicture}%
-  }
-  \end{center}
-
-  \vspace{0.5em}
-  \begin{center}
-    \small
-    Zero-shot deployment on the real game after PPO.
-  \end{center}
-\end{frame}
-
-% ==========================================================
-\section{Analysis}
-% ==========================================================
-
-\begin{frame}{What Worked}
-  \vspace{0.5em}
   \begin{itemize}
-    \item \textbf{FSQ-VAE}: sharp, 100\% utilization, no tuning
-    \item \textbf{Sobel}: filters visual noise $\to$ structural perception
-    \item \textbf{Vertical shifts}: massively reduced overfitting, physically valid
-    \item \textbf{Structured label smoothing}: narrow Gaussian on FSQ lattice distance
-    \item \textbf{AdaLN-Zero + QK-norm}: stable action conditioning -- 4 runs diverged without QK-norm
+    \item 2--5$\times$ faster PPO convergence than V3's CNNPolicy.
+    \item Smallest train/eval gap of any controller we trained.
+    \item Beats CNN on the V4--V6 latents -- but on V3 latents the CNN still wins on real game.
   \end{itemize}
-\end{frame}
-
-\begin{frame}{What Didn't Work (or Didn't Help)}
-  \vspace{0.5em}
-  \begin{itemize}
-    \item \textbf{$\beta$-VAE}: blurry, large grid search $\to$ abandoned
-    \item \textbf{Pure RL (CMA-ES)}: $\sim$12 steps (local optimum) $\to$ BC required
-    \item \textbf{MaskGIT}: degraded on 64 tokens, parallel single-step better
-    \item \textbf{CNN controller on $\mathbf{z}_t$}: duplicated work the transformer already did
-    \item \textbf{Pure-JEPA} (no pixel anchor): codebook collapse, regularizer insufficient
-  \end{itemize}
-\end{frame}
-
-% ==========================================================
-\section{Limitations}
-% ==========================================================
-
-\begin{frame}{Limitations \& Future Work}
-  \begin{itemize}
-    \item \textbf{Sample efficiency}: trained on only 2h20 of gameplay -- world models make this tractable
-    \item \textbf{Dream horizon}: dreams stay coherent for tens to hundreds of frames, then hallucinate -- repeated obstacles, impassable sections, or empty levels
-    \item \textbf{Scope}: trained on simple mechanics (portals, jump pads, orbs, standard gravity). Complex levels with noisy backgrounds and harder dynamics are the natural next step.
-  \end{itemize}
-\end{frame}
-
-% ==========================================================
-\section{References}
-% ==========================================================
-
-\begin{frame}[allowframebreaks]{References}
-  \small
-  \begin{itemize}
-    \item Ha, D. \& Schmidhuber, J. (2018). \href{https://arxiv.org/abs/1803.10122}{\textit{World Models}}. NeurIPS
-    \item Micheli, V. et al. (2023). \href{https://arxiv.org/abs/2209.00588}{\textit{Transformers are Sample-Efficient World Models}} (IRIS). ICLR
-    \item Burchi, M. \& Timofte, R. (2025). \href{https://arxiv.org/abs/2503.04416}{\textit{TWISTER: Transformer-based World Models with AC-CPC}}. ICLR
-    \item Mentzer, F. et al. (2024). \href{https://arxiv.org/abs/2309.15505}{\textit{Finite Scalar Quantization: VQ-VAE Made Simple}}. ICLR
-    \item Vali, M. et al. (2026). \href{https://arxiv.org/abs/2601.17124}{\textit{iFSQ: Improving FSQ for Image Generation}}. ICLR
-    \item Su, J. et al. (2024). \href{https://arxiv.org/abs/2104.09864}{\textit{RoFormer: Enhanced Transformer with Rotary Position Embedding}}. Neurocomputing
-    \item Hafner, D. et al. (2025). \href{https://arxiv.org/abs/2301.04104}{\textit{Mastering Diverse Control Tasks through World Models}} (DreamerV3). Nature
-    \item Maes, L. et al. (2026). \href{https://arxiv.org/abs/2603.19312}{\textit{LeWorldModel: Stable End-to-End JEPA from Pixels}}. Preprint
-    \item Peebles, W. \& Xie, S. (2023). \href{https://arxiv.org/abs/2212.09748}{\textit{Scalable Diffusion Models with Transformers}} (DiT). ICCV
-    \item Esser, P. et al. (2024). \href{https://arxiv.org/abs/2403.03206}{\textit{Scaling Rectified Flow Transformers}} (SD3). ICML
-    \item Schulman, J. et al. (2017). \href{https://arxiv.org/abs/1707.06347}{\textit{Proximal Policy Optimization Algorithms}}. Preprint
-    \item Szegedy, C. et al. (2016). \href{https://arxiv.org/abs/1512.00567}{\textit{Rethinking the Inception Architecture}}. CVPR
-    \item Lin, T.-Y. et al. (2017). \href{https://arxiv.org/abs/1708.02002}{\textit{Focal Loss for Dense Object Detection}}. ICCV
-  \end{itemize}
-\end{frame}
-
-% ==========================================================
-\appendix
-\section{Appendix}
-% ==========================================================
-
-\begin{frame}{Transformer World Model: Architecture}
-  \vspace{0.5em}
-  \begin{center}
-  \hspace*{-0.05\textwidth}%
-  \resizebox{1.1\textwidth}{!}{%
-  \begin{tikzpicture}[
-    block/.style={rectangle, draw=mcolor, fill=mcolor!10, rounded corners, minimum height=0.9cm, align=center, font=\scriptsize, line width=0.6pt},
-    arr/.style={-{Stealth[length=2.5mm]}, thick},
-    lbl/.style={font=\tiny, align=center},
-  ]
-    \node[lbl] (in) {$\mathbf{z}_{t-K:t}$, $a_{t-K:t}$\\{\tiny \seqlen{} tokens}};
-    \node[block, minimum width=2cm, right=0.6cm of in] (emb) {Token + Action\\Embedding};
-    \node[block, minimum width=2cm, right=0.6cm of emb] (rope) {3D-RoPE\\{\tiny row, col, frame}\\{\tiny block-causal}};
-    \node[block, minimum width=2.5cm, right=0.6cm of rope, fill=mcolor!25] (blocks) {\nlayers$\times$ Transformer\\Block (\hdim d, \nheads H)\\{\tiny AdaLN + QK-Norm}};
-    \node[block, minimum width=2cm, right=0.6cm of blocks] (head) {Prediction\\Head};
-    \node[lbl, right=0.6cm of head] (out1) {$\hat{\mathbf{z}}_{t+1}$, $\hat{d}_{t+1}$\\{\tiny 64 tokens + death}};
-
-    \draw[arr] (in) -- (emb);
-    \draw[arr] (emb) -- (rope);
-    \draw[arr] (rope) -- (blocks);
-    \draw[arr] (blocks) -- (head);
-    \draw[arr] (head) -- (out1);
-
-    % STE backward arrow: prediction head back through embedding into encoder
-    \draw[-{Stealth[length=2.5mm]}, dashed, thick, insared] (head.north) -- ++(0,0.8) -| node[above, lbl, pos=0.25, insared] {STE via \texttt{fsq\_grad\_proj}} (emb.north);
-
-    \node[below=0.4cm of blocks, lbl, font=\scriptsize] (ht) {$\mathbf{h}_t \in \mathbb{R}^{\hdim}$};
-    \draw[arr] (blocks.south) -- (ht);
-  \end{tikzpicture}%
-  }
-  \end{center}
-
-  \vspace{0.3em}
-  \begin{center}
-    \small
-    Parallel decode: 1 step vs \ntokens+1 autoregressive \quad\quad
-    Vocab: $|\mathcal{V}| = \vocabsize$
-  \end{center}
 \end{frame}
 
 \end{document}
