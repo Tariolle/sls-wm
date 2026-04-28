@@ -1,13 +1,16 @@
 #!/bin/bash
-# Rebuild docs/architecture_pipeline.png from docs/pipeline.tex
-# Requires: pdflatex, pdftoppm (MiKTeX), Python with Pillow
+# Rebuild pipeline figure from docs/pipeline.tex.
+# Outputs: static/images/pipeline.svg (used by site), architecture_pipeline.png (og:image fallback).
+# Requires: pdflatex, pdftocairo, pdftoppm, Python with Pillow.
 set -e
 cd "$(dirname "$0")"
 
 pdflatex -interaction=nonstopmode pipeline.tex > /dev/null || true
 [ -f pipeline.pdf ] || { echo "pdflatex failed"; exit 1; }
-pdftoppm -png -r 300 pipeline.pdf pipeline_tmp
 
+pdftocairo -svg pipeline.pdf static/images/pipeline.svg
+
+pdftoppm -png -r 300 pipeline.pdf pipeline_tmp
 python -c "
 from PIL import Image, ImageDraw
 img = Image.open('pipeline_tmp-1.png').convert('RGBA')
@@ -22,4 +25,4 @@ img.save('architecture_pipeline.png')
 "
 
 rm -f pipeline_tmp-1.png pipeline.pdf pipeline.aux pipeline.log
-echo "Done: architecture_pipeline.png"
+echo "Done: static/images/pipeline.svg, architecture_pipeline.png"

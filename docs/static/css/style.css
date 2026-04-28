@@ -135,6 +135,7 @@ section h2.section-title {
   text-align: center;
   margin: 1.2rem 0;
   overflow-x: auto;
+  font-size: 1.1em;
 }
 
 figure.centered {
@@ -143,7 +144,7 @@ figure.centered {
 }
 
 figure.centered img {
-  max-width: 100%;
+  width: 100%;
   height: auto;
 }
 

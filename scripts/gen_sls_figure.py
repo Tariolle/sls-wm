@@ -66,8 +66,8 @@ def build_sls_row(levels, target_idx, sigma=0.7, smoothing=0.1, dim_weights=None
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="paper/figures/sls_kernel.pdf")
-    parser.add_argument("--levels", type=int, nargs="+", default=[5, 5, 5, 5],
-                        help="FSQ codebook levels (default: [5,5,5,5])")
+    parser.add_argument("--levels", type=int, nargs="+", default=[8, 5, 5, 5],
+                        help="FSQ codebook levels (default: [8,5,5,5])")
     parser.add_argument("--sigma", type=float, default=0.7,
                         help="Gaussian kernel bandwidth (default: 0.7, "
                              "first-neighbour rule)")

@@ -151,7 +151,7 @@
   <div class="container-narrow">
     <h2 class="section-title">Pipeline overview</h2>
     <figure class="centered">
-      <img src="static/images/pipeline.png" alt="Vision-Model-Controller pipeline overview" />
+      <img src="static/images/pipeline.svg" alt="Vision-Model-Controller pipeline overview" />
       <figcaption>
         Vision-Model-Controller pipeline. The FSQ-VAE <strong>(V)</strong> tokenizes Sobel edge maps into a grid of discrete codes, the causal transformer <strong>(M)</strong> predicts next-frame tokens with action tokens interleaved in the sequence, and the CNN controller <strong>(C)</strong> reads the predicted token grid alongside the transformer hidden state to select actions. The action feedback loop enables autoregressive dreaming.
       </figcaption>
@@ -175,7 +175,7 @@
       The bandwidth $\sigma$ is fixed by a first-neighbour rule (immediate lattice neighbour at the kernel's half-maximum), giving a zero-calibration hyperparameter that is robust to codebook drift. Classical uniform label smoothing is the structureless limit of this construction.
     </p>
     <figure class="centered">
-      <img src="static/images/sls_kernel.png" alt="SLS kernel visualization: 2D slice and sorted distribution vs. uniform" />
+      <img src="static/images/sls_kernel.svg" alt="SLS kernel visualization: 2D slice and sorted distribution vs. uniform" />
       <figcaption>
         <strong>(a)</strong> 2D slice of SLS weights over two FSQ lattice dimensions with the remaining two fixed at the target's values; the red square marks the target token and weights decay with lattice distance.
         <strong>(b)</strong> All <em>V</em>−1 alternative tokens sorted by SLS weight (log scale) versus uniform label smoothing. SLS concentrates mass on near-miss tokens while suppressing distant ones by orders of magnitude.
