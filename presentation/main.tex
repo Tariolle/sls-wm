@@ -193,12 +193,14 @@
     \node[block, fill=ccolor!15, draw=ccolor, below=1.4cm of M3] (C3) {\textbf{C}};
 
     \node[lbl, below=0.4cm of C3] (a3) {$a_{t+2}$};
-    \node[lbl, right=0.8cm of M3] (hout) {$\mathbf{h}_{t+2}$};
+    \node[lbl, right=1cm of M3, yshift=0.2cm] (hout) {$\mathbf{h}_{t+2}$};
+    \node[lbl, right=1cm of M3, yshift=-0.2cm] (zout) {$\hat{\mathbf{z}}_{t+2}$};
 
     \draw[arr] ([yshift=0.2cm]M2.east) -- node[above, lbl] {$\mathbf{h}_{t+1}$} node[below, lbl] {$\hat{\mathbf{z}}_{t+1}$} ([yshift=0.2cm]M3.west);
     \draw[arr] (M3) -- node[left, lbl] {$\hat{\mathbf{z}}_{t+2}$} node[right, lbl] {$\mathbf{h}_{t+2}$} (C3);
     \draw[arr] (C3) -- (a3);
-    \draw[arr] (M3.east) -- (hout);
+    \draw[arr] ([yshift=0.2cm]M3.east) -- (hout);
+    \draw[arr] ([yshift=-0.2cm]M3.east) -- (zout);
 
     % Action feeds back to next M (enters at bottom 25%)
     \draw[arr, gray!50, dashed] (a1.east) -- ++(0.8,0) |- ([yshift=-0.2cm]M2.west);
@@ -562,7 +564,7 @@
   \vspace{0.4em}
   \begin{center}
     \small
-    PPO clip $0.2$, GAE $\lambda=0.95$, $\gamma=0.995$, $\sim$5K--15K iterations.\\
+    PPO clip $0.2$, GAE $\lambda=0.95$, $\gamma=0.995$, $\sim$5K iterations.\\
     Zero-shot deployment on the real game after PPO.
   \end{center}
 \end{frame}
