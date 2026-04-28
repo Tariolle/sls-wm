@@ -27,6 +27,7 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from deepdash.beta_vae import BetaVAE, beta_vae_loss
+from deepdash.wandb_utils import wandb_init, wandb_log, wandb_finish
 
 
 class FramePairDataset(Dataset):
@@ -143,7 +144,17 @@ def main():
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--compile-mode", default="default",
                         choices=["default", "reduce-overhead", "max-autotune"])
+    parser.add_argument("--wandb-project", default="deepdash")
+    parser.add_argument("--wandb-name", default=None)
+    parser.add_argument("--no-wandb", action="store_true")
     args = parser.parse_args()
+
+    wandb_init(
+        project=args.wandb_project,
+        name=args.wandb_name or f"beta-vae-b{args.beta}-z{args.latent_dim}",
+        config=vars(args),
+        enabled=not args.no_wandb,
+    )
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -242,6 +253,16 @@ def main():
             ])
             log_file.flush()
 
+            wandb_log({
+                "epoch": epoch,
+                "beta_vae/train/recon": train_recon,
+                "beta_vae/train/kl": train_kl,
+                "beta_vae/val/recon": val_recon,
+                "beta_vae/val/kl": val_kl,
+                "beta_vae/lr": lr,
+                "beta_vae/time_s": dt,
+            })
+
             if val_recon < best_val_recon:
                 best_val_recon = val_recon
                 clean_state = {k.removeprefix("_orig_mod."): v
@@ -256,6 +277,7 @@ def main():
     torch.save(clean_state, ckpt_dir / "beta_vae_final.pt")
     print(f"\nTraining complete. Best val recon: {best_val_recon:.4f}")
     print(f"Checkpoints saved to {ckpt_dir}/")
+    wandb_finish()
 
 
 if __name__ == "__main__":
