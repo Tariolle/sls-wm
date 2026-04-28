@@ -4,13 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="light only" />
-  <title>Structured Label Smoothing for Joint-Embedding Discrete World Models</title>
+  <title>Structured Label Smoothing over Finite Scalar Quantization for Discrete World Models</title>
 
-  <meta name="description" content="Structured Label Smoothing (SLS) exploits FSQ codebook lattice geometry for joint-embedding discrete world models. Trained end-to-end on Geometry Dash, deployed at 30 FPS on consumer hardware." />
+  <meta name="description" content="Structured Label Smoothing (SLS) exploits FSQ codebook lattice geometry for discrete world models. A real-time Vision-Model-Controller pipeline for Geometry Dash, with the controller trained entirely in imagination and deployed at 30 FPS on consumer hardware." />
   <meta name="author" content="Florent Tariolle" />
 
-  <meta property="og:title" content="Structured Label Smoothing for Joint-Embedding Discrete World Models" />
-  <meta property="og:description" content="A training objective that exploits the FSQ codebook lattice so near-miss predictions are treated as near-misses rather than gross errors." />
+  <meta property="og:title" content="Structured Label Smoothing over Finite Scalar Quantization for Discrete World Models" />
+  <meta property="og:description" content="A training objective that exploits the FSQ codebook lattice so near-miss predictions are treated as near-misses rather than gross errors, integrated into a real-time world-model pipeline for Geometry Dash." />
   <meta property="og:image" content="static/images/pipeline.png" />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://tariolle.github.io/sls-wm/" />
@@ -71,7 +71,7 @@
       <h1 class="publication-title">
         Structured Label Smoothing<br />
         over Finite Scalar Quantization<br />
-        for Joint-Embedding Discrete World Models
+        for Discrete World Models
       </h1>
 
       <div class="publication-authors">
@@ -90,10 +90,6 @@
         <a class="link-button" href="https://github.com/Tariolle/sls-wm" target="_blank" rel="noopener">
           <span class="icon"><i class="fab fa-github"></i></span>
           <span>Code</span>
-        </a>
-        <a class="link-button" href="#bibtex">
-          <span class="icon"><i class="fas fa-quote-left"></i></span>
-          <span>BibTeX</span>
         </a>
       </div>
 
@@ -114,13 +110,13 @@
       Discrete World Models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer, but standard cross-entropy treats every incorrect prediction as equally wrong. Finite Scalar Quantization (FSQ) makes a richer signal available by construction: each code sits on an integer coordinate lattice, so a token one step away in one dimension is a near-miss while a token at the opposite corner is a gross error.
     </p>
     <p class="abstract">
-      We introduce <em>Structured Label Smoothing</em> (SLS), which replaces the one-hot training target with a kernel over codebook coordinates, so a near-miss prediction is treated as a near-miss rather than a gross error. We study SLS under joint training of the FSQ encoder and the dynamics transformer in a single discrete latent space, with a straight-through path carrying prediction gradients back into the encoder and a light pixel-reconstruction loss retained only as an anti-collapse regularizer.
+      We introduce <em>Structured Label Smoothing</em> (SLS), which replaces the one-hot training target with a kernel over codebook coordinates, so a near-miss prediction is treated as a near-miss rather than a gross error. An isotropic kernel with bandwidth fixed by a first-neighbour rule gives a zero-calibration hyperparameter that is robust to codebook drift.
     </p>
     <p class="abstract">
-      An isotropic kernel with bandwidth fixed by a first-neighbour rule gives a zero-calibration hyperparameter that is robust to codebook drift. We evaluate on Geometry Dash, where the controller is trained entirely in imagination and deployed at 30&nbsp;FPS on the real game via screen capture.
+      We integrate SLS into a complete Vision-Model-Controller (V-M-C) pipeline for Geometry Dash. The FSQ-VAE tokenizes Sobel edge maps, a causal transformer predicts next-frame tokens, and a CNN actor-critic on the predicted token grid drives the agent. The controller is trained entirely in imagination on dreamed rollouts and deployed at 30&nbsp;FPS on the real game via screen capture.
     </p>
     <p class="tldr">
-      <strong>TL;DR.</strong> A training objective that exploits the FSQ codebook lattice so near-miss predictions are treated as near-misses rather than gross errors, studied under joint encoder + transformer training and deployed at 30&nbsp;FPS on Geometry Dash.
+      <strong>TL;DR.</strong> A training objective that exploits the FSQ codebook lattice so near-miss predictions are treated as near-misses rather than gross errors, integrated into a real-time V-M-C pipeline that runs at 30&nbsp;FPS on Geometry Dash.
     </p>
   </div>
 </section>
@@ -157,7 +153,7 @@
     <figure class="centered">
       <img src="static/images/pipeline.png" alt="Vision-Model-Controller pipeline overview" />
       <figcaption>
-        Vision-Model-Controller pipeline. The FSQ-VAE <strong>(V)</strong> tokenizes Sobel edge maps into a grid of discrete codes, the causal transformer <strong>(M)</strong> predicts next-frame tokens conditioned on actions via AdaLN, and the MLP controller <strong>(C)</strong> selects actions from the transformer's hidden state. The action feedback loop enables autoregressive dreaming.
+        Vision-Model-Controller pipeline. The FSQ-VAE <strong>(V)</strong> tokenizes Sobel edge maps into a grid of discrete codes, the causal transformer <strong>(M)</strong> predicts next-frame tokens with action tokens interleaved in the sequence, and the CNN controller <strong>(C)</strong> reads the predicted token grid alongside the transformer hidden state to select actions. The action feedback loop enables autoregressive dreaming.
       </figcaption>
     </figure>
   </div>
@@ -176,7 +172,7 @@
       $$q_{\text{SLS}}(j \mid i) \;\propto\; k\!\left(\lVert \mathbf{c}(j) - \mathbf{c}(i) \rVert\right), \qquad k(d) = e^{-d^{2}/2\sigma^{2}}.$$
     </p>
     <p>
-      The bandwidth $\sigma$ is fixed by a first-neighbour rule (immediate lattice neighbour at the kernel's half-maximum), giving a zero-calibration hyperparameter that is robust to codebook drift under joint training. Classical uniform label smoothing is the structureless limit of this construction.
+      The bandwidth $\sigma$ is fixed by a first-neighbour rule (immediate lattice neighbour at the kernel's half-maximum), giving a zero-calibration hyperparameter that is robust to codebook drift. Classical uniform label smoothing is the structureless limit of this construction.
     </p>
     <figure class="centered">
       <img src="static/images/sls_kernel.png" alt="SLS kernel visualization: 2D slice and sorted distribution vs. uniform" />
@@ -195,29 +191,13 @@
   <div class="container-narrow">
     <h2 class="section-title">Method highlights</h2>
     <ul>
-      <li><strong>Joint-embedding training.</strong> A single online FSQ encoder embeds both context and target frames into a shared discrete latent space; the transformer predicts future tokens <em>z<sub>t+1</sub></em> from past tokens <em>z<sub>≤t</sub></em> in that space, with no pixel-prediction head.</li>
-      <li><strong>Prediction-gradient routing.</strong> A learnable linear projection sits between the encoder's continuous latents and the transformer input; it contributes zero in the forward path (discrete indices still drive the transformer) but, under a straight-through estimator, carries prediction gradients back into the encoder.</li>
-      <li><strong>Anti-collapse anchor.</strong> A light pixel-reconstruction loss is retained only as an anti-collapse regularizer on the encoder. Removing it causes the joint encoder + transformer to degenerate. Finding a decoder-free discrete anti-collapse signal (a discrete counterpart to SIGReg) is open work.</li>
-      <li><strong>Zero-calibration kernel.</strong> The SLS bandwidth is set by a first-neighbour rule on the FSQ lattice, so no per-dataset sensitivity probe is needed and the hyperparameter is robust to codebook drift under joint training.</li>
+      <li><strong>FSQ tokenization for sharp dreams.</strong> An FSQ-VAE with levels [8,&nbsp;5,&nbsp;5,&nbsp;5] (1000 implicit codes) encodes Sobel edge maps into an 8×8 grid of discrete tokens. No codebook collapse, no commitment loss, 100% utilization by construction.</li>
+      <li><strong>Discrete dynamics transformer.</strong> A causal transformer (384d, 8 heads, 8 layers) predicts the next frame's tokens given a context window of past frames and actions. Actions are interleaved as tokens in the sequence; the target frame is replaced by a learnable mask embedding so the model never peeks at the ground truth. 3D-RoPE positional encoding factorises row, column, and frame indices, and block-causal attention is bidirectional within a frame block and causal across frames.</li>
+      <li><strong>Action-conditional contrastive coding.</strong> A TWISTER-style AC-CPC auxiliary loss predicts future hidden states from past states and actions in latent space, sharpening the temporal coherence of dreams without a second decoder.</li>
+      <li><strong>Zero-calibration kernel.</strong> The SLS bandwidth is set by a first-neighbour rule on the FSQ lattice, so no per-dataset sensitivity probe is needed and the hyperparameter has a single principled choice independent of codebook size.</li>
+      <li><strong>CNN actor-critic in latent space.</strong> A small CNN reads the predicted token grid alongside the transformer's hidden state and emits a jump probability and value estimate. BC pretraining on expert demonstrations warm-starts the policy, which is then fine-tuned with PPO entirely on dreamed rollouts.</li>
       <li><strong>Real-time deployment.</strong> The full V-M-C pipeline runs at a fixed 30&nbsp;FPS cadence on consumer hardware. Within each frame, pinned-memory non-blocking H2D transfers let the CPU queue GPU work without stalling on the upload, a GPU-resident token ring buffer eliminates round-trips, the encoder is wrapped in a CUDA Graph after warm-up, and the model graph is compiled with <code>torch.compile</code> in <code>reduce-overhead</code> mode.</li>
     </ul>
-  </div>
-</section>
-
-<hr class="divider" />
-
-<!-- BibTeX -->
-<section id="bibtex">
-  <div class="container-narrow">
-    <h2 class="section-title">BibTeX</h2>
-<pre class="bibtex">@misc{tariolle2026sls,
-  author        = {Tariolle, Florent},
-  title         = {Structured Label Smoothing over Finite Scalar Quantization
-                   for Joint-Embedding Discrete World Models},
-  year          = {2026},
-  howpublished  = {\url{https://tariolle.github.io/sls-wm/}},
-  note          = {Preprint}
-}</pre>
   </div>
 </section>
 

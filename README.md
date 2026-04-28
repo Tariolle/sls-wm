@@ -1,9 +1,9 @@
 # SLS-WM
-### Structured Label Smoothing for Joint-Embedding Discrete World Models
+### Structured Label Smoothing over Finite Scalar Quantization for Discrete World Models
 
 [Florent Tariolle](mailto:florent.tariolle@insa-rouen.fr)
 
-**Abstract:** Discrete World Models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer, but standard cross-entropy treats every incorrect prediction as equally wrong. Finite Scalar Quantization (FSQ) makes a richer signal available by construction: each code sits on an integer coordinate lattice, so a token one step away in one dimension is a near-miss while a token at the opposite corner is a gross error. We introduce *Structured Label Smoothing* (SLS), which replaces the one-hot training target with a kernel over codebook coordinates, so a near-miss prediction is treated as a near-miss rather than a gross error. We study SLS under joint training of the FSQ encoder and the dynamics transformer in a single discrete latent space, with a straight-through path carrying prediction gradients back into the encoder and a light pixel-reconstruction loss retained only as an anti-collapse regularizer. An isotropic kernel with bandwidth fixed by a first-neighbour rule gives a zero-calibration hyperparameter that is robust to codebook drift. We evaluate on Geometry Dash, where the controller is trained entirely in imagination and deployed at 30 FPS on the real game via screen capture.
+**Abstract:** Discrete World Models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer, but standard cross-entropy treats every incorrect prediction as equally wrong. Finite Scalar Quantization (FSQ) makes a richer signal available by construction: each code sits on an integer coordinate lattice, so a token one step away in one dimension is a near-miss while a token at the opposite corner is a gross error. We introduce *Structured Label Smoothing* (SLS), which replaces the one-hot training target with a kernel over codebook coordinates, so a near-miss prediction is treated as a near-miss rather than a gross error. An isotropic kernel with bandwidth fixed by a first-neighbour rule gives a zero-calibration hyperparameter that is robust to codebook drift. We integrate SLS into a complete Vision-Model-Controller pipeline for Geometry Dash, where the controller is trained entirely in imagination and deployed at 30 FPS on the real game via screen capture.
 
 <p align="center">
    <b>[ <a href="https://tariolle.github.io/sls-wm/static/pdfs/sls_wm.pdf">Paper Draft</a> | <a href="https://tariolle.github.io/sls-wm/">Website</a> ]</b>
@@ -22,23 +22,28 @@
 conda run -n <env> python -m pip install -r requirements.txt
 ```
 
-**Train the world model (V + M jointly):**
+**Train the FSQ-VAE (V):**
 ```bash
-python scripts/train_world_model.py --config configs/e6.10-gaussian-single-group.yaml
+python scripts/train_fsq.py
 ```
 
-**Train the controller (BC warm-start, then PPO in imagination):**
+**Train the transformer world model (M) on the frozen FSQ tokens:**
 ```bash
-python scripts/train_controller_bc.py  --config configs/e6.10-gaussian-single-group.yaml
-python scripts/train_controller_ppo.py --config configs/e6.10-gaussian-single-group.yaml
+python scripts/train_transformer.py
+```
+
+**Train the controller (C): BC warm-start, then PPO in imagination:**
+```bash
+python scripts/train_controller_bc.py
+python scripts/train_controller_ppo.py --pretrained checkpoints/controller_bc_best.pt
 ```
 
 **Deploy to the live game (screen capture, 30 FPS):**
 ```bash
-python scripts/deploy.py --config configs/e6.10-gaussian-single-group.yaml
+python scripts/deploy.py
 ```
 
-Cluster launches (SLURM, A100): `sbatch slurm/train_world_model.sl`, `sbatch slurm/train_controller.sl`.
+Cluster launches (SLURM, A100): `sbatch slurm/train_fsq.sl`, `sbatch slurm/train_transformer.sl`, `sbatch slurm/train_controller.sl`.
 
 ## Contact
 

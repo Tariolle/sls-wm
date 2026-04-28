@@ -6,6 +6,10 @@
 \PassOptionsToPackage{numbers,compress}{natbib}
 
 \usepackage[preprint]{neurips_2026}
+% Override the [preprint] notice from "Preprint." to "Draft." (pre-freeze status)
+\makeatletter
+\renewcommand{\@noticestring}{Draft.}
+\makeatother
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
@@ -43,19 +47,19 @@
 \newcommand{\headerlink}[3]{\href{#3}{\linkbutton{\ttfamily#1~#2}}}
 
 % ===== Architectural constants (change once, propagate everywhere) =====
-\newcommand{\hdim}{512}
+\newcommand{\hdim}{384}
 \newcommand{\nheads}{8}
 \newcommand{\nlayers}{8}
 \newcommand{\nctx}{4}
 \newcommand{\ntokens}{64}
-\newcommand{\vocabsize}{625}
-\newcommand{\fsqlevels}{[5, 5, 5, 5]}
+\newcommand{\vocabsize}{1000}
+\newcommand{\fsqlevels}{[8, 5, 5, 5]}
 \newcommand{\gridsize}{8 \times 8}
 \newcommand{\imgsize}{64 \times 64}
 \newcommand{\focalgamma}{2.0}
-\newcommand{\ctrlparams}{\sim\!265\text{K}}
+\newcommand{\ctrlparams}{\sim\!45\text{K}}
 
-\title{Structured Label Smoothing\\over Finite Scalar Quantization\\for Joint-Embedding Discrete World Models}
+\title{Structured Label Smoothing\\over Finite Scalar Quantization\\for Discrete World Models}
 
 \author{%
   Florent Tariolle\thanks{\normalsize Correspondence to \texttt{florent.tariolle@insa-rouen.fr}} \\
@@ -76,9 +80,8 @@
 Discrete World Models tokenize observations with a learned quantizer and predict next-frame tokens with a transformer, but standard cross-entropy treats every incorrect prediction as equally wrong.
 Finite Scalar Quantization (FSQ) makes a richer signal available by construction: each code sits on an integer coordinate lattice, so a token one step away in one dimension is a near-miss while a token at the opposite corner is a gross error.
 We introduce \emph{Structured Label Smoothing} (SLS), which replaces the one-hot training target with a kernel over codebook coordinates, so a near-miss prediction is treated as a near-miss rather than a gross error.
-We study SLS under joint training of the FSQ encoder and the dynamics transformer in a single discrete latent space, with a straight-through path carrying prediction gradients back into the encoder and a light pixel-reconstruction loss retained only as an anti-collapse regularizer.
-An isotropic kernel with bandwidth fixed by a first-neighbour rule gives a zero-calibration hyperparameter that is robust to codebook drift.
-We evaluate on Geometry Dash, where the controller is trained entirely in imagination and deployed at 30\,FPS on the real game via screen capture.
+An isotropic kernel with bandwidth fixed by a first-neighbour rule gives a zero-calibration hyperparameter that has a single principled choice independent of codebook size.
+We integrate SLS into a complete real-time Vision-Model-Controller (V-M-C) pipeline for Geometry Dash: an FSQ-VAE tokenizer, a causal transformer dynamics model with action tokens interleaved in the sequence, and a CNN actor-critic in the predicted-token-grid space, trained entirely in imagination on dreamed rollouts and deployed at 30\,FPS on the real game via screen capture.
 \end{abstract}
 
 % ===========================================================================
@@ -100,15 +103,14 @@ Classical uniform label smoothing~\citep{szegedy2016rethinking} is the structure
 This can be viewed as part of a broader shift from data-agnostic heuristics to structure derived from learned representations, analogous to how learned strided convolutions replaced fixed max-pooling for spatial downsampling~\citep{springenberg2015striving}.
 Unlike knowledge distillation, which requires a separate teacher model to produce soft targets, SLS exploits geometry already present in the FSQ codebook at no additional cost.
 
-We study SLS under a joint-training setup in which the FSQ encoder and the transformer are optimized together, so that prediction gradients shape the codebook rather than consuming a fixed tokenization.
 We evaluate SLS within a complete Vision-Model-Controller (V-M-C) pipeline for Geometry Dash, a fast-paced platformer that demands frame-accurate predictions under a 33\,ms latency budget.
-Our system consists of three components: (1) an FSQ tokenizer that encodes $\imgsize$ Sobel edge maps into $\gridsize$ grids of discrete tokens, (2) a causal transformer with Adaptive Layer Normalization (AdaLN-Zero) for action conditioning~\citep{peebles2023dit} and QK-norm for attention stability~\citep{esser2024sd3}, and (3) a lightweight MLP controller trained via PPO entirely in dreamed rollouts~\citep{schulman2017ppo}.
-The full pipeline runs in real time at 30\,FPS on consumer hardware.
+Our system consists of three components: (1) an FSQ tokenizer that encodes $\imgsize$ Sobel edge maps into $\gridsize$ grids of discrete tokens, (2) a causal transformer that interleaves action tokens with frame tokens in a single sequence and predicts the next frame's tokens via parallel decoding, and (3) a lightweight CNN actor-critic on the predicted token grid, warm-started with Behavioural Cloning and fine-tuned with PPO~\citep{schulman2017ppo} entirely in dreamed rollouts.
+The three components are trained sequentially -- each on the frozen output of the previous one -- and the full pipeline runs in real time at 30\,FPS on consumer hardware.
 
 Our contributions are:
 \begin{enumerate}
-  \item \textbf{Structured Label Smoothing (SLS)}: a training objective that exploits FSQ coordinate geometry to distribute smoothing mass according to codebook distance. We study three kernel families and adopt an isotropic bandwidth set by a first-neighbour rule, giving a zero-calibration hyperparameter that is robust to codebook drift under joint training. The formulation generalizes to any discrete latent space with a coordinate metric.
-  \item \textbf{A real-time WM system}: a complete V-M-C pipeline for Geometry Dash running at 30\,FPS, combining joint-trained FSQ tokenization with prediction-gradient feedback, AdaLN-conditioned transformers, and PPO-in-dreams.
+  \item \textbf{Structured Label Smoothing (SLS)}: a training objective that exploits FSQ coordinate geometry to distribute smoothing mass according to codebook distance. We study three kernel families and adopt an isotropic bandwidth set by a first-neighbour rule, giving a zero-calibration hyperparameter with a single principled choice independent of codebook size. The formulation generalizes to any discrete latent space with a coordinate metric.
+  \item \textbf{A real-time discrete WM system}: a complete V-M-C pipeline for Geometry Dash running at 30\,FPS, combining FSQ tokenization, a transformer with action tokens interleaved in the sequence and an action-conditional contrastive auxiliary loss~\citep{burchi2025twister}, and a CNN actor-critic trained via BC + PPO-in-dreams.
 \end{enumerate}
 
 % ===========================================================================
@@ -118,12 +120,10 @@ Our contributions are:
 
 \paragraph{Discrete WMs.}
 The Vision-Model-Controller paradigm~\citep{ha2018world} introduced encoding frames with a VAE, modeling dynamics with an RNN, and training a controller in dreamed rollouts.
-IRIS~\citep{micheli2023iris} replaced the VAE with a discrete tokenizer and an autoregressive transformer, using an alternating schedule between tokenizer and dynamics updates.
+IRIS~\citep{micheli2023iris} replaced the VAE with a discrete tokenizer and an autoregressive transformer, alternating tokenizer and dynamics updates; we follow IRIS's architectural template most closely, with a frozen FSQ tokenizer and a transformer trained on top of it.
 DreamerV3~\citep{hafner2025dreamerv3} demonstrated that categorical RSSM latents generalize across diverse domains; this approach was scaled further in~\citep{hafner2025dreamer4}.
-TWISTER~\citep{burchi2025twister} added action-conditioned contrastive predictive coding to improve temporal coherence.
-Dreamer-family models do train their encoders jointly with the dynamics model, but use categorical-VAE latents rather than FSQ.
-FSQ~\citep{mentzer2024fsq} is typically positioned as a frozen tokenizer for downstream tasks, and its coordinate-lattice structure has not been exploited at training time.
-Our work applies joint training specifically to FSQ so that prediction gradients shape a codebook whose lattice structure SLS can then exploit.
+TWISTER~\citep{burchi2025twister} added action-conditioned contrastive predictive coding to improve temporal coherence; we adopt their AC-CPC auxiliary loss.
+FSQ~\citep{mentzer2024fsq} is typically positioned as a frozen tokenizer for downstream tasks, and its coordinate-lattice structure has not been exploited at training time. SLS exploits exactly this structure on the loss side, without modifying the tokenizer or its training.
 
 \paragraph{Finite Scalar Quantization.}
 FSQ~\citep{mentzer2024fsq} replaces learned codebooks with per-dimension rounding to fixed levels, eliminating codebook collapse and commitment losses.
@@ -132,10 +132,8 @@ iFSQ~\citep{vali2026ifsq} introduces a simple modification of the FSQ bounding f
 
 \paragraph{Joint-Embedding Predictive Architectures (JEPA).}
 LeWorldModel~\citep{maes2026leworldmodel} recently demonstrated a stable end-to-end JEPA WM from pixels using continuous latents and a SIGReg anti-collapse regularizer.
-SLS-WM is joint-embedding in the architectural sense that context and target frames are encoded by a single online FSQ encoder into a shared discrete latent space, and the transformer predicts future tokens $z_{t+1}$ from past tokens $z_{\le t}$ in that space, with no pixel-prediction head.
-It departs from strict JEPA in two respects: the embedding space is discrete rather than continuous, and the predictive loss is a cross-entropy over FSQ indices rather than a distance between continuous embeddings -- SLS can be read as narrowing this gap, by replacing uniform CE with a lattice-metric-weighted CE that reflects embedding distance on the codebook.
-The pixel decoder is retained only as an anti-collapse regularizer on the encoder, via a light pixel-reconstruction loss that plays no role in the predictive loop; removing it causes the encoder to collapse under joint training.
-We attempted to replace the decoder by adapting SIGReg to the discrete factorized FSQ case via a Cramér-von-Mises test against a factorized uniform target (a marginal anti-collapse signal in the spirit of~\citep{wang2020uniformity}); in our experiments this was insufficient to prevent joint-distribution degeneracy when the prediction target comes from the online encoder, and finding a decoder-free discrete anti-collapse signal is left as open work.
+We explored a JEPA-style joint-embedding variant of our system, in which context and target frames are encoded by a single online FSQ encoder into a shared discrete latent space and prediction gradients flow back into the encoder through a straight-through path, with the pixel decoder retained only as an anti-collapse regularizer.
+This variant did not improve on the sequentially-trained baseline reported here; we summarize the negative result and the SIGReg adaptation we attempted in Section~\ref{sec:ablations}.
 
 \paragraph{Label smoothing.}
 Label smoothing~\citep{szegedy2016rethinking} proposed replacing one-hot targets with a uniform mixture to reduce overconfidence.
@@ -145,10 +143,9 @@ We instead derive the target distribution from the codebook geometry itself, req
 
 \paragraph{Adaptive conditioning.}
 FiLM~\citep{perez2018film} introduced adaptive affine conditioning via scale and shift.
-DiT~\citep{peebles2023dit} applied this as AdaLN-Zero with zero-initialized gates for stable training of diffusion transformers.
-QK-norm~\citep{esser2024sd3} (RMSNorm on queries and keys per head) was introduced to stabilize attention logits in deep AdaLN models.
+DiT~\citep{peebles2023dit} applied this as AdaLN-Zero with zero-initialized gates for stable training of diffusion transformers, and QK-norm~\citep{esser2024sd3} (RMSNorm on queries and keys per head) was introduced to stabilize attention logits in deep AdaLN models.
 LeWorldModel~\citep{maes2026leworldmodel} applied AdaLN to world-model transformers.
-We adopt AdaLN-Zero with QK-norm for action conditioning, finding that QK-norm is essential for training stability (Section~\ref{sec:adaln}).
+Our baseline keeps actions as tokens in the sequence; we treat AdaLN-Zero conditioning as an ablation (Section~\ref{sec:ablations}).
 
 % ===========================================================================
 \section{Method}
@@ -156,12 +153,13 @@ We adopt AdaLN-Zero with QK-norm for action conditioning, finding that QK-norm i
 % ===========================================================================
 
 Our system follows the Vision-Model-Controller (V-M-C) paradigm~\citep{ha2018world} (Figure~\ref{fig:pipeline}).
-We describe each component below, with Structured Label Smoothing (Section~\ref{sec:sls}) as the primary contribution, and joint training of the FSQ encoder with the transformer (Section~\ref{sec:joint}) as the setup in which SLS is studied.
+We describe each component below, with Structured Label Smoothing (Section~\ref{sec:sls}) as the primary contribution, integrated into a complete real-time pipeline.
+The three components are trained sequentially -- each on the frozen output of the previous one -- a deliberate choice motivated by the ablation results in Section~\ref{sec:ablations}.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\textwidth]{figures/pipeline.pdf}
-  \caption{Vision-Model-Controller pipeline. The FSQ-VAE (V) tokenizes Sobel edge maps into a grid of discrete codes, the causal transformer (M) predicts next-frame tokens conditioned on actions via AdaLN, and the MLP controller (C) selects actions from the transformer's hidden state. The action feedback loop enables autoregressive dreaming.}
+  \caption{Vision-Model-Controller pipeline. The FSQ-VAE (V) tokenizes Sobel edge maps into a grid of discrete codes, the causal transformer (M) predicts next-frame tokens with action tokens interleaved in the sequence, and the CNN controller (C) reads the predicted token grid alongside the transformer hidden state to select actions. The action feedback loop enables autoregressive dreaming.}
   \label{fig:pipeline}
 \end{figure}
 
@@ -173,39 +171,7 @@ We describe each component below, with Structured Label Smoothing (Section~\ref{
 We encode $\imgsize$ grayscale Sobel edge maps using an FSQ-VAE with levels $\fsqlevels$, producing $\vocabsize$ implicit codes.
 The encoder applies three stride-2 convolutional stages with residual blocks, projecting to a 4-channel latent map of size $\gridsize$.
 Each spatial position is independently quantized using the iFSQ bounding function~\citep{vali2026ifsq}, $2\sigma(1.6z) - 1$ in place of $\tanh(z)$, scaled to half-levels and rounded, yielding $\ntokens$ tokens per frame.
-The decoder mirrors the encoder with transposed convolutions and is retained during joint training as a pixel-space anchor (Section~\ref{sec:joint}).
-
-% ---------------------------------------------------------------------------
-\subsection{Joint training of FSQ and transformer}
-\label{sec:joint}
-% ---------------------------------------------------------------------------
-
-FSQ was originally introduced as a tokenizer for downstream use and is typically frozen once trained~\citep{mentzer2024fsq}.
-Under a frozen tokenizer, the cross-entropy loss only shapes the predictor; the codebook geometry is determined purely by reconstruction.
-We instead train the encoder jointly with the transformer so that prediction gradients also shape the codebook.
-
-\paragraph{Gradient routing with a straight-through estimator.}
-The transformer consumes discrete token indices via an embedding table, so prediction gradients cannot flow through rounding in the usual way.
-We insert a learnable linear projection \texttt{fsq\_grad\_proj} between the encoder's continuous latents (pre-rounding) and the transformer's input representation.
-The projection contributes zero in the forward path (the transformer still reads the discrete indices) but, under a straight-through estimator, carries the prediction gradient back into the encoder's continuous features.
-The encoder therefore receives two gradient signals: next-token prediction through the straight-through path, which shapes the codebook for the predictive task, and pixel reconstruction through the decoder, which acts as an anti-collapse regularizer (discussed below).
-
-\paragraph{Anti-collapse regularization on the encoder.}
-Prediction happens entirely in the FSQ latent space, so the decoder plays no role in the predictive loop.
-Without an external signal, however, joint training of a single online encoder with its own prediction target admits a trivial degenerate solution: the encoder maps every input to the same point and the transformer predicts that point with zero loss.
-We prevent this by keeping a light pixel-MSE reconstruction loss on the encoder, which is therefore used as an anti-collapse regularizer rather than as a predictive objective.
-Our adaptation of SIGReg~\citep{maes2026leworldmodel} to the discrete factorized FSQ case, using a Cramér-von-Mises test against a factorized uniform target, was insufficient to prevent joint-distribution degeneracy in our setting; finding a decoder-free anti-collapse signal strong enough to remove the pixel-MSE crutch is left as future work.
-
-\paragraph{Single-group optimization and global gradient clipping.}
-Under joint training the pixel-MSE and cross-entropy gradients live on different scales, but we do not separate them into different parameter groups.
-Following the joint-training recipe of~\citep{maes2026leworldmodel}, the encoder and transformer sit in a single AdamW group with a shared learning rate and weight decay, and a single global gradient-norm clip is applied across the combined parameter set.
-The clip threshold is set large enough (empirically $\sim 10\times$ the transformer gradient norm at convergence) that the reconstruction signal is preserved while residual spikes on either side are still caught.
-Separating the two into per-group clips with a tight threshold, as in our earlier iterations, consistently produced a positive train-validation gap on the same budget; single-group with a wide clip yielded smoother training curves and closes that gap.
-
-\paragraph{No encoder freeze.}
-We also tried freezing the encoder at a pre-set fraction of training (motivated by the observation that FSQ converges faster than the transformer in two-stage setups).
-In practice this removed a source of slow codebook adaptation that the transformer continued to exploit late in training, and the resulting runs did not dominate their unfrozen counterparts on any metric we tracked.
-We therefore keep the encoder unfrozen for the full schedule, and the pixel-MSE anchor stays active throughout.
+The encoder is trained on consecutive frame pairs with a pixel-MSE reconstruction loss and two regularizers in the spirit of geometric regularization: a temporal slowness term that penalizes large $\| \mathbf{z}_e^{t+1} - \mathbf{z}_e^t \|^2$ between adjacent frames, and a uniformity term that spreads pre-quantization features across the FSQ hypercube. The decoder mirrors the encoder with transposed convolutions and is discarded after training.
 
 % ---------------------------------------------------------------------------
 \subsection{Structured Label Smoothing}
@@ -242,10 +208,10 @@ Cauchy has polynomial tails and leaks meaningful mass to distant neighbours; Lap
 We take Gaussian with $\sigma = 0.7$ as the current default: thin tails ensure distant neighbours receive negligible mass ($k(2) \approx 0.02$), while the bandwidth still places meaningful mass on the immediate lattice neighbour ($k(1) \approx 0.37$, matching Laplace at $\sigma = 1$).
 
 \paragraph{Isotropic first-neighbour bandwidth.}
-Prior to joint training we calibrated per-dimension weights $\alpha_d$ from an empirical sensitivity probe: perturbing each FSQ dimension by $\pm 1$, decoding, and measuring reconstruction MSE.
-Under joint training the codebook drifts continuously, so per-dimension weights calibrated from any single snapshot go stale.
+A natural alternative is per-dimension weights $\alpha_d$ calibrated from an empirical sensitivity probe: perturbing each FSQ dimension by $\pm 1$, decoding, and measuring reconstruction MSE.
+The probe gives data-dependent weights, but ties the smoothing target to a particular trained codebook and varies across training runs.
 We instead use an isotropic kernel and fix $\sigma$ by a geometric rule: choose the bandwidth so that the immediate integer lattice neighbour sits near the kernel's half-maximum.
-This gives a zero-calibration hyperparameter and is robust to codebook drift.
+This gives a zero-calibration hyperparameter with a single principled choice, independent of the codebook size or the realized dimension scales.
 The sensitivity probe is retained as an analysis tool to characterize a learned codebook's anisotropy and cross-dimension coupling, but not as a hyperparameter source.
 
 \paragraph{Structured smooth target.}
@@ -281,37 +247,30 @@ where $p_j = \text{softmax}(\mathbf{z})_j$ and $\gamma = \focalgamma$.
 \label{sec:transformer}
 % ---------------------------------------------------------------------------
 
-The WM is a causal transformer ($\hdim$ embedding dim, $\nheads$ heads, $\nlayers$ layers) that predicts the next frame's tokens given a context of $K = \nctx$ past frames and their associated actions.
+The WM is a causal transformer ($\hdim$ embedding dim, $\nheads$ heads, $\nlayers$ layers) that predicts the next frame's tokens in parallel given a context of $K = \nctx$ past frames and their associated actions, on top of a frozen FSQ tokenizer (Section~\ref{sec:fsq}).
 
 \paragraph{Sequence construction.}
-Each frame contributes $\ntokens$ visual tokens (from the $\gridsize$ FSQ grid) plus one status token (ALIVE or DEATH), for 65 tokens per frame.
-A context window of $K + 1$ frames (including the target) produces a sequence of $(K+1) \times 65 = 325$ tokens.
-All target-frame tokens are replaced with a learnable \texttt{[MASK]} embedding to prevent information leakage.
+Each frame contributes $\ntokens$ visual tokens (from the $\gridsize$ FSQ grid) plus one status token (ALIVE or DEATH), for 65 positions per frame block.
+Actions are embedded into the same $\hdim$-dimensional space and inserted as single tokens between consecutive frame blocks, giving the input sequence
+\[
+  [f_0\, a_0\, f_1\, a_1\, \dots\, f_{K-1}\, a_{K-1}\, f^{\text{tgt}}]
+\]
+of length $K \cdot (65 + 1) + 65 = 329$.
+All target-frame positions are replaced with a learnable \texttt{[MASK]} embedding so the model never sees the ground-truth target tokens during training.
 
 \paragraph{3D Rotary Position Embedding.}
 We apply factored RoPE~\citep{su2024rope} encoding three positional axes: spatial row, spatial column, and temporal frame index.
 The head dimension is partitioned into three bands (rows, columns, time) with separate base frequencies ($\theta_\text{spatial} = 10$, $\theta_\text{time} = 10{,}000$).
-Status tokens receive the grid centre coordinates to represent whole-frame summaries.
+Status and action tokens receive the grid centre coordinates to represent whole-frame summaries.
 
 \paragraph{Block-causal attention.}
 Within each frame block, attention is bidirectional (tokens attend to all positions in the same frame).
-Across frames, attention is strictly causal: each frame attends only to current and past frames.
+Across frame and action blocks, attention is strictly causal: each block attends only to current and past blocks.
+At inference, the next frame's $\ntokens$ visual tokens are decoded in a single parallel forward pass from the masked target block.
 
-\paragraph{AdaLN-Zero action conditioning.}
-\label{sec:adaln}
-Rather than inserting action tokens into the sequence, we condition the transformer on the action history via Adaptive Layer Normalization~\citep{peebles2023dit, perez2018film}.
-The $K$-step action sequence is one-hot encoded and projected through an MLP to produce per-layer scale, shift, and gate parameters that modulate each sublayer:
-\begin{equation}
-  \text{AdaLN}(\mathbf{x}) = (1 + \mathbf{s}) \odot \text{LayerNorm}(\mathbf{x}) + \mathbf{b}, \qquad
-  \mathbf{y} = \mathbf{g} \odot f(\text{AdaLN}(\mathbf{x})),
-  \label{eq:adaln}
-\end{equation}
-where $f$ is the attention or MLP sublayer and $(\mathbf{s}, \mathbf{b}, \mathbf{g})$ are predicted from the action context.
-Unlike standard AdaLN-Zero~\citep{peebles2023dit}, which initializes gates to zero, we set gate bias $= 1$ to preserve residual flow at initialization; zero-initialized gates suppress both conditioning and learning in this setting (Section~\ref{sec:training_stability}).
-
-\paragraph{QK-norm.}
-We apply per-head RMSNorm to queries and keys before computing attention scores~\citep{esser2024sd3}.
-This prevents attention logit overflow that otherwise causes training divergence in AdaLN-conditioned models (Section~\ref{sec:training_stability}).
+\paragraph{Action-conditional contrastive auxiliary loss.}
+Following TWISTER~\citep{burchi2025twister}, we add an action-conditional contrastive predictive coding (AC-CPC) auxiliary loss: for each $k \in \{1, \dots, K\}$, an MLP head predicts the future hidden state $\mathbf{h}_{t+k}$ from the current $\mathbf{h}_t$ and the intervening actions $a_{t:t+k-1}$, scored against in-batch negatives with InfoNCE.
+The auxiliary loss enters the total objective with weight $\lambda_\text{cpc} = 0.1$.
 
 \paragraph{FSQ-neighbor token noise.}
 On context tokens, with probability 5\% per token we replace the token with a lattice neighbour obtained by perturbing a single FSQ dimension by $\pm 1$.
@@ -322,30 +281,26 @@ We kept only the FSQ-neighbor branch so that context and loss agree on what coun
 The output projection shares weights with the input embedding (weight tying).
 The total training loss is
 \begin{equation}
-  \mathcal{L} = \mathcal{L}_\text{SLS-focal} + \lambda_\text{recon} \mathcal{L}_\text{MSE},
+  \mathcal{L} = \mathcal{L}_\text{SLS-focal} + \lambda_\text{cpc}\, \mathcal{L}_\text{AC-CPC},
 \end{equation}
-applied to all parameters (encoder + transformer) throughout training.
+applied to the transformer parameters with the FSQ tokenizer frozen.
 
 % ---------------------------------------------------------------------------
 \subsection{PPO controller (Controller)}
 \label{sec:controller}
 % ---------------------------------------------------------------------------
 
-The controller is a lightweight MLP that takes the transformer's hidden state $\mathbf{h}_t$ as input and outputs a jump probability and a state value estimate.
+The controller is a lightweight CNN actor-critic, in the spirit of IRIS~\citep{micheli2023iris} and DIAMOND, that reads the predicted token grid alongside the transformer's hidden state and outputs a jump probability and a state value estimate.
 
 \paragraph{Architecture.}
-A single-hidden-layer MLP ($\hdim$ hidden units with LayerNorm and SiLU) is followed by zero-initialized linear actor and critic heads.
-Input is the transformer's hidden state $\mathbf{h}_t \in \mathbb{R}^{\hdim}$; output is a jump probability and a state value.
+Token IDs are embedded into a small learnable space and reshaped into the $\gridsize$ spatial grid; two stride-1 convolutions with max-pooling produce a 256-dimensional feature vector, which is concatenated with the transformer's hidden state $\mathbf{h}_t \in \mathbb{R}^{\hdim}$ and passed to zero-initialized linear actor and critic heads.
 The full controller has $\ctrlparams$ parameters.
-
-This design follows the TWISTER~\citep{burchi2025twister} and DreamerV3~\citep{hafner2025dreamerv3} pattern where the controller operates on the latent state produced by a trained WM.
-Our $\mathbf{h}_t$ already encodes spatial and temporal structure through $\nlayers$ transformer layers with 3D-RoPE and AdaLN action conditioning, so an additional encoder on the token grid would duplicate work done upstream.
 
 \paragraph{Training in dreams.}
 The controller is first pretrained via Behavioural Cloning (BC) on expert demonstrations, then fine-tuned with PPO~\citep{schulman2017ppo} in dreamed rollouts.
-At each iteration, 4096 rollouts of up to 25 steps are generated by autoregressively sampling from the frozen WM.
+At each iteration, several hundred rollouts of up to 45 steps are generated by autoregressively sampling from the frozen WM.
 Rollouts terminate when the predicted death probability exceeds 0.5.
-Rewards are $+1$ per survival step with a $-0.25$ penalty per jump to discourage gratuitous jumping (an idle agent dies immediately upon reaching an obstacle, while a jumping agent survives longer by spending time airborne, creating a deceptive local optimum).
+Rewards are $+1$ per survival step with a $-0.2$ penalty per jump to discourage gratuitous jumping (an idle agent dies immediately upon reaching an obstacle, while a jumping agent survives longer by spending time airborne, creating a deceptive local optimum).
 We use GAE~\citep{schulman2017ppo} with $\gamma = 0.995$, $\lambda = 0.95$, and clip ratio $\varepsilon_\text{PPO} = 0.2$.
 A Dreamer-style $\lambda$-return actor-critic is a natural replacement: on-policy imagined rollouts make PPO's off-policy clipped surrogate unnecessary.
 We leave this to future work.
@@ -367,13 +322,9 @@ Vertical shift augmentation ($\pm 2, \pm 4$ pixels) expands the dataset $5\times
 Frames are preprocessed with Sobel edge detection and resized to $\imgsize$.
 
 \paragraph{Training details.}
-The FSQ-VAE and transformer are trained jointly with AdamW using cosine annealing and warmup.
-Both subnetworks sit in a single optimizer group sharing one learning rate ($10^{-3}$) and one weight decay ($10^{-3}$), following the recipe of~\citep{maes2026leworldmodel}; earlier two-group configurations (separate encoder and transformer learning rates, larger weight decay on the transformer) produced noisier training curves and a positive train-validation gap on the same budget.
-We apply 5\% FSQ-neighbor token noise on context tokens.
-Death frames are oversampled $4\times$ via weighted sampling.
+The FSQ-VAE and the transformer are trained sequentially with AdamW using cosine annealing and warmup. The FSQ-VAE is trained for 200 epochs (LR $4\cdot 10^{-3}$, batch 32) with the slowness and uniformity regularizers weighted at $\alpha_\text{slow} = 0.1$ and $\alpha_\text{uniform} = 0.01$, after which the encoder is frozen and its tokens are cached. The transformer is then trained for 200 epochs (LR $10^{-3}$, weight decay $0.05$, dropout $0.1$, batch 256) with 5\% FSQ-neighbor token noise on context tokens, and death frames oversampled $15\times$ via weighted sampling.
 BF16 mixed-precision training is used throughout; BF16 requires no loss scaling and is numerically more stable than FP16.
-A single global gradient-norm clip at $10.0$ is applied to the combined parameter set; this value is sized to the empirical encoder gradient scale under the recon-dominated joint objective, so the pixel-MSE gradient does not crowd out the prediction side while residual spikes are still caught.
-Training runs for 200 epochs on a single NVIDIA A100 GPU; the FSQ encoder is updated throughout, jointly with the transformer (an earlier halfway-freeze schedule was explored but abandoned as it removes a source of slow codebook adaptation that remains informative to the transformer late in training).
+Training runs on a single NVIDIA A100 GPU.
 
 \paragraph{Training throughput.}
 We benchmarked \texttt{torch.compile} modes under BF16 on our joint-training workload using subprocess isolation to prevent CUDA allocator fragmentation across runs.
@@ -405,11 +356,11 @@ We evaluate on: (1) next-token prediction accuracy and cross-entropy on held-out
 
 % TODO: This entire section will be written after model freeze (deadline: May 31, 2026).
 % Expected contents:
-% - Table 1: Main results (level progress %, accuracy, Death F1) across model versions
+% - Table 1: Main results (level progress %, accuracy, Death F1) on the V3-style sequential baseline
 % - Table 2: SLS ablation (with vs without, kernel family, sigma sweep, isotropic vs per-dim)
-% - Table 3: Joint vs frozen FSQ, pixel anchor vs pure-JEPA, single-group vs two-group optimizer
-% - Table 4: Context length, action conditioning, death oversampling, BC pretraining
-% - Table 5: Baselines (random, open-loop, heuristic, BC-only, frame-prediction-free)
+% - Table 3: Architectural ablations off the V3 baseline -- joint FSQ+M training, AdaLN-Zero action conditioning, embed dim sweep, MLPPolicy on h_t alone, AC-CPC weight sweep
+% - Table 4: Context length, death oversampling, BC pretraining, jump penalty
+% - Table 5: Baselines (random, open-loop, heuristic, BC-only)
 % - Figure: dreamed rollout vs ground truth frames
 % - Figure: inference latency breakdown per component
 % - Table: per-GPU latency comparison
@@ -417,22 +368,31 @@ We evaluate on: (1) next-token prediction accuracy and cross-entropy on held-out
 \textit{Results pending model freeze and ablation experiments.}
 
 % ---------------------------------------------------------------------------
-\subsection{Training stability of AdaLN variants}
-\label{sec:training_stability}
+\subsection{Ablations and negative results}
+\label{sec:ablations}
 % ---------------------------------------------------------------------------
 
-During development of an earlier (frozen-tokenizer) version of this architecture, we ran five AdaLN configurations to identify the minimal set of stabilization techniques required.
-The specific numerical traces below are retrospective observations from that V4-era line and are reported to motivate the QK-norm choice carried into the current joint-training architecture.
+We report a set of architectural changes which, on paper, were expected to improve over the baseline of Section~\ref{sec:method}, but did not yield real-game gains in our experiments. Together they motivate the deliberately conservative system design of the current paper. Detailed per-ablation tables are pending model freeze.
 
-\begin{enumerate}
-  \item \textbf{No gates}: diverged mid-training from attention logit explosion.
-  \item \textbf{Zero-init gates}: plateaued early with overfitting; zero-initialized gates suppress residual flow, killing both conditioning and learning.
-  \item \textbf{Gate bias $= 1$}: restored learning speed but attention logits remained unbounded and the run diverged.
-  \item \textbf{Tanh bounding on modulation $+$ gate bias $= 1$}: still diverged, demonstrating that the explosion source was not in the modulation parameters.
-  \item \textbf{QK-norm $+$ gate bias $= 1$}: stable for full-length training, surpassing all previous configurations. Per-head RMSNorm on queries and keys eliminated the attention logit overflow that was the root cause.
-\end{enumerate}
+\paragraph{Joint training of FSQ and transformer.}
+We trained a JEPA-style variant in which the FSQ encoder and the transformer are optimized together in a single AdamW group, with prediction gradients routed back into the encoder through a learnable straight-through projection (\texttt{fsq\_grad\_proj}) inserted between the pre-rounding continuous latents and the transformer input.
+A light pixel-MSE loss is retained as an anti-collapse regularizer on the encoder, and a single global gradient-norm clip is applied to the combined parameter set following~\citep{maes2026leworldmodel}.
+This setup trains stably and produces lower validation cross-entropy than the sequentially-trained baseline, but the resulting FSQ codebook drifts toward a representation that is harder to act on: real-game level progress consistently dropped relative to the sequentially-trained baseline of identical capacity.
+Removing the pixel-MSE anchor (pure-JEPA) causes the encoder to collapse; our adaptation of SIGReg~\citep{maes2026leworldmodel} to the discrete factorized FSQ case, using a Cramér-von-Mises test against a factorized uniform target, was insufficient to prevent joint-distribution degeneracy when the prediction target comes from the online encoder.
+Finding a decoder-free discrete anti-collapse signal remains open work.
 
-This progression demonstrates that in AdaLN-conditioned WM transformers, attention stability (via QK-norm) is more critical than modulation bounding.
+\paragraph{AdaLN-Zero action conditioning.}
+Rather than inserting actions as tokens, we conditioned each transformer block on the action history via Adaptive Layer Normalization~\citep{peebles2023dit, perez2018film}.
+The $K$-step action sequence was projected through an MLP to per-layer scale, shift, and gate parameters modulating each sublayer.
+To stabilize training we needed both QK-norm~\citep{esser2024sd3} (RMSNorm on queries and keys per head) and gate-bias initialization to $1$ rather than DiT's standard zero: zero-initialized gates suppressed both conditioning and learning, and without QK-norm, attention logits diverged.
+Even with both fixes, the AdaLN variant matched but did not surpass the in-sequence-action baseline on real-game level progress, while adding architectural complexity. The token-in-sequence design is what we ship.
+
+\paragraph{Larger transformer ($\hdim \to 512$).}
+Scaling the embedding dimension from $\hdim = 384$ to $512$ at otherwise matched capacity improves dream-quality metrics (validation cross-entropy and AC-CPC score) but does not translate into real-game gains, with extra training time per epoch. We retain the smaller model.
+
+\paragraph{MLP controller on $\mathbf{h}_t$ alone.}
+We tested a controller that consumes only the transformer hidden state $\mathbf{h}_t$, with no CNN over the predicted token grid, motivated by the fact that $\mathbf{h}_t$ already encodes spatial and temporal structure through $\nlayers$ transformer layers with 3D-RoPE.
+This MLP variant converges 2--$5\times$ faster in PPO and has the smallest train-eval gap of any controller we trained, but the CNN-on-tokens variant from Section~\ref{sec:controller} dominates it on real-game level progress, suggesting the explicit token-grid signal carries information that is washed out in the global hidden-state summary.
 
 % ===========================================================================
 \section{Limitations}
@@ -441,18 +401,18 @@ This progression demonstrates that in AdaLN-conditioned WM transformers, attenti
 
 Our evaluation is limited to a single game (Geometry Dash) with a binary action space and deterministic level layouts.
 The generalization of SLS to environments with higher-dimensional actions, stochastic dynamics, or RGB observations remains to be validated.
-The pixel decoder is retained only as an anti-collapse regularizer on the encoder: prediction is otherwise entirely in FSQ latent space, and the decoder plays no role at inference time.
-This is a practical solution, not a principled one: finding a decoder-free discrete anti-collapse signal (our adaptation of SIGReg to the factorized-uniform case via a Cramér-von-Mises test was insufficient against joint-distribution degeneracy) is open work.
+The system is trained sequentially -- FSQ, then transformer, then controller -- which is operationally simple but forfeits the possibility of prediction gradients shaping the codebook. Our preliminary attempts at a JEPA-style joint-training variant did not produce real-game gains over this sequential baseline (Section~\ref{sec:ablations}); whether a more careful version of joint training, or a stronger decoder-free anti-collapse signal, would close this gap is open work.
 
 % ===========================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 % ===========================================================================
 
-We introduced Structured Label Smoothing, a training objective that exploits the coordinate geometry of FSQ codebooks, and studied it under a joint-training setup in which prediction gradients shape the codebook through a straight-through estimator with a pixel-reconstruction anchor.
-A kernel-family study over Gaussian, Laplace, and Cauchy families, combined with an isotropic first-neighbour bandwidth, gives a zero-calibration hyperparameter that is robust to the codebook drift induced by joint training.
-The resulting system is trained end-to-end, with a single AdamW group, a single global gradient clip, and the encoder kept active for the full schedule alongside the transformer.
-Integrated into a full V-M-C pipeline with AdaLN-conditioned transformers and PPO-in-dreams, the system runs in real time at 30\,FPS on Geometry Dash.
+We introduced Structured Label Smoothing, a training objective that exploits the coordinate geometry of FSQ codebooks.
+A kernel-family study over Gaussian, Laplace, and Cauchy families, combined with an isotropic first-neighbour bandwidth, gives a zero-calibration hyperparameter with a single principled choice independent of codebook size.
+We integrate SLS into a real-time discrete-WM system on Geometry Dash: an FSQ-VAE tokenizer, a causal transformer with action tokens interleaved in the sequence and a TWISTER-style action-conditional contrastive auxiliary loss, and a CNN actor-critic on the predicted token grid trained via BC and PPO entirely in dreamed rollouts.
+The three components are trained sequentially, and the full pipeline runs at 30\,FPS on consumer hardware.
+A set of architectural variants (joint FSQ+M training, AdaLN-Zero action conditioning, scaling to a larger transformer, an MLP controller on the hidden state) is reported as ablations: each is more elegant on paper but did not improve real-game level progress in our experiments, motivating the deliberately conservative baseline of this paper.
 SLS is in principle applicable to any model that predicts over a discrete latent space with a coordinate metric.
 A natural extension is to make the kernel bandwidth $\sigma$ learnable and jointly optimized with the WM, moving SLS from a fixed prior to a fully end-to-end objective; care must be taken to prevent degenerate solutions in which the learned targets collapse to uniform smoothing.
 
@@ -474,8 +434,9 @@ A natural extension is to make the kernel bandwidth $\sigma$ learnable and joint
 % B. Additional dreamed rollout visualizations
 % C. Per-position accuracy analysis
 % D. Inference latency breakdown
-% E. Anti-collapse loss ablations (SIGReg adaptations, CvM factorized-uniform, alternatives)
-% F. Pure-JEPA collapse analysis (joint-distribution degeneracy diagnostics)
+% E. AdaLN training-stability progression (no-gates / zero-init / gate-bias=1 / +tanh / +QK-norm)
+% F. Anti-collapse loss ablations from the joint-training variant (SIGReg adaptations, CvM factorized-uniform)
+% G. Pure-JEPA collapse analysis (joint-distribution degeneracy diagnostics)
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
