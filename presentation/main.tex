@@ -175,7 +175,7 @@
 
     \draw[arr] (h0) -- ([yshift=0.2cm]M1.west);
     \draw[arr] (z0in) -- ([yshift=-0.2cm]M1.west);
-    \draw[arr] (M1) -- node[right, lbl] {$\mathbf{h}_t$} (C1);
+    \draw[arr] (M1) -- node[left, lbl] {$\hat{\mathbf{z}}_t$} node[right, lbl] {$\mathbf{h}_t$} (C1);
     \draw[arr] (C1) -- (a1);
 
     % --- Timestep t+1 ---
@@ -185,7 +185,7 @@
     \node[lbl, below=0.4cm of C2] (a2) {$a_{t+1}$};
 
     \draw[arr] ([yshift=0.2cm]M1.east) -- node[above, lbl] {$\mathbf{h}_t$} node[below, lbl] {$\hat{\mathbf{z}}_t$} ([yshift=0.2cm]M2.west);
-    \draw[arr] (M2) -- node[right, lbl] {$\mathbf{h}_{t+1}$} (C2);
+    \draw[arr] (M2) -- node[left, lbl] {$\hat{\mathbf{z}}_{t+1}$} node[right, lbl] {$\mathbf{h}_{t+1}$} (C2);
     \draw[arr] (C2) -- (a2);
 
     % --- Timestep t+2 ---
@@ -196,7 +196,7 @@
     \node[lbl, right=0.8cm of M3] (hout) {$\mathbf{h}_{t+2}$};
 
     \draw[arr] ([yshift=0.2cm]M2.east) -- node[above, lbl] {$\mathbf{h}_{t+1}$} node[below, lbl] {$\hat{\mathbf{z}}_{t+1}$} ([yshift=0.2cm]M3.west);
-    \draw[arr] (M3) -- node[right, lbl] {$\mathbf{h}_{t+2}$} (C3);
+    \draw[arr] (M3) -- node[left, lbl] {$\hat{\mathbf{z}}_{t+2}$} node[right, lbl] {$\mathbf{h}_{t+2}$} (C3);
     \draw[arr] (C3) -- (a3);
     \draw[arr] (M3.east) -- (hout);
 
@@ -423,39 +423,6 @@
 
 \end{frame}
 
-\begin{frame}{FSQ-Structured Label Smoothing}
-  \vspace{0.5em}
-  \textbf{Problem}: standard CE assigns zero mass to every non-target token: a near-miss neighbour is penalised as harshly as a random code.
-
-  \vspace{0.5em}
-  \textbf{SLS}: replace the one-hot target with a narrow Gaussian centered on the correct code in FSQ coordinate space ($\sigma = 1.0$). Near neighbours get small positive mass; distant codes get none.
-
-  \vspace{0.5em}
-  Rewards near-misses without diluting confidence in the correct code.
-
-\end{frame}
-
-\begin{frame}{Training: FSQ-Neighbor Token Noise}
-  \vspace{1.2em}
-  \begin{columns}[T]
-    \column{0.55\textwidth}
-    Noise on context tokens during training: with probability 5\% per token, replace it by a $\pm 1$ neighbour in one FSQ dimension.
-
-    \vspace{0.5em}
-    \begin{itemize}
-      \item Visually near-identical patches (one quantization step)
-      \item Forces the transformer to treat near-miss codes as equivalent context
-      \item Matches the SLS assumption that near-miss is almost-right: consistent signal on both sides of the loss
-    \end{itemize}
-
-    \column{0.45\textwidth}
-    \vspace{-1.7em}
-    \begin{center}
-      \includegraphics[width=0.80\textwidth]{fsq_neighbors.png}
-    \end{center}
-  \end{columns}
-\end{frame}
-
 \begin{frame}{FSQ-VAE: Training Losses}
   \vspace{0.5em}
   \begin{center}
@@ -515,8 +482,41 @@
 \end{frame}
 
 % ==========================================================
-\section{Phase 2: World Model}
+\section{Phase 2: Memory}
 % ==========================================================
+
+\begin{frame}{FSQ-Structured Label Smoothing}
+  \vspace{0.5em}
+  \textbf{Problem}: standard CE assigns zero mass to every non-target token: a near-miss neighbour is penalised as harshly as a random code.
+
+  \vspace{0.5em}
+  \textbf{SLS}: replace the one-hot target with a narrow Gaussian centered on the correct code in FSQ coordinate space ($\sigma = 1.0$). Near neighbours get small positive mass; distant codes get none.
+
+  \vspace{0.5em}
+  Rewards near-misses without diluting confidence in the correct code.
+
+\end{frame}
+
+\begin{frame}{Training: FSQ-Neighbor Token Noise}
+  \vspace{1.2em}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    Noise on context tokens during training: with probability 5\% per token, replace it by a $\pm 1$ neighbour in one FSQ dimension.
+
+    \vspace{0.5em}
+    \begin{itemize}
+      \item Visually near-identical patches (one quantization step)
+      \item Forces the transformer to treat near-miss codes as equivalent context
+      \item Matches the SLS assumption that near-miss is almost-right: consistent signal on both sides of the loss
+    \end{itemize}
+
+    \column{0.45\textwidth}
+    \vspace{-1.7em}
+    \begin{center}
+      \includegraphics[width=0.80\textwidth]{fsq_neighbors.png}
+    \end{center}
+  \end{columns}
+\end{frame}
 
 \begin{frame}{Transformer: Training}
   \begin{itemize}
